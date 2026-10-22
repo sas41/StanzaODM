@@ -46,7 +46,9 @@ public sealed class RecoveryServiceTests
         var existingKeys = Directory.GetFiles(target.Keys);
         var result = await target.Service.RestoreAsync(backup, Passphrase);
         Assert.True(result.RestartRequired);
-        Assert.Equal(before, await target.SnapshotAsync());
+        var restoredStamp = (await target.Db.Accounts.AsNoTracking().SingleAsync()).SecurityStamp;
+        Assert.NotEqual(root.SecurityStamp, restoredStamp);
+        Assert.Equal(before.Replace(root.SecurityStamp, restoredStamp, StringComparison.Ordinal), await target.SnapshotAsync());
         Assert.All(existingKeys, path => Assert.True(File.Exists(path)));
         Assert.Equal(hash, (await target.Db.Accounts.AsNoTracking().SingleAsync()).PasswordHash);
         Assert.NotNull(await target.Accounts.AuthenticateAsync("root", Password));

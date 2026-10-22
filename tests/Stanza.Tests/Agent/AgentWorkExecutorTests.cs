@@ -34,6 +34,15 @@ public sealed class AgentWorkExecutorTests
     {
         using var directory = new AgentTestDirectory();
         var runner = new FakeRunner(); var request = Request();
+        var environmentFiles = new List<(string Path, string Text)>();
+        var originalResult = runner.Result;
+        runner.Result = invocation =>
+        {
+            for (var index = 0; index < invocation.Arguments.Count - 1; index++)
+                if (invocation.Arguments[index] == "--env-file")
+                    environmentFiles.Add((invocation.Arguments[index + 1], File.ReadAllText(invocation.Arguments[index + 1])));
+            return originalResult(invocation);
+        };
         var result = await Executor(directory.Path, runner).ExecuteAsync(request);
         Assert.True(result.Succeeded, result.Code);
         var process = Assert.Single(runner.Requests);
@@ -42,7 +51,14 @@ public sealed class AgentWorkExecutorTests
         Assert.Equal("true", process.Environment["COMPOSE_DISABLE_ENV_FILE"]);
         Assert.DoesNotContain("DOTNET_ROOT", process.Environment.Keys);
         Assert.Equal(request.Files[0].Content, File.ReadAllBytes(Path.Combine(process.WorkingDirectory, "compose.yaml")));
-        Assert.Equal("VALUE=deployment\n", File.ReadAllText(Path.Combine(process.WorkingDirectory, ".stanza/environment-2.env")));
+        Assert.Equal(request.EnvironmentFiles.Select(x => x.Text), environmentFiles.Select(x => x.Text));
+        Assert.All(environmentFiles, file =>
+        {
+            Assert.StartsWith(process.Environment["DOCKER_CONFIG"] + "/environment/", file.Path);
+            Assert.False(file.Path.StartsWith(process.WorkingDirectory + "/", StringComparison.Ordinal));
+            Assert.False(File.Exists(file.Path));
+        });
+        Assert.Equal("VALUE=deployment\n", File.ReadAllText(Path.Combine(process.WorkingDirectory, ".env")));
         Assert.False(Directory.Exists(process.Environment["DOCKER_CONFIG"]));
     }
 
@@ -203,14 +219,32 @@ public sealed class AgentWorkExecutorTests
     public async Task DeployRunsConfigBuildEligiblePullAndWaitInOrderWithoutRemovingVolumes()
     {
         using var directory = new AgentTestDirectory();
-        var runner = new FakeRunner { Result = request => new(0, request.Arguments.Contains("config") ?
-            "{\"services\":{\"built\":{\"build\":{\"context\":\".\"},\"image\":\"local\"},\"remote\":{\"image\":\"busybox\"}}}" : "[]", "", false, false) };
-        Assert.True((await Executor(directory.Path, runner).ExecuteAsync(Request("deploy"))).Succeeded);
-        Assert.Equal(5, runner.Requests.Count);
+        var pinnedBeforeUp = false;
+        var runner = new FakeRunner { Result = request =>
+        {
+            if (request.Arguments.Contains("up"))
+            {
+                var composeFiles = request.Arguments.Select((value, index) => (value, index)).Where(pair => pair.value == "--file")
+                    .Select(pair => request.Arguments[pair.index + 1]).ToArray();
+                Assert.Equal(2, composeFiles.Length);
+                using var overrides = JsonDocument.Parse(File.ReadAllText(composeFiles[1]));
+                foreach (var service in new[] { "built", "remote" })
+                    Assert.Equal("sha256:" + new string('a', 64), overrides.RootElement.GetProperty("services").GetProperty(service).GetProperty("image").GetString());
+                Assert.DoesNotContain("VALUE=", File.ReadAllText(composeFiles[1])); pinnedBeforeUp = true;
+            }
+            return new(0, request.Arguments.Contains("config") ?
+                "{\"services\":{\"built\":{\"build\":{\"context\":\".\"},\"image\":\"local\"},\"remote\":{\"image\":\"busybox\"}}}" :
+                request.Arguments[0] == "image" ? JsonSerializer.Serialize(new { Id = "sha256:" + new string('a', 64), Os = "linux", Architecture = "amd64", RepoDigests = Array.Empty<string>() }) :
+                request.Arguments[0] == "ps" ? "" : "[]", "", false, false);
+        }};
+        var result = await Executor(directory.Path, runner).ExecuteAsync(Request("deploy"));
+        Assert.True(result.Succeeded, result.Code); Assert.True(pinnedBeforeUp);
+        Assert.Equal(9, runner.Requests.Count);
         Assert.Contains("config", runner.Requests[0].Arguments); Assert.Contains("build", runner.Requests[1].Arguments);
         Assert.Contains("pull", runner.Requests[2].Arguments); Assert.Equal("remote", runner.Requests[2].Arguments[^1]);
         Assert.DoesNotContain("built", runner.Requests[2].Arguments);
-        Assert.Contains("--wait", runner.Requests[3].Arguments); Assert.Contains("--no-build", runner.Requests[3].Arguments);
+        var up = Assert.Single(runner.Requests, x => x.Arguments.Contains("up"));
+        Assert.Contains("--wait", up.Arguments); Assert.Contains("--no-build", up.Arguments);
         Assert.DoesNotContain(runner.Requests, x => x.Arguments.Contains("--volumes"));
     }
 
@@ -287,17 +321,14 @@ public sealed class AgentWorkExecutorTests
     [Fact]
     public async Task ImageDigestsSelectDeploymentPlatformExcludeBuildsAndReturnStructuredIdentities()
     {
-        using var directory = new AgentTestDirectory(); var arm = "sha256:" + new string('a', 64); var amd = "sha256:" + new string('b', 64);
-        var runner = new FakeRunner { Result = request => new(0,
-            request.Arguments.Contains("config") ? "{\"services\":{\"app\":{\"image\":\"registry.example/app:tag\",\"platform\":\"linux/arm64/v8\"},\"built\":{\"image\":\"local\",\"build\":{\"context\":\".\"}}}}" :
-            request.Arguments.Contains("version") ? "linux/amd64\n" :
-            JsonSerializer.Serialize(new { digest = "sha256:" + new string('c', 64), manifests = new object[] {
-                new { digest = arm, platform = new { os = "linux", architecture = "arm64", variant = "v8" } },
-                new { digest = amd, platform = new { os = "linux", architecture = "amd64" } } } }), "", false, false) };
-        var response = await Executor(directory.Path, runner).ExecuteAsync(Request("image-digests"));
-        Assert.True(response.Succeeded, response.Code); Assert.Equal(arm, response.ResolvedImages!["app"]);
+        using var directory = new AgentTestDirectory(); var runner = new Stanza.Tests.ImageProbe.ImageProbeRunner();
+        var response = await Executor(directory.Path, runner).ExecuteAsync(runner.Request());
+        Assert.True(response.Succeeded, response.Code); Assert.Equal(runner.Manifest, response.ResolvedImages!["app"]);
         Assert.DoesNotContain("built", response.ResolvedImages.Keys);
-        Assert.Single(runner.Requests, invocation => invocation.Arguments.Contains("imagetools"));
+        var observations = JsonSerializer.Deserialize<AgentImageObservation[]>(response.Output!, JsonSerializerOptions.Web)!;
+        Assert.True(observations.Single(x => x.Service == "built").LocallyBuilt);
+        Assert.Equal(runner.Remote, observations.Single(x => x.Service == "app").RemoteDigest);
+        Assert.Equal(3, runner.Requests.Count(invocation => invocation.Arguments.Contains("imagetools")));
     }
 
     [Fact]

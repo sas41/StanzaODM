@@ -58,7 +58,7 @@ public sealed class RecoveryHttpTests
         Assert.NotNull(await scope.ServiceProvider.GetRequiredService<AccountService>().AuthenticateAsync("root", RecoveryServiceTests.Password));
         using var again = Upload(backup, csrf, RecoveryServiceTests.Passphrase);
         AssertDenied(await client.PostAsync("/recovery/restore", again));
-        Assert.Equal(HttpStatusCode.Redirect, (await client.GetAsync("/setup")).StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await client.GetAsync("/setup")).StatusCode);
     }
 
     [Theory]

@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using Stanza.Core.Contracts;
+using Stanza.Agent.Logs;
 
 namespace Stanza.Agent.Terminals;
 
@@ -19,7 +20,8 @@ public sealed class DockerTerminalClient : IDisposable
             uri.Query.Length != 0 || uri.Fragment.Length != 0 || uri.AbsolutePath == "/" || endpoint.Any(char.IsControl))
             throw new IOException("Only a local Unix Docker socket supports terminals.");
         path = uri.LocalPath;
-        http = new(new SocketsHttpHandler { ConnectCallback = async (_, ct) => await ConnectAsync(ct) })
+        http = new(new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false,
+            ConnectCallback = async (_, ct) => await ConnectAsync(ct) })
         { BaseAddress = new Uri("http://docker/"), Timeout = TimeSpan.FromSeconds(15) };
     }
     private async Task<Stream> ConnectAsync(CancellationToken token)
@@ -46,12 +48,15 @@ public sealed class DockerTerminalClient : IDisposable
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, route);
         if (body is not null) request.Content = JsonContent.Create(body);
-        using var response = await http.SendAsync(request, token);
+        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
         if (!response.IsSuccessStatusCode) throw new IOException("Docker terminal API rejected the request.");
     }
     public static bool SafeId(string? id) => id is { Length: > 0 and <= 128 } && char.IsAsciiLetterOrDigit(id[0]) &&
         id.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-' or '.');
-    public async Task<string> ResolveAsync(Guid deployment, AgentExecution execution, CancellationToken token)
+    public async Task<string> ResolveAsync(Guid deployment, AgentExecution execution, CancellationToken token) =>
+        (await ResolveTargetAsync(deployment, execution, true, token)).Id;
+
+    public async Task<DockerContainerTarget> ResolveTargetAsync(Guid deployment, AgentExecution execution, bool requireRunning, CancellationToken token)
     {
         if (deployment == Guid.Empty || (execution.Service is null) == (execution.Container is null) ||
             execution.Service is not null && !SafeId(execution.Service) || execution.Container is not null && !SafeId(execution.Container))
@@ -61,20 +66,23 @@ public sealed class DockerTerminalClient : IDisposable
         if (container is null)
         {
             var filters = Uri.EscapeDataString(JsonSerializer.Serialize(new { label = new[] { "com.docker.compose.project=" + project, "com.docker.compose.service=" + execution.Service } }));
-            using var list = await JsonAsync(HttpMethod.Get, "containers/json?filters=" + filters, null, token);
-            if (list.RootElement.GetArrayLength() != 1) throw new IOException("Select exactly one running container.");
+            using var list = await JsonAsync(HttpMethod.Get, "containers/json?" + (requireRunning ? "" : "all=1&") + "filters=" + filters, null, token);
+            if (list.RootElement.GetArrayLength() != 1) throw new IOException("Select exactly one scoped container.");
             container = list.RootElement[0].GetProperty("Id").GetString();
         }
         if (!SafeId(container)) throw new IOException("Invalid Docker container identifier.");
         using var inspect = await JsonAsync(HttpMethod.Get, "containers/" + container + "/json", null, token);
         var root = inspect.RootElement;
-        if (!root.GetProperty("State").GetProperty("Running").GetBoolean() ||
+        if (requireRunning && !root.GetProperty("State").GetProperty("Running").GetBoolean() ||
             !root.GetProperty("Config").GetProperty("Labels").TryGetProperty("com.docker.compose.project", out var label) || label.GetString() != project ||
             execution.Service is not null && (!root.GetProperty("Config").GetProperty("Labels").TryGetProperty("com.docker.compose.service", out var service) || service.GetString() != execution.Service))
-            throw new IOException("Container is not a running member of this deployment.");
+            throw new IOException("Container is not an eligible member of this deployment.");
         var id = root.GetProperty("Id").GetString();
-        return SafeId(id) ? id! : throw new IOException("Invalid Docker container identifier.");
+        if (!SafeId(id)) throw new IOException("Invalid Docker container identifier.");
+        return new(id!, root.GetProperty("Config").TryGetProperty("Tty", out var tty) && tty.GetBoolean());
     }
+    public Task<DockerLogStream> OpenLogsAsync(DockerContainerTarget target, CancellationToken token) =>
+        DockerLogStream.OpenAsync(http, target, token);
     public async Task<string> CreateAsync(string container, object configuration, CancellationToken token)
     {
         if (!SafeId(container)) throw new IOException("Invalid container identifier.");
@@ -113,15 +121,19 @@ public sealed class DockerTerminalClient : IDisposable
         foreach (var line in lines.Skip(1).Where(x => x.Length != 0))
         {
             var colon = line.IndexOf(':');
-            if (colon <= 0 || !headers.TryAdd(line[..colon], line[(colon + 1)..].Trim())) throw new IOException("Invalid Docker headers.");
+            if (colon <= 0 || !line[..colon].All(c => char.IsAsciiLetterOrDigit(c) || c == '-') ||
+                line[(colon + 1)..].Any(c => char.IsControl(c) && c != '\t') ||
+                !headers.TryAdd(line[..colon], line[(colon + 1)..].Trim())) throw new IOException("Invalid Docker headers.");
         }
         if (headers.ContainsKey("Transfer-Encoding") || headers.ContainsKey("Content-Length") ||
             lines[0].Contains(" 101 ", StringComparison.Ordinal) &&
             (!headers.TryGetValue("Upgrade", out var upgrade) || !upgrade.Equals("tcp", StringComparison.OrdinalIgnoreCase) ||
              !headers.TryGetValue("Connection", out var connection) || !connection.Split(',').Any(x => x.Trim().Equals("Upgrade", StringComparison.OrdinalIgnoreCase))) ||
             lines[0].Contains(" 200 ", StringComparison.Ordinal) &&
-            (!headers.TryGetValue("Content-Type", out var type) || !type.StartsWith("application/vnd.docker.raw-stream", StringComparison.OrdinalIgnoreCase)))
+            (!headers.TryGetValue("Content-Type", out var type) || !type.Split(';')[0].Trim().Equals("application/vnd.docker.raw-stream", StringComparison.OrdinalIgnoreCase)))
             throw new IOException("Docker did not return a raw upgraded stream.");
     }
     public void Dispose() => http.Dispose();
 }
+
+public sealed record DockerContainerTarget(string Id, bool Tty);

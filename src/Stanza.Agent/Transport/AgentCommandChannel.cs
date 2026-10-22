@@ -20,6 +20,9 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
     IContainerRuntime? runtime = null, IOptions<DockerRuntimeOptions>? dockerOptions = null,
     IOptions<HostExecutionOptions>? hostOptions = null) : IAgentCommandChannel
 {
+    // Wire JSON is never embedded in HTML. Avoid expanding '+' in bounded base64 terminal payloads.
+    private static readonly JsonSerializerOptions TerminalJson = new(JsonSerializerDefaults.Web)
+    { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     public async Task RunAsync(AgentIdentity identity, CancellationToken token)
     {
         using var socket = new ClientWebSocket();
@@ -35,20 +38,26 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
         var terminalManager = terminals ?? new AgentTerminalManager();
         async Task SendAsync(AgentWireMessage message)
         {
-            var bytes = JsonSerializer.SerializeToUtf8Bytes(message, JsonSerializerOptions.Web);
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(message, message.Type.StartsWith("terminal.", StringComparison.Ordinal) ? TerminalJson : JsonSerializerOptions.Web);
             if (bytes.Length > 32 * 1024 * 1024) throw new IOException("Agent frame exceeds the limit.");
-            await send.WaitAsync(lifetime.Token);
-            try { await socket.SendAsync(bytes, WebSocketMessageType.Text, true, lifetime.Token); }
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(15));
+            await send.WaitAsync(timeout.Token);
+            try { await socket.SendAsync(bytes, WebSocketMessageType.Text, true, timeout.Token); }
             finally { send.Release(); }
         }
         async Task ExecuteAsync(AgentWorkRequest request)
         {
+            async Task Report(Guid id, string stage) => await SendAsync(new("work.progress", id, Data: stage));
+            var reporter = executor as IReportingAgentWorkExecutor;
+            if (reporter is not null) reporter.Progress += Report;
             try
             {
                 var response = await executor.ExecuteAsync(request, lifetime.Token);
                 await SendAsync(new("work.response", response.Id, Response: response));
             }
             catch (Exception) { lifetime.Cancel(); socket.Abort(); }
+            finally { if (reporter is not null) reporter.Progress -= Report; }
         }
         try
         {
@@ -127,7 +136,12 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
             stream.Write(buffer, 0, part.Count);
             if (part.EndOfMessage) break;
         }
-        return JsonSerializer.Deserialize<AgentWireMessage>(stream.GetBuffer().AsSpan(0, (int)stream.Length), JsonSerializerOptions.Web)
+        var message = JsonSerializer.Deserialize<AgentWireMessage>(stream.GetBuffer().AsSpan(0, (int)stream.Length), JsonSerializerOptions.Web)
             ?? throw new IOException("Invalid Agent message.");
+        if (message.Type is not { Length: > 0 and <= 64 }) throw new IOException("Invalid Agent message type.");
+        if (message.Type.StartsWith("terminal.", StringComparison.Ordinal) && (stream.Length > 96 * 1024 || message.Response is not null ||
+            message.Type != "terminal.open" && message.Request is not null || message.Type is "terminal.open" or "terminal.close" && message.Data is not null))
+            throw new IOException("Invalid terminal frame.");
+        return message;
     }
 }

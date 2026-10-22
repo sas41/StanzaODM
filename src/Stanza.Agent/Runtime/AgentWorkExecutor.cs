@@ -19,12 +19,19 @@ public sealed class HostExecutionOptions
 
 /// <summary>Executes immutable, authenticated operation snapshots. Outputs are sensitive; diagnostics are codes only.</summary>
 public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptions> options,
-    IOptions<DockerRuntimeOptions> dockerOptions, IOptions<HostExecutionOptions> hostOptions) : IAgentWorkExecutor
+    IOptions<DockerRuntimeOptions> dockerOptions, IOptions<HostExecutionOptions> hostOptions) : IAgentWorkExecutor, IReportingAgentWorkExecutor
 {
+    public event Func<Guid, string, Task>? Progress;
+    private async Task ReportAsync(Guid id, string stage)
+    {
+        if (Progress is not { } progress) return;
+        foreach (Func<Guid, string, Task> handler in progress.GetInvocationList())
+            try { await handler(id, stage); } catch (Exception) { /* Diagnostics never change the result of workload execution. */ }
+    }
     private readonly SemaphoreSlim execution = new(1, 1);
     private sealed record Ledger(string Hash, AgentWorkResponse? Response);
     private sealed class WorkFailure(string code) : Exception { public string Code { get; } = code; }
-    private static readonly HashSet<string> Operations = ["validate", "build", "pull", "deploy", "start", "stop", "restart", "remove", "status", "logs", "container-exec", "host-exec", "git-branches", "registry-check", "image-digests"];
+    private static readonly HashSet<string> Operations = ["validate", "environment-preview", "build", "pull", "deploy", "start", "stop", "restart", "remove", "status", "logs", "container-exec", "host-exec", "git-branches", "registry-check", "image-digests"];
 
     public async Task<AgentWorkResponse> ExecuteAsync(AgentWorkRequest request, CancellationToken token = default)
     {
@@ -35,6 +42,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         var started = false;
         var resultProduced = false;
         var resolvedSources = new Dictionary<string, string>(StringComparer.Ordinal);
+        var resolvedImages = new Dictionary<string, string>(StringComparer.Ordinal);
         FileStream? processLease = null;
         try
         {
@@ -73,6 +81,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             await WriteLedgerAsync(ledgerPath, new(hash, null), false, token);
             FlushDirectory(root);
             started = true;
+            await ReportAsync(request.Id, "Validating");
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(policy.TimeoutSeconds));
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, timeout.Token);
             var workspaces = PrivateStorage.EnsureDirectory(Path.Combine(root, "operation-workspaces"));
@@ -92,9 +101,10 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
                 ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_LFS_SKIP_SMUDGE"] = "1"
             };
             await PrepareCredentialsAsync(request, secretDirectory, linked.Token);
-            await MaterializeAsync(request, directory, linked.Token);
-            var context = new WorkContext(request, policy, directory, secretDirectory, environment, linked.Token);
-            await PrepareSourcesAsync(context, resolvedSources);
+            await ReportAsync(request.Id, "Preparing");
+            await MaterializeAsync(request, directory, secretDirectory, linked.Token);
+            var context = new WorkContext(request, policy, directory, secretDirectory, environment, resolvedImages, linked.Token);
+            if (!ControlsExisting(request.Operation)) await PrepareSourcesAsync(context, resolvedSources);
             var output = await RunOperationAsync(context);
             if (output?.Length > policy.MaximumOutputCharacters) throw new WorkFailure("runtime_output_limit");
             resultProduced = true;
@@ -102,19 +112,19 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             Directory.Delete(secretDirectory, true);
             secretDirectory = null;
             var result = new AgentWorkResponse(request.Id, true, "succeeded", output, resolvedSources,
-                request.Operation == "image-digests" && output is not null ? JsonSerializer.Deserialize<Dictionary<string, string>>(output) : null);
+                resolvedImages.Count == 0 ? null : resolvedImages);
             await WriteLedgerAsync(ledgerPath, new(hash, result), true, CancellationToken.None);
             return result;
         }
         catch (Exception ex) when (ex is WorkFailure or ArgumentException or IOException or UnauthorizedAccessException or
-            JsonException or OperationCanceledException or PlatformNotSupportedException)
+            JsonException or OperationCanceledException or PlatformNotSupportedException or KeyNotFoundException or InvalidOperationException)
         {
             var code = resultProduced ? "uncertain" : ex switch
             {
                 WorkFailure failure => failure.Code,
                 OperationCanceledException => "uncertain",
                 ArgumentException => "invalid_snapshot",
-                JsonException => "invalid_runtime_response",
+                JsonException or KeyNotFoundException or InvalidOperationException => "invalid_runtime_response",
                 _ => "runtime_unavailable"
             };
             var result = new AgentWorkResponse(request.Id, false, code, ResolvedSources: resolvedSources);
@@ -202,7 +212,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     private static extern int Close(int handle);
 
     private sealed record WorkContext(AgentWorkRequest Request, AgentRuntimePolicy Policy, string Directory,
-        string Secrets, Dictionary<string, string> Environment, CancellationToken Token);
+        string Secrets, Dictionary<string, string> Environment, Dictionary<string, string> ResolvedImages, CancellationToken Token);
 
     public static string SnapshotPath(string root, string relative)
     {
@@ -216,9 +226,13 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         return path;
     }
 
-    private static async Task MaterializeAsync(AgentWorkRequest request, string directory, CancellationToken token)
+    private static async Task MaterializeAsync(AgentWorkRequest request, string directory, string secrets, CancellationToken token)
     {
         if (OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
+        var readableDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute;
+        // The enclosing operation-workspaces directory remains private. A bind-mounted
+        // workspace itself must be traversable by non-root application container users.
+        File.SetUnixFileMode(directory, readableDirectory);
         if (request.Files.Count > 10000 || request.EnvironmentFiles.Count > 3 ||
             request.Files.Sum(x => (long)x.Content.Length) > 24 * 1024 * 1024 ||
             request.EnvironmentFiles.Sum(x => (long)x.Text.Length) > 3 * 1024 * 1024)
@@ -251,12 +265,16 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         foreach (var file in request.Files)
         {
             var path = SnapshotPath(directory, file.Path);
-            if (file.IsDirectory) { PrivateStorage.EnsureDirectory(path); continue; }
+            if (file.IsDirectory) { PrivateStorage.EnsureDirectory(path); File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute); continue; }
             PrivateStorage.EnsureDirectory(Path.GetDirectoryName(path)!);
+            for (var parent = Path.GetDirectoryName(path); parent is not null && (parent == directory || parent.StartsWith(directory + "/", StringComparison.Ordinal)); parent = Path.GetDirectoryName(parent))
+                File.SetUnixFileMode(parent, readableDirectory);
             await File.WriteAllBytesAsync(path, file.Content, token);
-            File.SetUnixFileMode(path, PrivateStorage.FileMode);
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
         }
-        var internalDirectory = PrivateStorage.EnsureDirectory(Path.Combine(directory, ".stanza"));
+        // Interpolation secrets are outside every Docker build context, never accidentally
+        // baked into an image by an ordinary COPY . instruction.
+        var internalDirectory = PrivateStorage.EnsureDirectory(Path.Combine(secrets, "environment"));
         // Explicit --env-file arguments disable implicit interpolation loading, but users may
         // legitimately reference their authored deployment .env through a service env_file.
         if (request.EnvironmentFiles.Count == 3)
@@ -315,7 +333,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
                     x.StartsWith(source.Destination + "/", StringComparison.OrdinalIgnoreCase) ||
                     source.Destination.StartsWith(x + "/", StringComparison.OrdinalIgnoreCase)) ||
                 context.Request.Files.Any(x => x.Path.StartsWith(source.Destination + "/", StringComparison.OrdinalIgnoreCase) ||
-                    source.Destination.StartsWith(x.Path + "/", StringComparison.OrdinalIgnoreCase) || x.Path.Equals(source.Destination, StringComparison.OrdinalIgnoreCase)))
+                    (!x.IsDirectory && source.Destination.StartsWith(x.Path + "/", StringComparison.OrdinalIgnoreCase)) || x.Path.Equals(source.Destination, StringComparison.OrdinalIgnoreCase)))
                 throw new WorkFailure("source_collision");
             destinations.Add(source.Destination);
             PrivateStorage.EnsureDirectory(destination);
@@ -327,6 +345,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             await GitAsync(context, source, destination, ["checkout", "--quiet", "--detach", commit]);
             if (File.Exists(Path.Combine(destination, ".gitmodules"))) throw new WorkFailure("git_submodules_unsupported");
             ValidateCheckout(destination);
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(destination, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
             resolved[source.Destination] = commit;
         }
     }
@@ -370,7 +389,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         if (result.TimedOut) throw new WorkFailure("uncertain");
         if (result.OutputLimitExceeded) throw new WorkFailure("runtime_output_limit");
         if (result.ExitCode != 0) throw new WorkFailure(failure);
-        return result.StandardOutput;
+        return context.Request.Operation == "logs" && arguments.FirstOrDefault() == "logs" ? result.StandardOutput + result.StandardError : result.StandardOutput;
     }
 
     private Task<string> DockerAsync(WorkContext context, IReadOnlyList<string> arguments) =>
@@ -384,7 +403,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         if (compose.Length != 1) throw new WorkFailure("compose_file_required");
         List<string> arguments = ["compose", "--ansi", "never", "--project-directory", context.Directory,
             "--project-name", "stanza-" + context.Request.DeploymentId.ToString("N")];
-        for (var i = 0; i < 3; i++) arguments.AddRange(["--env-file", Path.Combine(context.Directory, ".stanza", $"environment-{i}.env")]);
+        for (var i = 0; i < 3; i++) arguments.AddRange(["--env-file", Path.Combine(context.Secrets, "environment", $"environment-{i}.env")]);
         arguments.AddRange(["--file", Path.Combine(context.Directory, compose[0])]);
         return arguments;
     }
@@ -392,6 +411,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     private async Task<string?> RunOperationAsync(WorkContext context)
     {
         var request = context.Request;
+        if (ControlsExisting(request.Operation)) return await ExistingContainersAsync(context);
         if (request.Operation == "git-branches")
         {
             if (request.Sources is not { Count: 1 }) throw new WorkFailure("git_source_required");
@@ -412,6 +432,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         if (request.Operation == "host-exec") return await HostExecAsync(context);
         if (request.Operation == "container-exec") return await ContainerExecAsync(context);
         var prefix = ComposeArguments(context);
+        if (request.Operation == "environment-preview") return await DockerAsync(context, [.. prefix, "config", "--environment"]);
         // Compose, not an ad-hoc YAML parser, decides interpolation, services and eligible build/image operations.
         var configOutput = await DockerAsync(context, [.. prefix, "config", "--format", "json"]);
         using var config = JsonDocument.Parse(configOutput);
@@ -421,44 +442,78 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         if (request.Operation == "validate") return null;
         if (request.Operation == "image-digests")
         {
-            var images = new Dictionary<string, string>();
+            var observations = new List<AgentImageObservation>();
             var runtimePlatform = (await DockerAsync(context, ["version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"])).Trim();
             foreach (var service in services.EnumerateObject())
             {
-                if (service.Value.TryGetProperty("build", out _) || !service.Value.TryGetProperty("image", out var image)) continue;
-                var platform = (service.Value.TryGetProperty("platform", out var configuredPlatform)
-                    ? configuredPlatform.GetString() ?? runtimePlatform : runtimePlatform).Split('/');
-                if (platform.Length is < 2 or > 3 || platform.Any(string.IsNullOrWhiteSpace)) throw new WorkFailure("invalid_runtime_platform");
-                var reference = image.GetString();
-                if (string.IsNullOrWhiteSpace(reference) || reference.StartsWith('-')) throw new WorkFailure("invalid_image");
-                // buildx resolves the appropriate manifest list without pulling/running user workloads.
-                var raw = await DockerAsync(context, ["buildx", "imagetools", "inspect", "--format", "{{json .Manifest}}", "--", reference]);
-                using var manifest = JsonDocument.Parse(raw);
-                var descriptor = manifest.RootElement;
-                if (descriptor.TryGetProperty("manifests", out var manifests) && manifests.ValueKind == JsonValueKind.Array)
+                var platform = ServicePlatform(service.Value, runtimePlatform);
+                var reference = service.Value.TryGetProperty("image", out var image) ? image.GetString() ?? "" : "";
+                if (service.Value.TryGetProperty("build", out _))
                 {
-                    var matches = manifests.EnumerateArray().Where(item => item.TryGetProperty("platform", out var p) &&
-                        p.TryGetProperty("os", out var os) && os.GetString() == platform[0] &&
-                        p.TryGetProperty("architecture", out var arch) && arch.GetString() == platform[1] &&
-                        (platform.Length != 3 || p.TryGetProperty("variant", out var variant) && variant.GetString() == platform[2])).ToArray();
-                    if (matches.Length != 1) throw new WorkFailure("image_platform_unavailable");
-                    descriptor = matches[0];
+                    // A build image tag is not an explicit registry update source. Include an
+                    // excluded observation so selecting this service never fabricates equality.
+                    observations.Add(new(service.Name, reference, platform, null, "", LocallyBuilt: true));
+                    continue;
                 }
-                if (!descriptor.TryGetProperty("digest", out var digest) || digest.GetString() is not { } value ||
-                    !value.StartsWith("sha256:", StringComparison.Ordinal) || value.Length != 71 || !value[7..].All(Uri.IsHexDigit)) throw new WorkFailure("invalid_image_digest");
-                images[service.Name] = value;
+                ValidateImageReference(reference);
+                var remote = await RemoteImageAsync(context, reference, platform);
+                var installed = await InstalledImageAsync(context, service.Name, remote.Platform);
+                var current = installed is null ? null : await InstalledConfigDigestAsync(context, installed.Value, reference, remote.Platform);
+                observations.Add(new(service.Name, reference, remote.Platform, current, remote.ConfigDigest));
+                context.ResolvedImages[service.Name] = remote.ManifestDigest;
             }
-            return JsonSerializer.Serialize(images);
+            return JsonSerializer.Serialize(observations, JsonSerializerOptions.Web);
         }
         if (request.Operation == "deploy")
         {
+            await ReportAsync(request.Id, "Building");
             if (services.EnumerateObject().Any(s => s.Value.TryGetProperty("build", out _)))
                 await DockerAsync(context, [.. prefix, "build"]);
             var eligible = services.EnumerateObject().Where(s => s.Value.TryGetProperty("image", out _) && !s.Value.TryGetProperty("build", out _))
                 .Select(s => s.Name).ToArray();
+            await ReportAsync(request.Id, "Pulling");
             if (eligible.Length > 0) await DockerAsync(context, [.. prefix, "pull", "--", .. eligible]);
+            // Freeze image IDs after build/pull, using an internal override rather than modifying
+            // authored Compose. A concurrent tag movement cannot alter the subsequent up.
+            var pinned = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var service in services.EnumerateObject())
+            {
+                if (!service.Value.TryGetProperty("image", out var image)) continue;
+                var reference = image.GetString() ?? ""; ValidateImageReference(reference);
+                var local = await LocalImageAsync(context, reference, service.Value.TryGetProperty("platform", out var configured) ? configured.GetString() : null);
+                var id = Digest(local.GetProperty("Id")); pinned[service.Name] = id;
+                RecordAppliedImage(context, service.Name, reference, local);
+                if (!service.Value.TryGetProperty("build", out _))
+                {
+                    var localPlatform = local.GetProperty("Os").GetString() + "/" + local.GetProperty("Architecture").GetString();
+                    if (local.TryGetProperty("Variant", out var variant) && variant.GetString() is { Length: > 0 } value) localPlatform += "/" + value;
+                    // Resolve config metadata before up. After up, only local inspection is needed;
+                    // a registry outage cannot turn a verified deployment into a metadata-only failure.
+                    context.ResolvedImages[service.Name + ":config"] = await InstalledConfigDigestAsync(context, local, reference, ServicePlatform(service.Value, localPlatform));
+                }
+            }
+            if (pinned.Count > 0)
+            {
+                var path = Path.Combine(context.Secrets, "pinned-images.json");
+                var overrides = pinned.ToDictionary(p => p.Key, p => new { image = p.Value }, StringComparer.Ordinal);
+                await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new { services = overrides }), context.Token);
+                if (OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
+                File.SetUnixFileMode(path, PrivateStorage.FileMode);
+                prefix.AddRange(["--file", path]);
+            }
             // Compose waits for running/healthy states; global operation timeout bounds the entire sequence.
+            await ReportAsync(request.Id, "Applying");
             await DockerAsync(context, [.. prefix, "up", "--detach", "--no-build", "--pull", "never", "--wait", "--wait-timeout", context.Policy.TimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)]);
+            await ReportAsync(request.Id, "Checking");
+            foreach (var service in services.EnumerateObject())
+            {
+                var installed = await InstalledImageAsync(context, service.Name, service.Value.TryGetProperty("platform", out var configured) ? configured.GetString() : null);
+                if (installed is null) continue; // Profile-disabled/zero-replica services need not have a container.
+                var actual = Digest(installed.Value.GetProperty("Id"));
+                if (pinned.TryGetValue(service.Name, out var expected) && actual != expected) throw new WorkFailure("deployed_image_changed");
+                var reference = service.Value.TryGetProperty("image", out var image) ? image.GetString() ?? "" : "";
+                RecordAppliedImage(context, service.Name, reference, installed.Value);
+            }
             return await DockerAsync(context, [.. prefix, "ps", "--all", "--format", "json"]);
         }
         string[] operation = request.Operation switch
@@ -472,6 +527,198 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         };
         var result = await DockerAsync(context, [.. prefix, .. operation]);
         return request.Operation is "logs" or "status" ? result : null;
+    }
+
+    private static bool ControlsExisting(string kind) => kind is "start" or "stop" or "restart" or "remove" or "status" or "logs";
+
+    private async Task<string> ExistingContainersAsync(WorkContext context)
+    {
+        var project = "stanza-" + context.Request.DeploymentId.ToString("N");
+        var list = await DockerAsync(context, ["ps", "--all", "--filter", "label=com.docker.compose.project=" + project, "--format", "{{.ID}}"]);
+        var ids = list.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (ids.Any(id => id.Length is < 12 or > 64 || !id.All(Uri.IsHexDigit))) throw new WorkFailure("invalid_container_response");
+        foreach (var id in ids)
+        {
+            using var inspect = JsonDocument.Parse(await DockerAsync(context, ["inspect", id]));
+            var container = inspect.RootElement[0];
+            if (!container.GetProperty("Config").GetProperty("Labels").TryGetProperty("com.docker.compose.project", out var label) || label.GetString() != project) throw new WorkFailure("container_scope_mismatch");
+        }
+        if (context.Request.Operation == "logs")
+        {
+            var output = new StringBuilder();
+            foreach (var id in ids)
+            {
+                output.AppendLine("[" + id + "]");
+                output.AppendLine(await DockerAsync(context, ["logs", "--timestamps", "--tail", "200", id]));
+                if (output.Length > context.Policy.MaximumOutputCharacters) throw new WorkFailure("runtime_output_limit");
+            }
+            return output.ToString();
+        }
+        if (context.Request.Operation == "status")
+        {
+            var observations = new List<object>();
+            foreach (var id in ids)
+            {
+                using var inspect = JsonDocument.Parse(await DockerAsync(context, ["inspect", id]));
+                var container = inspect.RootElement[0];
+                if (!container.GetProperty("Config").GetProperty("Labels").TryGetProperty("com.docker.compose.project", out var label) || label.GetString() != project) throw new WorkFailure("container_scope_mismatch");
+                var state = container.GetProperty("State");
+                observations.Add(new { ID = id, State = state.GetProperty("Status").GetString(), Health = state.TryGetProperty("Health", out var health) ? health.GetProperty("Status").GetString() : "", Image = container.GetProperty("Image").GetString() });
+            }
+            return JsonSerializer.Serialize(observations);
+        }
+        if (ids.Length == 0) return "[]";
+        if (context.Request.Operation == "remove") await DockerAsync(context, ["rm", "--force", .. ids]);
+        else await DockerAsync(context, [context.Request.Operation, .. ids]);
+        return "[]";
+    }
+
+    private sealed record RemoteImage(string ManifestDigest, string ConfigDigest, string Platform);
+
+    private static bool IsDigest(string? value) => value is { Length: 71 } && value.StartsWith("sha256:", StringComparison.Ordinal)
+        && value[7..].All(c => char.IsAsciiDigit(c) || c is >= 'a' and <= 'f');
+    private static string Digest(JsonElement element) => element.ValueKind == JsonValueKind.String && IsDigest(element.GetString())
+        ? element.GetString()! : throw new WorkFailure("invalid_image_digest");
+
+    private static void ValidateImageReference(string reference)
+    {
+        if (reference.Length is < 1 or > 1024 || reference.StartsWith('-') || reference.Contains("://", StringComparison.Ordinal)
+            || reference.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not '.' and not '_' and not '-' and not '/' and not ':' and not '@')
+            || reference.Contains('@') && !IsDigest(reference[(reference.LastIndexOf('@') + 1)..]))
+            throw new WorkFailure("invalid_image");
+    }
+
+    private static string ServicePlatform(JsonElement service, string runtime)
+    {
+        var platform = service.TryGetProperty("platform", out var configured) ? configured.GetString() ?? runtime : runtime;
+        var parts = platform.Split('/');
+        if (parts.Length is < 2 or > 3 || parts.Any(p => p.Length is < 1 or > 32 || p.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not '_' and not '.' and not '-')))
+            throw new WorkFailure("invalid_runtime_platform");
+        return platform;
+    }
+
+    private async Task<RemoteImage> RemoteImageAsync(WorkContext context, string reference, string platform)
+    {
+        var target = platform.Split('/');
+        var descriptorText = await DockerAsync(context, ["buildx", "imagetools", "inspect", "--format", "{{json .Manifest}}", "--", reference]);
+        using var document = JsonDocument.Parse(descriptorText);
+        var descriptor = document.RootElement;
+        if (descriptor.TryGetProperty("manifests", out var manifests))
+        {
+            if (manifests.ValueKind != JsonValueKind.Array) throw new WorkFailure("invalid_image_manifest");
+            var matches = manifests.EnumerateArray().Where(item => item.TryGetProperty("platform", out var p) &&
+                p.TryGetProperty("os", out var os) && os.GetString() == target[0] &&
+                p.TryGetProperty("architecture", out var arch) && arch.GetString() == target[1] &&
+                (target.Length != 3 || p.TryGetProperty("variant", out var variant) && variant.GetString() == target[2])).ToArray();
+            // Never pick the first architecture/variant from a multi-platform image.
+            if (matches.Length != 1) throw new WorkFailure("image_platform_unavailable");
+            descriptor = matches[0];
+            if (target.Length == 2 && descriptor.GetProperty("platform").TryGetProperty("variant", out var selectedVariant)
+                && selectedVariant.GetString() is { Length: > 0 } variant)
+                platform += "/" + variant;
+        }
+        var manifestDigest = Digest(descriptor.GetProperty("digest"));
+        var pinnedReference = reference.Split('@')[0] + "@" + manifestDigest;
+        // A container's .Image is the config digest, not a registry index/manifest digest.
+        // Query the selected immutable platform manifest and compare its config descriptor.
+        var raw = await DockerAsync(context, ["buildx", "imagetools", "inspect", "--raw", "--", pinnedReference]);
+        using var manifest = JsonDocument.Parse(raw);
+        if (!manifest.RootElement.TryGetProperty("config", out var configuration) || !configuration.TryGetProperty("digest", out var configDigest))
+            throw new WorkFailure("invalid_image_manifest");
+        var identity = Digest(configDigest);
+        var configText = await DockerAsync(context, ["buildx", "imagetools", "inspect", "--format", "{{json .Image}}", "--", pinnedReference]);
+        using var remoteConfig = JsonDocument.Parse(configText);
+        ValidateImagePlatform(remoteConfig.RootElement, platform);
+        return new(manifestDigest, identity, platform);
+    }
+
+    private static void ValidateImagePlatform(JsonElement image, string platform)
+    {
+        var target = platform.Split('/');
+        static string? Field(JsonElement value, string upper, string lower) =>
+            value.TryGetProperty(upper, out var property) || value.TryGetProperty(lower, out property) ? property.GetString() : null;
+        if (Field(image, "Os", "os") != target[0] || Field(image, "Architecture", "architecture") != target[1]
+            || target.Length == 3 && Field(image, "Variant", "variant") != target[2]) throw new WorkFailure("image_platform_mismatch");
+    }
+
+    private async Task<JsonElement> LocalImageAsync(WorkContext context, string reference, string? platform = null)
+    {
+        var text = await DockerAsync(context, platform is null ? ["image", "inspect", "--format", "{{json .}}", "--", reference]
+            : ["image", "inspect", "--platform", platform, "--format", "{{json .}}", "--", reference]);
+        using var document = JsonDocument.Parse(text);
+        if (document.RootElement.ValueKind != JsonValueKind.Object || !document.RootElement.TryGetProperty("Id", out var id))
+            throw new WorkFailure("invalid_installed_image");
+        Digest(id); return document.RootElement.Clone();
+    }
+
+    private async Task<JsonElement?> InstalledImageAsync(WorkContext context, string service, string? platform = null)
+    {
+        if (!WorkspacePolicy.IsIdentifier(service)) throw new WorkFailure("invalid_service");
+        var project = "stanza-" + context.Request.DeploymentId.ToString("N");
+        var text = await DockerAsync(context, ["ps", "--all", "--quiet", "--filter", "label=com.docker.compose.project=" + project,
+            "--filter", "label=com.docker.compose.service=" + service, "--filter", "label=com.docker.compose.oneoff=False"]);
+        var ids = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (ids.Length > 100 || ids.Any(id => id.Length is < 12 or > 64 || !id.All(Uri.IsHexDigit))) throw new WorkFailure("invalid_container");
+        string? current = null;
+        foreach (var id in ids)
+        {
+            var inspection = await DockerAsync(context, ["inspect", "--type", "container", "--format", "{{json .}}", "--", id]);
+            using var container = JsonDocument.Parse(inspection);
+            var root = container.RootElement;
+            if (!root.TryGetProperty("Config", out var config) || !config.TryGetProperty("Labels", out var labels)
+                || !labels.TryGetProperty("com.docker.compose.project", out var owner) || owner.GetString() != project
+                || !labels.TryGetProperty("com.docker.compose.service", out var target) || target.GetString() != service
+                || labels.TryGetProperty("com.docker.compose.oneoff", out var oneoff) && oneoff.GetString()?.Equals("true", StringComparison.OrdinalIgnoreCase) == true)
+                throw new WorkFailure("container_scope_denied");
+            var digest = Digest(root.GetProperty("Image"));
+            if (current is not null && current != digest) throw new WorkFailure("installed_image_ambiguous");
+            current = digest;
+        }
+        return current is null ? null : await LocalImageAsync(context, current, platform);
+    }
+
+    private async Task<string> InstalledConfigDigestAsync(WorkContext context, JsonElement image, string reference, string platform)
+    {
+        ValidateImagePlatform(image, platform);
+        var id = Digest(image.GetProperty("Id"));
+        // Classic Docker IDs are config digests. The containerd image store may instead expose
+        // a manifest/index ID, explicitly identified by Descriptor. Resolve only that immutable
+        // installed descriptor, never the mutable local/remote tag, to get its config identity.
+        if (image.TryGetProperty("Descriptor", out var descriptor) && descriptor.ValueKind == JsonValueKind.Object
+            && descriptor.TryGetProperty("digest", out var digest))
+        {
+            ValidateImageReference(reference);
+            var installedDigest = Digest(digest);
+            var installed = await RemoteImageAsync(context, reference.Split('@')[0] + "@" + installedDigest, platform);
+            if (id != installedDigest && id != installed.ConfigDigest) throw new WorkFailure("installed_image_identity_mismatch");
+            return installed.ConfigDigest;
+        }
+        return id;
+    }
+
+    private static void RecordAppliedImage(WorkContext context, string service, string reference, JsonElement image)
+    {
+        var id = Digest(image.GetProperty("Id"));
+        context.ResolvedImages[service + ":image-id"] = id;
+        var hasDescriptor = image.TryGetProperty("Descriptor", out var descriptor) && descriptor.ValueKind == JsonValueKind.Object
+            && descriptor.TryGetProperty("digest", out var digest) && IsDigest(digest.GetString());
+        if (!hasDescriptor) context.ResolvedImages[service + ":config"] = id;
+        else if (descriptor.TryGetProperty("mediaType", out var mediaType) && mediaType.GetString()?.Contains("manifest", StringComparison.Ordinal) == true
+            && !mediaType.GetString()!.Contains("manifest.list", StringComparison.Ordinal)) context.ResolvedImages[service] = Digest(descriptor.GetProperty("digest"));
+        if (!image.TryGetProperty("RepoDigests", out var repoDigests) || repoDigests.ValueKind != JsonValueKind.Array) return;
+        static string Repository(string value)
+        {
+            var repository = value.Split('@')[0];
+            var colon = repository.LastIndexOf(':');
+            if (colon > repository.LastIndexOf('/')) repository = repository[..colon];
+            if (repository.StartsWith("docker.io/", StringComparison.Ordinal)) repository = repository[10..];
+            if (repository.StartsWith("library/", StringComparison.Ordinal)) repository = repository[8..];
+            return repository;
+        }
+        var matches = repoDigests.EnumerateArray().Where(v => v.ValueKind == JsonValueKind.String).Select(v => v.GetString()!)
+            .Where(v => v.Contains('@') && Repository(v) == Repository(reference) && IsDigest(v[(v.LastIndexOf('@') + 1)..]))
+            .Select(v => v[(v.LastIndexOf('@') + 1)..]).Distinct(StringComparer.Ordinal).ToArray();
+        if (matches.Length == 1 && !context.ResolvedImages.ContainsKey(service)) context.ResolvedImages[service] = matches[0];
     }
 
     private static void ValidateComposePaths(string workspace, JsonElement configuration, JsonElement services)

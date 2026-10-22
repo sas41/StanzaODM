@@ -1,8 +1,9 @@
 @model Stanza.ControlPlane.Operations.OperationDetail
 @{ ViewData["Title"] = "Operation"; }
-<h1>@Model.Summary.Kind</h1><p><code>@Model.Summary.Id</code> · <strong>@Model.Summary.State</strong> · @Model.Summary.Code</p>
+<section data-operation-id="@Model.Summary.Id"><h1>@Model.Summary.Kind</h1><p><code>@Model.Summary.Id</code> · <strong data-operation-state>@Model.Summary.State</strong> · <span data-operation-code>@Model.Summary.Code</span></p>
 <p>Agent: @Model.Summary.AgentId · Deployment: @Model.Summary.DeploymentId · Trigger: @Model.Summary.Trigger</p>
-@if (!Stanza.ControlPlane.Operations.OperationService.Terminal(Model.Summary.State)) { <form method="post" asp-action="Cancel" asp-route-id="@Model.Summary.Id"><button class="button" type="submit">Request cancellation</button></form><p class="field-help">Cancellation cannot undo side effects already performed. Reload to inspect the latest persisted result.</p> }
+@if (!Stanza.ControlPlane.Operations.OperationService.Terminal(Model.Summary.State)) { <form method="post" asp-action="Cancel" asp-route-id="@Model.Summary.Id"><button class="button" type="submit">Request cancellation</button></form><p class="field-help">Cancellation cannot undo side effects already performed. Persisted state updates arrive over the authenticated live connection.</p> }
 @if (Model.Summary.State == "Unknown") { <div class="notice warning">Execution may have taken place. Inspect current runtime status before explicitly acknowledging this outcome. This operation will never be retried automatically.</div><form method="post" asp-action="Reconcile" asp-route-id="@Model.Summary.Id"><label><input type="checkbox" name="acknowledged" value="true" required /> I inspected a fresh successful status operation and acknowledge the uncertainty.</label><button class="button" type="submit">Acknowledge inspected outcome</button></form> }
-@if (Model.Output is not null) { <section class="panel"><h2>Sensitive operation output</h2><pre>@Model.Output</pre></section> }
+<section class="panel"><h2>Authorized operation output</h2><pre data-operation-output hidden="@(Model.Output is null)">@Model.Output</pre></section>
 <a href="/operations">← Operations</a>
+</section><script src="~/js/operations.js" defer asp-append-version="true"></script>

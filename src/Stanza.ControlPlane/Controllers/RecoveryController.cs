@@ -4,11 +4,12 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Stanza.ControlPlane.Models;
 using Stanza.ControlPlane.Recovery;
+using Stanza.ControlPlane.Configuration;
 
 namespace Stanza.ControlPlane.Controllers;
 
 [Route("recovery")]
-public sealed class RecoveryController(RecoveryService recovery) : Controller
+public sealed class RecoveryController(RecoveryService recovery, InstanceMaintenance? maintenance = null, IHostApplicationLifetime? lifetime = null) : Controller
 {
     private Guid ActorId => Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : Guid.Empty;
 
@@ -53,9 +54,18 @@ public sealed class RecoveryController(RecoveryService recovery) : Controller
             using var stream = new BoundedRecoveryStream(RecoveryService.MaximumArchiveBytes);
             await model.Archive!.CopyToAsync(stream, token);
             await recovery.RestoreAsync(stream.ToArray(), model.Passphrase, token);
+            if (maintenance?.RestartRequired == true) ViewData["RestartTicket"] = maintenance.IssueRestartTicket();
             return View("Index", new RecoveryModel { Restored = true });
         }
         catch (RecoveryOperationException error) { ModelState.AddModelError("", error.Message); return CleanView(model); }
+    }
+
+    [HttpPost("restart"), AllowAnonymous, ValidateAntiForgeryToken, EnableRateLimiting("authentication"), RequestSizeLimit(16 * 1024)]
+    public IActionResult Restart(string ticket)
+    {
+        if (maintenance is null || lifetime is null || !maintenance.ConsumeRestartTicket(ticket)) return Forbid();
+        Response.OnCompleted(() => { lifetime.StopApplication(); return Task.CompletedTask; });
+        return Content("Restart requested. Docker's restart policy will start the Control Plane again. Sign in after it is ready.");
     }
 
     private IActionResult CleanView(RecoveryModel model)

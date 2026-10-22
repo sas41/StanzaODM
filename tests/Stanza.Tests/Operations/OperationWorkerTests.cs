@@ -137,7 +137,8 @@ public sealed class OperationWorkerTests
     public async Task Same_deployment_is_serialized_while_different_deployments_can_run_in_parallel()
     {
         await using var h = await OperationTestHarness.CreateAsync();
-        var other = await h.AddDeploymentAsync();
+        var otherAgent = await h.AddAgentAsync();
+        var other = await h.AddDeploymentAsync(agent: otherAgent);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         h.Dispatcher.Handler = async (_, request, token) => { await release.Task.WaitAsync(token); return new(request.Id, true, "ok"); };
         var first = await h.EnqueueAsync(); h.Clock.Advance(TimeSpan.FromSeconds(1));
@@ -277,7 +278,7 @@ public sealed class OperationWorkerTests
         await h.InScope(async services =>
         {
             var runtime = await services.GetRequiredService<StanzaDbContext>().Set<DeploymentRuntimeEntity>().AsNoTracking().SingleAsync();
-            Assert.Equal(h.Deployment, runtime.DeploymentId); Assert.Equal(h.Agent, runtime.AgentId); Assert.Equal(1, runtime.Revision);
+            Assert.Equal(h.Deployment, runtime.DeploymentId); Assert.Equal(h.Agent, runtime.AgentId); Assert.Equal(0, runtime.Revision);
             Assert.Equal("stopped", runtime.DesiredState); Assert.Equal(h.Clock.GetUtcNow().ToUnixTimeSeconds(), runtime.ObservedAt); return true;
         });
     }

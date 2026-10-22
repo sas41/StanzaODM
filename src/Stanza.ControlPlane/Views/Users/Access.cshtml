@@ -1,7 +1,7 @@
 @model AccountAccessModel
 @{ ViewData["Title"] = "Effective permissions"; }
 <span class="eyebrow">EFFECTIVE ACCESS</span><h1>@Model.Account.Username</h1><p class="muted">@Model.Access.Explanation</p>
-<p class="field-help">These are policy decisions, not a list of available features. Agent and instance settings screens still require an administrator; execution and automation features are not enabled yet.</p>
+<p class="field-help">Each action and target is checked on the server. Security/account administration remains restricted by account type; operational grants never grant administrative account status.</p>
 <section class="panel"><h2>Direct grants</h2>
 @foreach (var grant in Model.Access.DirectGrants)
 {

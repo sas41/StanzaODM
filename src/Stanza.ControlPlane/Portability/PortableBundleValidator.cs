@@ -38,6 +38,13 @@ public static class PortableBundleValidator
 
     public static void Validate(PortableBundle b)
     {
+        try { ValidateCore(b); }
+        catch (Exception error) when (error is ArgumentException or FormatException or NullReferenceException)
+        { throw new PortabilityException("Invalid portable bundle paths, source collisions, text, references, or file limits."); }
+    }
+
+    private static void ValidateCore(PortableBundle b)
+    {
         if (b.Version != 1) throw new PortabilityException("Unsupported bundle version; expected version 1.");
         if (b.Deployments is null || b.Agents is null || b.Sections is null || b.Deployments.Count > 100 || b.Agents.Count > 100 || b.Sections.Count > 32)
             throw new PortabilityException("Bundle collection limits exceeded.");

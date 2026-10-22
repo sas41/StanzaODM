@@ -6,7 +6,7 @@ RUN dotnet publish src/Stanza.Agent/Stanza.Agent.csproj -c Release --no-self-con
 FROM docker:29-cli AS docker-tools
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client util-linux && rm -rf /var/lib/apt/lists/*
 COPY --from=docker-tools /usr/local/bin/docker /usr/bin/docker
 COPY --from=docker-tools /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 COPY --from=docker-tools /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/local/libexec/docker/cli-plugins/docker-buildx

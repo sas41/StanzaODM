@@ -20,5 +20,5 @@ public sealed class DeploymentEditorAdapters(StanzaDbContext db, OperationalPoli
         return sources.Select(x => new GitSourceWorkspace(x.Id, x.Destination)).ToArray();
     }
     public async Task<long?> GetDeployedRevisionAsync(Guid deploymentId, CancellationToken ct = default) =>
-        await db.Set<DeploymentRuntimeEntity>().AsNoTracking().Where(x => x.DeploymentId == deploymentId).Select(x => (long?)x.Revision).SingleOrDefaultAsync(ct);
+        await db.Set<DeploymentRuntimeEntity>().AsNoTracking().Where(x => x.DeploymentId == deploymentId && x.Revision > 0).Select(x => (long?)x.Revision).SingleOrDefaultAsync(ct);
 }

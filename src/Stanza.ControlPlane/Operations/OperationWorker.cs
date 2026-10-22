@@ -27,7 +27,9 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
                 var now = clock.GetUtcNow().ToUnixTimeSeconds();
                 await db.Set<OperationEntity>().Where(x => (x.State == "Running" || x.State == "CancellationRequested") && x.LeaseUntil < now)
                     .ExecuteUpdateAsync(update => update.SetProperty(x => x.State, "Unknown").SetProperty(x => x.Code, "worker_interrupted").SetProperty(x => x.CompletedAt, now), stoppingToken);
-                var candidates = await db.Set<OperationEntity>().AsNoTracking().Where(x => x.State == "Queued")
+                var queue = db.Set<OperationEntity>().AsNoTracking().Where(x => x.State == "Queued");
+                if (dispatcher is IAgentConnectionCatalog catalog) { var connected = catalog.ConnectedAgentIds; queue = queue.Where(x => connected.Contains(x.AgentId)); }
+                var candidates = await queue
                     .OrderBy(x => x.CreatedAt).Take(100).ToListAsync(stoppingToken);
                 foreach (var candidate in candidates)
                 {
@@ -58,6 +60,7 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
         await SecurityWriteGuard.LockAsync(db, ct);
         var row = await db.Set<OperationEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id && x.State == "Queued", ct);
         if (row is null) return false;
+        if (await db.Set<OperationEntity>().AnyAsync(x => x.AgentId == row.AgentId && (x.State == "Running" || x.State == "CancellationRequested"), ct)) return false;
         if (row.DeploymentId is { } deployment && await db.Set<OperationEntity>().AnyAsync(x => x.DeploymentId == deployment && (x.State == "Running" || x.State == "CancellationRequested"), ct)) return false;
         if (row.DeploymentId is { } uncertainDeployment && row.Kind is not ("status" or "logs") && await db.Set<OperationEntity>().AnyAsync(x => x.DeploymentId == uncertainDeployment && x.State == "Unknown", ct)) return false;
         var changed = await db.Set<OperationEntity>().Where(x => x.Id == id && x.State == "Queued").ExecuteUpdateAsync(update => update
@@ -76,7 +79,22 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
         string state;
         string code;
         string? responseText = null;
+        string? appliedMetadata = null;
         var dispatched = false;
+        async Task Progress(Guid operationId, string stage)
+        {
+            if (operationId != id) return;
+            try
+            {
+                await using var updateScope = scopes.CreateAsyncScope();
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await updateScope.ServiceProvider.GetRequiredService<StanzaDbContext>().Set<OperationEntity>().Where(x => x.Id == id && x.WorkerId == workerId && x.State == "Running")
+                    .ExecuteUpdateAsync(update => update.SetProperty(x => x.Stage, stage), timeout.Token);
+            }
+            catch (Exception) { /* Durable execution is independent of best-effort progress reporting. */ }
+        }
+        var reporter = dispatcher as IAgentWorkProgressSource;
+        if (reporter is not null) reporter.Progress += Progress;
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var monitor = MonitorCancellationAsync(id, cancel, stoppingToken);
         try
@@ -86,29 +104,34 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
             cancel.CancelAfter(TimeSpan.FromSeconds((request.Policy?.TimeoutSeconds ?? 300) + 15));
             dispatched = true;
             var response = await dispatcher.DispatchAsync(row.AgentId, request, cancel.Token);
-            state = response.Code == "uncertain" ? "Unknown" : response.Succeeded ? "Succeeded" : response.Code == "cancelled" ? "Cancelled" : "Failed";
+            state = response.Code == "agent_busy" ? "Queued" : response.Code == "uncertain" ? "Unknown" : response.Succeeded ? "Succeeded" : response.Code == "cancelled" ? "Cancelled" : "Failed";
             code = response.Code.Length <= 100 && response.Code.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-' or '.') ? response.Code : "agent_result";
             responseText = operations.ProtectResponse(id, response);
+            appliedMetadata = operations.ProtectResponse(id, response with { Output = null });
             if (response.Succeeded && row.DeploymentId is { } deployment && row.Kind is "deploy" or "start" or "stop" or "remove" or "restart" or "status")
             {
                 var runtime = await db.Set<DeploymentRuntimeEntity>().SingleOrDefaultAsync(x => x.DeploymentId == deployment, stoppingToken);
                 if (runtime is null) { runtime = new() { DeploymentId = deployment }; db.Set<DeploymentRuntimeEntity>().Add(runtime); }
-                runtime.AgentId = row.AgentId; runtime.Revision = row.Revision;
-                if (row.Kind != "status") runtime.DesiredState = row.Kind is "stop" or "remove" ? "stopped" : "running";
-                runtime.ObservedState = row.Kind == "status" ? Observe(response.Output) : runtime.DesiredState;
-                runtime.ObservedAt = clock.GetUtcNow().ToUnixTimeSeconds();
-                await db.SaveChangesAsync(stoppingToken);
+                if (row.Kind == "deploy" || runtime.AgentId == Guid.Empty || runtime.AgentId == row.AgentId)
+                {
+                    runtime.AgentId = row.AgentId;
+                    if (row.Kind == "deploy") runtime.Revision = row.Revision;
+                    if (row.Kind != "status") runtime.DesiredState = row.Kind is "stop" or "remove" ? "stopped" : "running";
+                    runtime.ObservedState = row.Kind is "status" or "deploy" && response.Output is not null ? Observe(response.Output) : runtime.DesiredState;
+                    runtime.ObservedAt = clock.GetUtcNow().ToUnixTimeSeconds();
+                    await db.SaveChangesAsync(stoppingToken);
+                }
             }
         }
         catch (OperationException) { state = "Failed"; code = "authorization_or_snapshot_invalid"; }
         catch (Exception) { state = dispatched ? "Unknown" : "Failed"; code = dispatched ? "execution_outcome_uncertain" : "preparation_failed"; }
-        finally { await cancel.CancelAsync(); try { await monitor; } catch (OperationCanceledException) { } }
+        finally { if (reporter is not null) reporter.Progress -= Progress; await cancel.CancelAsync(); try { await monitor; } catch (OperationCanceledException) { } }
         // Use a separate bounded token to persist uncertainty even during host shutdown.
         using var persist = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         await db.Set<OperationEntity>().Where(x => x.Id == id && x.WorkerId == workerId && (x.State == "Running" || x.State == "CancellationRequested"))
             .ExecuteUpdateAsync(update => update.SetProperty(x => x.State, state).SetProperty(x => x.Code, code)
-                .SetProperty(x => x.ProtectedResponse, responseText).SetProperty(x => x.CompletedAt, clock.GetUtcNow().ToUnixTimeSeconds()), persist.Token);
-        await services.GetRequiredService<AuditService>().WriteAsync(row.ActorId, "operation.finished", id.ToString(), state + ":" + code, persist.Token);
+                .SetProperty(x => x.ProtectedResponse, responseText).SetProperty(x => x.ProtectedAppliedMetadata, appliedMetadata).SetProperty(x => x.CompletedAt, state == "Queued" ? null : (long?)clock.GetUtcNow().ToUnixTimeSeconds()), persist.Token);
+        await services.GetRequiredService<AuditService>().WriteAsync(row.ActorId, state == "Queued" ? "operation.deferred" : "operation.finished", id.ToString(), state + ":" + code, persist.Token);
     }
     private async Task MonitorCancellationAsync(Guid id, CancellationTokenSource cancel, CancellationToken stoppingToken)
     {

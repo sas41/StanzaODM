@@ -9,3 +9,13 @@ public interface IAgentCommandDispatcher
 }
 
 public sealed class AgentUnavailableException(string message = "The Agent is offline or unavailable.") : Exception(message);
+
+public interface IAgentWorkProgressSource
+{
+    event Func<Guid, string, Task>? Progress;
+}
+
+public interface IAgentConnectionCatalog
+{
+    IReadOnlyList<Guid> ConnectedAgentIds { get; }
+}

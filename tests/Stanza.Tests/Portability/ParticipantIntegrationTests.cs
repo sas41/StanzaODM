@@ -5,6 +5,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Stanza.ControlPlane.Agents;
 using Stanza.ControlPlane.Automation;
+using Stanza.ControlPlane.Audit;
 using Stanza.ControlPlane.Configuration;
 using Stanza.ControlPlane.Deployments;
 using Stanza.ControlPlane.Persistence;
@@ -40,8 +41,14 @@ public sealed class ParticipantIntegrationTests
             new Dictionary<string, string> { ["account:source-admin"] = "destination-admin" });
         var preview = await destination.Portability.PreviewAsync(destination.Root, export, mapping);
         Assert.True(preview.CanApply, string.Join("; ", preview.Conflicts));
+        Assert.Equal(7, preview.Sections.Count);
+        Assert.Equal(destination.Agent, Assert.Single(preview.AgentMappings).Value);
+        Assert.Equal("destination-admin", preview.ResourceMappings["account:source-admin"]);
         var result = await destination.Portability.ApplyAsync(destination.Root, preview.Id, preview.Fingerprint, true);
         Assert.Equal("complete", result.State);
+        Assert.Equal(7, result.CompletedSections.Count);
+        Assert.Contains(result.CreatedResources.Keys, key => key.StartsWith("credential-reference-", StringComparison.Ordinal));
+        Assert.Contains(result.CreatedResources.Keys, key => key.StartsWith("action-reference-", StringComparison.Ordinal));
         var deployment = Assert.Single(result.CreatedDeployments);
         var draft = await destination.Drafts.ReadAsync(destination.Root, deployment);
         Assert.Equal(1, draft.ViewedRevision); // Entire workspace is one atomic initial revision.
@@ -85,6 +92,11 @@ public sealed class ParticipantIntegrationTests
         Assert.Empty(await destination.Db.Set<EnrollmentTokenEntity>().ToListAsync());
         Assert.Empty(await destination.Db.Set<AutomationRun>().ToListAsync());
         Assert.Empty(await destination.Db.Set<Stanza.ControlPlane.Operations.OperationEntity>().ToListAsync());
+        var audit = await source.Db.Set<AuditEvent>().AsNoTracking().ToListAsync();
+        Assert.Contains(audit, e => e.Action == "configuration.export.credential" && e.Resource == seeded.Credential.ToString());
+        var auditText = JsonSerializer.Serialize(audit);
+        Assert.DoesNotContain("git-password-secret", auditText); Assert.DoesNotContain("global-secret", auditText);
+        Assert.DoesNotContain(seeded.WebhookSecret, auditText);
     }
 
     [Fact]
@@ -117,6 +129,50 @@ public sealed class ParticipantIntegrationTests
         deployment = deployment with { Files = [new("build/file", "text", "text", null)], SourceDestinations = ["build"] };
         await Assert.ThrowsAsync<DeploymentDraftException>(() => instance.Store.CreateAsync(instance.Root, deployment, "Bad source collision", null, CancellationToken.None));
         Assert.Empty(await instance.Db.Set<DeploymentDraftEntity>().ToListAsync());
+    }
+
+    [Fact]
+    public async Task Atomic_workspace_creation_enforces_current_editor_limits_before_its_single_commit()
+    {
+        await using var x = await Instance.Create("root");
+        var limited = new DeploymentDraftService(x.Db, new EphemeralDataProtectionProvider(), x.Accounts, x.Access, TimeProvider.System, new TightLimits());
+        var store = new PortableDraftStore(limited, x.Access);
+        var deployment = new PortableDeployment("deployment", "Limited", null, "services: {}\n", "",
+            [new("one", "text", "", null), new("two", "text", "", null)]);
+        await Assert.ThrowsAsync<DeploymentDraftException>(() => store.CreateAsync(x.Root, deployment, "Limited", null, CancellationToken.None));
+        deployment = deployment with { Files = [new("binary", "binary", null, Convert.ToBase64String(new byte[33]))] };
+        await Assert.ThrowsAsync<DeploymentDraftException>(() => store.CreateAsync(x.Root, deployment, "Limited", null, CancellationToken.None));
+        Assert.Empty(await x.Db.Set<DeploymentDraftEntity>().ToListAsync());
+        Assert.Empty(await x.Db.Set<DeploymentDraftRevisionEntity>().ToListAsync());
+    }
+
+    [Fact]
+    public async Task Failed_initial_revision_insert_rolls_back_workspace_metadata_and_security_guard_in_one_transaction()
+    {
+        await using var x = await Instance.Create("root");
+        var before = await x.Db.Database.SqlQueryRaw<long>("SELECT \"Revision\" AS \"Value\" FROM \"SecurityGuard\" WHERE \"Id\" = 1").SingleAsync();
+        await x.Db.Database.ExecuteSqlRawAsync("CREATE TRIGGER RejectPortableRevision BEFORE INSERT ON DeploymentDraftRevisions BEGIN SELECT RAISE(ABORT, 'test revision failure'); END;");
+        var deployment = new PortableDeployment("deployment", "Rollback", null, "services: {}\n", "SECRET=not-persisted\n", [new("file", "text", "exact\r\n", null)]);
+        await Assert.ThrowsAsync<DbUpdateException>(() => x.Store.CreateAsync(x.Root, deployment, "Rollback", null, CancellationToken.None));
+        Assert.Empty(await x.Db.Set<DeploymentDraftEntity>().ToListAsync());
+        Assert.Empty(await x.Db.Set<DeploymentDraftRevisionEntity>().ToListAsync());
+        Assert.Equal(before, await x.Db.Database.SqlQueryRaw<long>("SELECT \"Revision\" AS \"Value\" FROM \"SecurityGuard\" WHERE \"Id\" = 1").SingleAsync());
+    }
+
+    [Fact]
+    public async Task Conflicting_agent_scope_mappings_and_malformed_section_entries_are_rejected_before_application()
+    {
+        await using var x = await Instance.Create("root");
+        var bundle = new PortableBundle(1, [], [new("agent-one", "One"), new("agent-two", "Two")],
+            [new("environment", ParticipantSupport.Json(new PortableEnvironment("", [new("agent-one", "One", "A=one\n"), new("agent-two", "Two", "A=two\n")])))]);
+        var mapping = new PortableImportMapping(new Dictionary<string, Guid> { ["agent-one"] = x.Agent, ["agent-two"] = x.Agent },
+            new Dictionary<string, string>(), new Dictionary<string, string>());
+        await Assert.ThrowsAsync<PortabilityException>(() => x.Portability.PreviewAsync(x.Root, JsonSerializer.SerializeToUtf8Bytes(bundle, PortableBundleValidator.JsonOptions), mapping));
+        bundle = bundle with { Agents = [], Sections = [new("sources", JsonSerializer.SerializeToElement(new { credentials = new object?[] { null }, bindings = Array.Empty<object>() }))] };
+        await Assert.ThrowsAsync<PortabilityException>(() => x.Portability.PreviewAsync(x.Root, JsonSerializer.SerializeToUtf8Bytes(bundle, PortableBundleValidator.JsonOptions),
+            new(new Dictionary<string, Guid>(), new Dictionary<string, string>(), new Dictionary<string, string>())));
+        Assert.Empty(await x.Db.Set<PortableImportEntity>().ToListAsync());
+        Assert.Empty(await x.Db.Set<SourceCredentialEntity>().ToListAsync());
     }
 
     [Fact]
@@ -161,6 +217,21 @@ public sealed class ParticipantIntegrationTests
     }
 
     [Fact]
+    public async Task Deployment_scoped_export_grant_can_include_its_authorized_source_credentials_but_not_instance_environment()
+    {
+        await using var x = await Instance.Create("root");
+        var seeded = await Seed(x);
+        await x.Access.AddGrantAsync(x.Root, x.Operator, null, "configuration.export", "deployment", seeded.Deployment);
+        await x.Access.AddGrantAsync(x.Root, x.Operator, null, "files.read", "deployment", seeded.Deployment);
+        await x.Access.AddGrantAsync(x.Root, x.Operator, null, "credential.read", "credential", null);
+        await x.Access.AddGrantAsync(x.Root, x.Operator, null, "credential.reveal", "credential", null);
+        var bytes = await x.Portability.ExportAsync(x.Operator, new([seeded.Deployment], ["sources"], true));
+        Assert.Contains("git-password-secret", Encoding.UTF8.GetString(bytes));
+        Assert.False(await x.Access.IsAllowedAsync(x.Operator, "configuration.export", "instance", null));
+        await Assert.ThrowsAsync<PortabilityAccessException>(() => x.Portability.ExportAsync(x.Operator, new([seeded.Deployment], ["environment"], true)));
+    }
+
+    [Fact]
     public async Task Unknown_owner_and_git_workspace_collisions_are_rejected_before_creation()
     {
         await using var source = await Instance.Create("source-admin");
@@ -181,6 +252,28 @@ public sealed class ParticipantIntegrationTests
     }
 
     [Fact]
+    public async Task Failed_source_section_rolls_back_credentials_and_bindings_but_reports_previously_created_workspace_as_partial()
+    {
+        await using var source = await Instance.Create("source-admin");
+        await using var destination = await Instance.Create("destination-admin");
+        var seeded = await Seed(source);
+        var bytes = await source.Portability.ExportAsync(source.Root, new([seeded.Deployment], ["sources"], true));
+        var bundle = PortableBundleValidator.Parse(bytes);
+        var mapping = new PortableImportMapping(bundle.Agents.ToDictionary(a => a.Id, _ => destination.Agent), new Dictionary<string, string>(), new Dictionary<string, string>());
+        var preview = await destination.Portability.PreviewAsync(destination.Root, bytes, mapping);
+        await destination.Db.Database.ExecuteSqlRawAsync("CREATE TRIGGER RejectImportedSource BEFORE INSERT ON DeploymentGitSources BEGIN SELECT RAISE(ABORT, 'test source failure'); END;");
+        var result = await destination.Portability.ApplyAsync(destination.Root, preview.Id, preview.Fingerprint, true);
+        Assert.Equal("partial", result.State); Assert.Equal("sources", result.CurrentSection);
+        Assert.Single(result.CreatedDeployments); Assert.Empty(result.CreatedResources); Assert.Empty(result.CompletedSections);
+        Assert.Empty(await destination.Db.Set<SourceCredentialEntity>().ToListAsync());
+        Assert.Empty(await destination.Db.Set<DeploymentGitSourceEntity>().ToListAsync());
+        Assert.Empty(await destination.Db.Set<DeploymentRegistryBindingEntity>().ToListAsync());
+        Assert.Single(await destination.Db.Set<DeploymentDraftRevisionEntity>().ToListAsync());
+        Assert.DoesNotContain("git-password-secret", result.Failure!);
+        await Assert.ThrowsAsync<PortabilityException>(() => destination.Portability.ApplyAsync(destination.Root, preview.Id, preview.Fingerprint, true));
+    }
+
+    [Fact]
     public async Task Ordinary_import_cannot_import_security_policy_promote_accounts_or_map_group_members_to_admins()
     {
         await using var source = await Instance.Create("source-admin");
@@ -195,6 +288,52 @@ public sealed class ParticipantIntegrationTests
         await Assert.ThrowsAsync<PortabilityException>(() => destination.Portability.PreviewAsync(destination.Root, bytes, mapping));
         Assert.Empty(await destination.Access.ListGroupsAsync());
         Assert.Equal(AccountRole.User, (await destination.Db.Accounts.AsNoTracking().SingleAsync(a => a.Id == destination.Operator)).Role);
+    }
+
+    [Fact]
+    public async Task Environment_only_import_uses_scope_write_grants_without_deployment_creation_or_secret_reveal_grants()
+    {
+        await using var source = await Instance.Create("source-admin");
+        await using var destination = await Instance.Create("destination-admin");
+        await source.Settings.SaveAsync(source.Root, new("", "GLOBAL=plaintext-global\r\n", 0));
+        await source.Agents.SaveEnvironmentAsync(source.Root, source.Agent, new("AGENT=plaintext-agent\r\n", 0));
+        var bytes = await source.Portability.ExportAsync(source.Root, new([], ["environment"], true));
+        var bundle = PortableBundleValidator.Parse(bytes);
+        await destination.Access.AddGrantAsync(destination.Root, destination.Operator, null, "configuration.import", "instance", null);
+        await destination.Access.AddGrantAsync(destination.Root, destination.Operator, null, "environment.write", "instance", null);
+        foreach (var permission in new[] { "agent.read", "agent.manage", "environment.write" })
+            await destination.Access.AddGrantAsync(destination.Root, destination.Operator, null, permission, "agent", destination.Agent);
+        var mapping = new PortableImportMapping(bundle.Agents.ToDictionary(a => a.Id, _ => destination.Agent), new Dictionary<string, string>(), new Dictionary<string, string>());
+        var preview = await destination.Portability.PreviewAsync(destination.Operator, bytes, mapping);
+        var result = await destination.Portability.ApplyAsync(destination.Operator, preview.Id, preview.Fingerprint, true);
+        Assert.Equal("complete", result.State); Assert.Empty(result.CreatedDeployments);
+        Assert.False(await destination.Access.IsAllowedAsync(destination.Operator, "deployment.create", "instance", null));
+        Assert.False(await destination.Access.IsAllowedAsync(destination.Operator, "environment.reveal", "instance", null));
+        Assert.Equal("GLOBAL=plaintext-global\r\n", (await destination.Settings.ReadAsync(destination.Root)).GlobalEnvironment);
+        Assert.Equal("AGENT=plaintext-agent\r\n", (await destination.Agents.ReadEnvironmentAsync(destination.Root, destination.Agent)).Text);
+    }
+
+    [Fact]
+    public async Task Imported_actions_preserve_existing_ordinary_owner_instead_of_becoming_admin_owned()
+    {
+        await using var source = await Instance.Create("source-admin");
+        await using var destination = await Instance.Create("destination-admin");
+        var seeded = await Seed(source);
+        await source.Access.AddGrantAsync(source.Root, source.Operator, null, "action.manage", "action", null);
+        await source.Access.AddGrantAsync(source.Root, source.Operator, null, "deployment.deploy", "deployment", seeded.Deployment);
+        await source.Automation.SaveActionAsync(source.Operator, null, 0, "Ordinary-owned action", true, "queue", new([new("deploy", seeded.Deployment)]));
+        foreach (var permission in new[] { "action.manage", "action.read", "action.execute" })
+            await destination.Access.AddGrantAsync(destination.Root, destination.Operator, null, permission, "action", null);
+        await destination.Access.AddGrantAsync(destination.Root, destination.Operator, null, "deployment.deploy", "deployment", null);
+        var bytes = await source.Portability.ExportAsync(source.Root, new([seeded.Deployment], ["automation"], true));
+        var bundle = PortableBundleValidator.Parse(bytes);
+        var mapping = new PortableImportMapping(bundle.Agents.ToDictionary(a => a.Id, _ => destination.Agent), new Dictionary<string, string>(),
+            new Dictionary<string, string> { ["account:source-admin"] = "destination-admin" });
+        var preview = await destination.Portability.PreviewAsync(destination.Root, bytes, mapping);
+        var result = await destination.Portability.ApplyAsync(destination.Root, preview.Id, preview.Fingerprint, true);
+        Assert.Equal("complete", result.State);
+        var action = Assert.Single((await destination.Automation.ListAsync(destination.Root)).Actions, a => a.Name == "Ordinary-owned action");
+        Assert.Equal(destination.Operator, action.OwnerId); Assert.False(action.Enabled);
     }
 
     private static async Task<(Guid Deployment, Guid Credential, Guid Action, string WebhookSecret)> Seed(Instance x)
@@ -260,10 +399,10 @@ public sealed class ParticipantIntegrationTests
             await x.Db.SaveChangesAsync(); x.Db.ChangeTracker.Clear();
             var support = new ParticipantSupport(x.Db, x.Access);
             var environment = new EnvironmentParticipant(x.Db, x.Settings, x.Agents, support);
-            x.Participants = [new SourcesParticipant(x.Sources, support), environment, new AgentTemplatesParticipant(x.Db, x.Agents, environment, support),
+            x.Participants = [new SourcesParticipant(x.Db, x.Sources, support), environment, new AgentTemplatesParticipant(x.Db, x.Agents, environment, support),
                 new PublicSettingsParticipant(x.Settings, support), new PoliciesParticipant(x.Policy, x.Automation, support),
                 new AutomationParticipant(x.Db, x.Automation, authorization, support), new GroupsParticipant(x.Db, x.Access, support)];
-            x.Portability = new(x.Db, x.Access, x.Drafts, x.Store, protection, TimeProvider.System, x.Participants);
+            x.Portability = new(x.Db, x.Access, x.Drafts, x.Store, protection, TimeProvider.System, x.Participants, new AuditService(x.Db, TimeProvider.System, x.Access));
             return x;
         }
         public async ValueTask DisposeAsync() { await Db.DisposeAsync(); await connection.DisposeAsync(); }
@@ -273,5 +412,9 @@ public sealed class ParticipantIntegrationTests
         public bool IsConnected(Guid agentId) => false;
         public Task<AgentWorkResponse> DispatchAsync(Guid agentId, AgentWorkRequest request, CancellationToken token = default) =>
             throw new InvalidOperationException("Portability configuration import/export must never dispatch Agent work.");
+    }
+    private sealed class TightLimits : IDeploymentEditorLimitsProvider
+    {
+        public Task<DeploymentEditorLimits> GetLimitsAsync(CancellationToken ct = default) => Task.FromResult(new DeploymentEditorLimits(128, 32, 256, 1));
     }
 }

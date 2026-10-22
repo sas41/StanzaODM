@@ -257,6 +257,7 @@ public sealed class PortableMoveWorker(IServiceScopeFactory scopes, ILogger<Port
             try
             {
                 using var scope = scopes.CreateScope();
+                if (scope.ServiceProvider.GetService<Stanza.ControlPlane.Configuration.InstanceMaintenance>()?.Paused == true) continue;
                 var db = scope.ServiceProvider.GetRequiredService<StanzaDbContext>();
                 var now = scope.ServiceProvider.GetRequiredService<TimeProvider>().GetUtcNow().ToUnixTimeSeconds();
                 await db.Set<PortableImportEntity>().Where(x => x.State == "preview" && x.ExpiresAt <= now)

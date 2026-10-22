@@ -204,16 +204,21 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
             observations = await imageProbe.ProbeAsync(run.OwnerId, policy.DeploymentId, ImageUpdates.ServiceNames(policy.Services), linked.Token);
         }
-        catch (Exception) when (!ct.IsCancellationRequested)
+        catch (Exception error) when (!ct.IsCancellationRequested)
         {
-            await UpdatePolicyResultAsync(policy, "probe-failed-or-unavailable", null, ct);
-            await FinishAsync(run, "failed", "probe-failed-or-unavailable", ct); return;
+            var failure = ImageUpdates.ProbeFailureCode(error);
+            await UpdatePolicyResultAsync(policy, failure, null, ct, failed: true);
+            await FinishAsync(run, "failed", failure, ct); return;
         }
         var changed = ImageUpdates.Changed(observations, ImageUpdates.ServiceNames(policy.Services));
         await CheckIdentityAsync(run, ct);
-        var code = changed.Count == 0 ? "unchanged" : "updates-available";
+        var candidates = observations.Where(o => !o.LocallyBuilt || o.ExplicitRegistrySource).ToArray();
+        var unknownBaseline = candidates.Any(o => o.CurrentDigest is null);
+        var code = candidates.Length == 0 ? "no-registry-candidates"
+            : unknownBaseline ? changed.Count == 0 ? "baseline-unknown" : "updates-available-baseline-unknown"
+            : changed.Count == 0 ? "unchanged" : "updates-available";
         await UpdatePolicyResultAsync(policy, code, observations, ct);
-        if (changed.Count > 0 && policy.Mode == "auto-deploy")
+        if (changed.Count > 0 && !unknownBaseline && policy.Mode == "auto-deploy")
         {
             await authorization.TargetAsync(run.OwnerId, new("deploy", policy.DeploymentId), ct);
             var operation = await operations.EnqueueAsync(new(run.OwnerId, policy.DeploymentId, "deploy", "automation:" + run.Id.ToString("N")), ct);
@@ -228,10 +233,10 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
         await FinishAsync(run, "succeeded", code, ct);
     }
 
-    private Task<int> UpdatePolicyResultAsync(ImageUpdatePolicy policy, string code, IReadOnlyList<ImageDigestObservation>? observations, CancellationToken ct)
+    private Task<int> UpdatePolicyResultAsync(ImageUpdatePolicy policy, string code, IReadOnlyList<ImageDigestObservation>? observations, CancellationToken ct, bool failed = false)
     {
         var json = observations is null ? policy.DigestsJson : JsonSerializer.Serialize(observations, AutomationRules.Json);
-        var next = automation.Now + (code.Contains("failed", StringComparison.Ordinal) ? policy.FailureBackoffMinutes : policy.FrequencyMinutes) * 60L;
+        var next = automation.Now + (failed || code.Contains("failed", StringComparison.Ordinal) ? policy.FailureBackoffMinutes : policy.FrequencyMinutes) * 60L;
         return db.Set<ImageUpdatePolicy>().Where(x => x.Id == policy.Id).ExecuteUpdateAsync(u => u.SetProperty(x => x.LastCheckAt, automation.Now)
             .SetProperty(x => x.LastResult, code).SetProperty(x => x.DigestsJson, json).SetProperty(x => x.NextRunAt, next), ct);
     }

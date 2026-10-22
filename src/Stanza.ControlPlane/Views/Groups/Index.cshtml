@@ -1,7 +1,7 @@
 @model GroupsModel
 @{ ViewData["Title"] = "Groups & permissions"; }
 <span class="eyebrow">ACTION-LEVEL ACCESS</span><h1>Groups &amp; permissions</h1><p class="muted">Ordinary users inherit additive grants from their groups. Privileged accounts do not need group membership.</p>
-<div class="notice warning">Deployment draft permissions are enforced per action and resource. Agent and instance settings screens currently remain administrator-only; delegated access on those screens and permissions for future execution features are still being integrated.</div>
+<div class="notice warning">Permissions are exact actions scoped to resources. Deployment and Agent execution grants are privileged: Docker deployment access can grant substantial host control. Account and security-policy administration are not delegable.</div>
 <section class="panel narrow"><h2>Create group</h2><form method="post" asp-action="Create"><label for="group-name">Name</label><input id="group-name" name="name" maxlength="100" required /><button class="button primary" type="submit">Create group</button></form></section>
 @foreach (var group in Model.Groups)
 {

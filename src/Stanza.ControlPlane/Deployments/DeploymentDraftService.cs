@@ -138,6 +138,8 @@ public sealed partial class DeploymentDraftService(StanzaDbContext db, IDataProt
             ValidateMetadata(edit.Name, edit.TargetAgentId);
             await ValidateTargetAsync(actorId, edit.TargetAgentId, ct);
             payload.Name = edit.Name;
+            if (payload.TargetAgentId != edit.TargetAgentId && await db.Set<Stanza.ControlPlane.Operations.DeploymentRuntimeEntity>().AnyAsync(x => x.DeploymentId == id && x.Revision > 0, ct))
+                throw new DeploymentDraftException("Use the guided move workflow to change placement after a deployment has been applied.");
             payload.TargetAgentId = edit.TargetAgentId;
             if (edit.ComposeText is not null) payload.ComposeText = edit.ComposeText;
             if (edit.EnvironmentText is not null) payload.EnvironmentText = edit.EnvironmentText;

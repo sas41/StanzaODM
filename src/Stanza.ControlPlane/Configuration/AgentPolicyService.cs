@@ -44,8 +44,9 @@ public sealed class AgentPolicyService(StanzaDbContext db, AccessService access,
         await SecurityWriteGuard.LockAsync(db, ct);
         await RequireAsync(actor, "agent.manage", edit.AgentId, ct);
         if (!await db.Set<AgentEntity>().AnyAsync(x => x.Id == edit.AgentId, ct)) throw new SettingsOperationException("Agent not found.");
+        var currentVersion = await db.Set<AgentPolicyEntity>().AsNoTracking().Where(x => x.AgentId == edit.AgentId).Select(x => (long?)x.Version).SingleOrDefaultAsync(ct) ?? 0;
+        if (currentVersion != edit.Version) throw new SettingsOperationException("Agent policy changed. Reload before saving.");
         var row = await db.Set<AgentPolicyEntity>().SingleOrDefaultAsync(x => x.AgentId == edit.AgentId, ct);
-        if ((row?.Version ?? 0) != edit.Version) throw new SettingsOperationException("Agent policy changed. Reload before saving.");
         if (row is null) { row = new() { AgentId = edit.AgentId }; db.Set<AgentPolicyEntity>().Add(row); }
         row.Json = JsonSerializer.Serialize(p); row.Version = checked(edit.Version + 1);
         await db.SaveChangesAsync(ct); await transaction.CommitAsync(ct);

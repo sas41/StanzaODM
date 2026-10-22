@@ -1,5 +1,4 @@
 using System.Security.Claims;
-using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -65,7 +64,7 @@ public sealed class PortabilityController(PortabilityService portability, Portab
                 if (buffer.Length + count > PortableBundleValidator.MaximumBundleBytes) throw new PortabilityException("The bundle exceeds 32 MiB.");
                 await buffer.WriteAsync(chunk.AsMemory(0, count), ct);
             }
-            var mapping = new PortableImportMapping(ParseMap<Guid>(agentMappings), ParseMap<string>(deploymentNames), ParseMap<string>(resourceMappings));
+            var mapping = new PortableImportMapping(PortableMappingParser.Parse<Guid>(agentMappings), PortableMappingParser.Parse<string>(deploymentNames), PortableMappingParser.Parse<string>(resourceMappings));
             var preview = await portability.PreviewAsync(Actor, buffer.ToArray(), mapping, ct);
             return View("Preview", preview);
         }
@@ -183,15 +182,4 @@ public sealed class PortabilityController(PortabilityService portability, Portab
     }
 
     private IActionResult Error(string message) { TempData["Error"] = message; return RedirectToAction(nameof(Index)); }
-    private static IReadOnlyDictionary<string, T> ParseMap<T>(string? input)
-    {
-        try
-        {
-            var values = JsonSerializer.Deserialize<Dictionary<string, T>>(string.IsNullOrWhiteSpace(input) ? "{}" : input,
-                PortableBundleValidator.JsonOptions) ?? throw new PortabilityException("Mappings must be JSON objects.");
-            if (values.Count > 500 || values.Any(x => x.Key.Length > 100 || x.Value is null)) throw new PortabilityException("Mappings exceed reference limits or contain null values.");
-            return values;
-        }
-        catch (JsonException) { throw new PortabilityException("Mappings must be JSON objects from logical names to destination IDs or names."); }
-    }
 }

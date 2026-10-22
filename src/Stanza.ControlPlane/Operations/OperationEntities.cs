@@ -13,9 +13,12 @@ public sealed class OperationEntity
     public long Revision { get; set; }
     public string Kind { get; set; } = "";
     public string State { get; set; } = "Queued";
+    public string Stage { get; set; } = "Queued";
     public string Trigger { get; set; } = "manual";
     public string ProtectedRequest { get; set; } = "";
     public string? ProtectedResponse { get; set; }
+    public string? ProtectedAppliedMetadata { get; set; }
+    public Guid? ParentAppliedOperationId { get; set; }
     public string? Code { get; set; }
     public long CreatedAt { get; set; }
     public long? CompletedAt { get; set; }

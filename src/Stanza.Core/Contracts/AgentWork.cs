@@ -18,7 +18,7 @@ public sealed record AgentRegistryCredential(string Server, string Username, str
 }
 public sealed record AgentExecution(string Executable, IReadOnlyList<string> Arguments, string? Service = null,
     string? Container = null, string? User = null, string? WorkingDirectory = null,
-    IReadOnlyDictionary<string, string>? Environment = null)
+    IReadOnlyDictionary<string, string>? Environment = null, string Mode = "exec")
 {
     public override string ToString() => "AgentExecution { [REDACTED] }";
 }

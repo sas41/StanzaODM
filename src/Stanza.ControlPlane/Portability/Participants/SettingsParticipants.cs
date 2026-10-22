@@ -48,6 +48,7 @@ public sealed class EnvironmentParticipant(StanzaDbContext db, InstanceSettingsS
     public async Task<IReadOnlyList<string>> ValidateAsync(JsonElement content, PortableParticipantImportContext c, CancellationToken ct)
     {
         var section = ParticipantSupport.Read<PortableEnvironment>(content);
+        ValidateAgentConsistency(c);
         await support.Require(c.ActorId, "environment.write", "instance", null, ct);
         Text(section.Global); ParticipantSupport.Bound(section.Agents.Count, 100);
         if (section.Agents.Select(x => x.Agent).Distinct().Count() != section.Agents.Count) throw new PortabilityException("Duplicate Agent environment templates.");
@@ -77,6 +78,18 @@ public sealed class EnvironmentParticipant(StanzaDbContext db, InstanceSettingsS
         }
         catch (EncoderFallbackException) { throw new PortabilityException("Invalid environment UTF-8 text."); }
     }
+    internal static void ValidateAgentConsistency(PortableParticipantImportContext c)
+    {
+        var templates = new List<PortableAgentTemplate>();
+        foreach (var s in c.Bundle?.Sections ?? [])
+        {
+            if (s.Kind == "environment") templates.AddRange(ParticipantSupport.Read<PortableEnvironment>(s.Content).Agents);
+            if (s.Kind == "agent-templates") templates.AddRange(ParticipantSupport.Read<PortableAgentTemplate[]>(s.Content));
+        }
+        var mapped = templates.Where(t => c.Mapping.Agents.ContainsKey(t.Agent)).GroupBy(t => c.Mapping.Agents[t.Agent]);
+        if (mapped.Any(g => g.Select(t => t.Environment).Distinct(StringComparer.Ordinal).Count() > 1))
+            throw new PortabilityException("Agent templates mapped to the same destination contain conflicting environment files. Resolve the mapping instead of silently overwriting one scope.");
+    }
     internal static async Task ApplyAgent(PortableAgentTemplate template, PortableParticipantImportContext c,
         AgentAdministrationService agents, ParticipantSupport support, StanzaDbContext db, CancellationToken ct)
     {
@@ -105,6 +118,7 @@ public sealed class AgentTemplatesParticipant(StanzaDbContext db, AgentAdministr
     public async Task<IReadOnlyList<string>> ValidateAsync(JsonElement content, PortableParticipantImportContext c, CancellationToken ct)
     {
         var templates = ParticipantSupport.Read<PortableAgentTemplate[]>(content); ParticipantSupport.Bound(templates.Length, 100);
+        EnvironmentParticipant.ValidateAgentConsistency(c);
         if (templates.Select(x => x.Agent).Distinct().Count() != templates.Length) throw new PortabilityException("Duplicate Agent templates.");
         foreach (var t in templates)
         {

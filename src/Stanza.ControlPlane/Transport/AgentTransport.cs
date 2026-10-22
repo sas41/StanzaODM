@@ -72,9 +72,16 @@ public static class AgentTransportExtensions
     }
 }
 
-public sealed class AgentCommandBroker : IAgentCommandDispatcher
+public sealed class AgentCommandBroker : IAgentCommandDispatcher, IAgentWorkProgressSource, IAgentConnectionCatalog
 {
+    public event Func<Guid, string, Task>? Progress;
+    private async Task ReportAsync(Guid id, string stage)
+    {
+        if (Progress is not { } progress) return;
+        foreach (Func<Guid, string, Task> handler in progress.GetInvocationList()) await handler(id, stage);
+    }
     private readonly ConcurrentDictionary<Guid, AgentCommandSession> sessions = new();
+    public IReadOnlyList<Guid> ConnectedAgentIds => sessions.Where(pair => pair.Value.Connected).Select(pair => pair.Key).ToArray();
     public bool IsConnected(Guid agentId) => sessions.TryGetValue(agentId, out var session) && session.Connected;
     public AgentCapabilities? Capabilities(Guid agentId) => sessions.TryGetValue(agentId, out var session) && session.Connected ? session.Capabilities : null;
     public Task<Stanza.ControlPlane.Terminals.IAgentTerminalSession> OpenTerminalAsync(Guid agentId, Guid deploymentId,
@@ -83,7 +90,7 @@ public sealed class AgentCommandBroker : IAgentCommandDispatcher
             ? session.OpenTerminalAsync(deploymentId, execution, policy, token) : throw new AgentUnavailableException();
     public AgentCommandSession? Reserve(Guid agentId)
     {
-        var session = new AgentCommandSession();
+        var session = new AgentCommandSession(ReportAsync);
         return sessions.TryAdd(agentId, session) ? session : null;
     }
     public void Release(Guid agentId, AgentCommandSession session)
@@ -98,6 +105,12 @@ public sealed class AgentCommandBroker : IAgentCommandDispatcher
 
 public sealed class AgentCommandSession : IDisposable
 {
+    private readonly Func<Guid, string, Task>? report;
+    private readonly ConcurrentDictionary<Guid, int> progressCount = new();
+    public AgentCommandSession(Func<Guid, string, Task>? report = null) => this.report = report;
+    // Wire JSON is never embedded in HTML; base64 must not inflate beyond its declared frame bound.
+    private static readonly JsonSerializerOptions TerminalJson = new(JsonSerializerDefaults.Web)
+    { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private readonly SemaphoreSlim send = new(1, 1);
     private readonly SemaphoreSlim execution = new(1, 1);
     private readonly ConcurrentDictionary<Guid, TaskCompletionSource<AgentWorkResponse>> pending = new();
@@ -113,10 +126,10 @@ public sealed class AgentCommandSession : IDisposable
         AgentExecution target, AgentRuntimePolicy policy, CancellationToken token)
     {
         if (!Connected || Capabilities is not { TerminalAvailable: true }) throw new AgentUnavailableException();
-        if (deploymentId == Guid.Empty || !policy.ExecutionEnabled) throw new IOException("Invalid terminal target or policy.");
+        if (deploymentId == Guid.Empty || !policy.ExecutionEnabled || target.Mode is not ("exec" or "logs")) throw new IOException("Invalid stream target, mode, or policy.");
         if (!await terminalCapacity.WaitAsync(0, token)) throw new IOException("Agent terminal limit reached.");
         var id = Guid.NewGuid();
-        var session = new BrokerTerminalSession(id, SendAsync, key => { if (terminals.TryRemove(key, out _)) terminalCapacity.Release(); });
+        var session = new BrokerTerminalSession(id, SendAsync, key => { if (terminals.TryRemove(key, out _)) terminalCapacity.Release(); }, target.Mode == "logs");
         if (!terminals.TryAdd(id, session)) { terminalCapacity.Release(); throw new IOException("Duplicate terminal identity."); }
         try
         {
@@ -155,7 +168,7 @@ public sealed class AgentCommandSession : IDisposable
             Dispose();
             return new(request.Id, false, "uncertain");
         }
-        finally { pending.TryRemove(request.Id, out _); execution.Release(); }
+        finally { pending.TryRemove(request.Id, out _); progressCount.TryRemove(request.Id, out _); execution.Release(); }
     }
 
     public async Task RunAsync(WebSocket connectedSocket, Func<CancellationToken, Task<bool>> validate, CancellationToken token)
@@ -178,6 +191,12 @@ public sealed class AgentCommandSession : IDisposable
                         response.ResolvedSources?.Count > 32 || response.ResolvedImages?.Count > 10000)
                         throw new IOException("Invalid Agent response.");
                     if (pending.TryGetValue(message.Id, out var completion)) completion.TrySetResult(response);
+                }
+                else if (message.Type == "work.progress")
+                {
+                    if (!pending.ContainsKey(message.Id)) continue;
+                    if (message.Data is not ("Validating" or "Preparing" or "Building" or "Pulling" or "Applying" or "Checking") || progressCount.AddOrUpdate(message.Id, 1, (_, count) => count + 1) > 32) throw new IOException("Invalid operation progress.");
+                    if (report is not null) await report(message.Id, message.Data);
                 }
                 else if (message.Type == "capabilities")
                 {
@@ -228,10 +247,12 @@ public sealed class AgentCommandSession : IDisposable
 
     private async Task SendAsync(AgentWireMessage message, CancellationToken token)
     {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(message, JsonSerializerOptions.Web);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(message, message.Type.StartsWith("terminal.", StringComparison.Ordinal) ? TerminalJson : JsonSerializerOptions.Web);
         if (bytes.Length > AgentSocketFrames.MaximumBytes) throw new IOException("Agent frame exceeds the limit.");
-        await send.WaitAsync(token);
-        try { await socket!.SendAsync(bytes, WebSocketMessageType.Text, true, token); }
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        await send.WaitAsync(timeout.Token);
+        try { await socket!.SendAsync(bytes, WebSocketMessageType.Text, true, timeout.Token); }
         finally { send.Release(); }
     }
     public void Dispose()
@@ -263,7 +284,12 @@ public static class AgentSocketFrames
             stream.Write(buffer, 0, part.Count);
             if (part.EndOfMessage) break;
         }
-        return JsonSerializer.Deserialize<AgentWireMessage>(stream.GetBuffer().AsSpan(0, (int)stream.Length), JsonSerializerOptions.Web)
+        var message = JsonSerializer.Deserialize<AgentWireMessage>(stream.GetBuffer().AsSpan(0, (int)stream.Length), JsonSerializerOptions.Web)
             ?? throw new IOException("Invalid Agent message.");
+        if (message.Type is not { Length: > 0 and <= 64 }) throw new IOException("Invalid Agent message type.");
+        if (message.Type.StartsWith("terminal.", StringComparison.Ordinal) &&
+            (stream.Length > 96 * 1024 || message.Request is not null || message.Response is not null || message.Type == "terminal.opened" && message.Data is not null))
+            throw new IOException("Invalid terminal frame.");
+        return message;
     }
 }

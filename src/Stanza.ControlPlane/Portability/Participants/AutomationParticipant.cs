@@ -108,6 +108,7 @@ public sealed class AutomationParticipant(StanzaDbContext db, AutomationService 
 
     public async Task<IReadOnlyList<string>> ValidateAsync(JsonElement content, PortableParticipantImportContext c, CancellationToken ct)
     {
+        await support.Require(c.ActorId, "configuration.import", "instance", null, ct);
         var section = ParticipantSupport.Read<PortableAutomation>(content);
         ParticipantSupport.Bound(section.Actions.Count); ParticipantSupport.Bound(section.Schedules.Count);
         ParticipantSupport.Bound(section.Webhooks.Count); ParticipantSupport.Bound(section.ImageUpdates.Count);
@@ -223,6 +224,7 @@ public sealed class AutomationParticipant(StanzaDbContext db, AutomationService 
         var section = ParticipantSupport.Read<PortableAutomation>(content);
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await SecurityWriteGuard.LockAsync(db, ct);
+        await ValidateAsync(content, c, ct);
         var actions = new List<(PortableAction Definition, ActionDefinition Saved, Guid Owner, ActionPlan Plan)>();
         try
         {

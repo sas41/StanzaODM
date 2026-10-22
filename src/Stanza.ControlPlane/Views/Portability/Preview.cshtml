@@ -3,6 +3,11 @@
 <span class="eyebrow">NO CONFIGURATION APPLIED YET</span><h1>Import preview</h1>
 @foreach (var warning in Model.Warnings) { <div class="notice warning">@warning</div> }
 <section class="panel"><h2>New inactive deployments</h2><ul>@foreach (var name in Model.Deployments) { <li>@name</li> }</ul>
+<h2>Selected configuration sections</h2><ol>@foreach (var name in Model.Sections) { <li>@name</li> }</ol>
+<p class="field-help">Sections apply in the order shown. Source credentials and action identities are newly created; existing external resources and account usernames use only the explicit mappings below. No password hashes, sessions, Agent identities or workload volume data are restored.</p>
+<h3>Approved Agent mappings</h3><ul>@foreach (var mapping in Model.AgentMappings) { <li><code>@mapping.Key</code> → <code>@mapping.Value</code></li> }</ul>
+<h3>External resource / owner / group-name mappings</h3><ul>@foreach (var mapping in Model.ResourceMappings) { <li><code>@mapping.Key</code> → <code>@mapping.Value</code></li> }</ul>
+<h3>Logical resource references</h3><ul>@foreach (var reference in Model.References) { <li><code>@reference.Id</code> — @reference.Type: @reference.Name</li> }</ul>
 <p>Preview expires @DateTimeOffset.FromUnixTimeSeconds(Model.ExpiresAt).ToString("u").</p>
 <p class="field-help">Fingerprint <code>@Model.Fingerprint</code>. The content and mappings are stored encrypted on the server, not accepted from this form.</p>
 @if (Model.Conflicts.Count > 0) { <h3>Conflicts — apply blocked</h3><ul>@foreach (var conflict in Model.Conflicts) { <li>@conflict</li> }</ul> }

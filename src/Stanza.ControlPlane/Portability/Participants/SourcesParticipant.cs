@@ -1,6 +1,8 @@
 using System.Text.Json;
 using Stanza.ControlPlane.Sources;
 using Stanza.Core.Deployments;
+using Stanza.ControlPlane.Persistence;
+using Stanza.ControlPlane.Security;
 
 namespace Stanza.ControlPlane.Portability.Participants;
 
@@ -12,7 +14,7 @@ public sealed record PortableGitSource(string Url, string Reference, string Dest
 public sealed record PortableSourceBindings(string Deployment, IReadOnlyList<PortableGitSource> Git, IReadOnlyList<string> Registries);
 public sealed record PortableSources(IReadOnlyList<PortableCredential> Credentials, IReadOnlyList<PortableSourceBindings> Bindings);
 
-public sealed class SourcesParticipant(SourceService sources, ParticipantSupport support) : IPortableConfigurationParticipant
+public sealed class SourcesParticipant(StanzaDbContext db, SourceService sources, ParticipantSupport support) : IPortableConfigurationParticipant
 {
     public string Kind => "sources";
     public int Priority => 10;
@@ -74,6 +76,8 @@ public sealed class SourcesParticipant(SourceService sources, ParticipantSupport
         }
         foreach (var binding in section.Bindings)
         {
+            if (c.Bundle?.Deployments.Any(d => d.Id == binding.Deployment) != true)
+                throw new PortabilityException("Imported source bindings require a complete new deployment workspace in the bundle; they do not silently modify existing external deployments.");
             var target = await support.Resolve(c, binding.Deployment, "deployment", ct, true);
             await support.Require(c.ActorId, "sources.manage", "deployment", target, ct);
             await support.Require(c.ActorId, "files.write", "deployment", target, ct);
@@ -118,24 +122,32 @@ public sealed class SourcesParticipant(SourceService sources, ParticipantSupport
 
     public async Task ApplyAsync(JsonElement content, PortableParticipantImportContext c, CancellationToken ct)
     {
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await SecurityWriteGuard.LockAsync(db, ct);
         await ValidateAsync(content, c, ct);
         var section = ParticipantSupport.Read<PortableSources>(content);
-        foreach (var credential in section.Credentials)
+        var created = new List<string>();
+        try
         {
-            var saved = await sources.SaveCredentialAsync(c.ActorId, null, 0,
-                new(credential.Name, credential.Kind, credential.Endpoint, credential.Username, credential.Password), ct);
-            c.CreatedResources![credential.Id] = saved.Id;
+            foreach (var credential in section.Credentials)
+            {
+                var saved = await sources.SaveCredentialAsync(c.ActorId, null, 0,
+                    new(credential.Name, credential.Kind, credential.Endpoint, credential.Username, credential.Password), ct);
+                c.CreatedResources![credential.Id] = saved.Id; created.Add(credential.Id);
+            }
+            foreach (var binding in section.Bindings)
+            {
+                var deployment = (await support.Resolve(c, binding.Deployment, "deployment", ct))!.Value;
+                foreach (var git in binding.Git)
+                    await sources.SaveGitAsync(c.ActorId, deployment, null, 0, new(git.Url, git.Reference, git.Destination,
+                        git.Credential is { } key ? await support.Resolve(c, key, "credential", ct) : null), ct);
+                var registries = new List<Guid>();
+                foreach (var key in binding.Registries) registries.Add((await support.Resolve(c, key, "credential", ct))!.Value);
+                await sources.SetRegistriesAsync(c.ActorId, deployment, registries, [], ct);
+            }
+            await transaction.CommitAsync(ct);
         }
-        foreach (var binding in section.Bindings)
-        {
-            var deployment = (await support.Resolve(c, binding.Deployment, "deployment", ct))!.Value;
-            foreach (var git in binding.Git)
-                await sources.SaveGitAsync(c.ActorId, deployment, null, 0, new(git.Url, git.Reference, git.Destination,
-                    git.Credential is { } key ? await support.Resolve(c, key, "credential", ct) : null), ct);
-            var registries = new List<Guid>();
-            foreach (var key in binding.Registries) registries.Add((await support.Resolve(c, key, "credential", ct))!.Value);
-            await sources.SetRegistriesAsync(c.ActorId, deployment, registries, [], ct);
-        }
+        catch { foreach (var key in created) c.CreatedResources?.Remove(key); throw; }
     }
     private static bool Collides(DeploymentPath a, DeploymentPath b) => a.IsSameOrAncestorOf(b) || b.IsSameOrAncestorOf(a);
 }

@@ -27,6 +27,8 @@ public sealed record OperationalPolicy
     [Range(1, 3650)] public int LogRetentionDays { get; set; } = 30;
     [Range(1, 3650)] public int AuditRetentionDays { get; set; } = 365;
     public bool AllowHostActions { get; set; }
+    [StringLength(4096)] public string TrustedProxyAddresses { get; set; } = "";
+    [Range(1, 10)] public int TrustedProxyForwardLimit { get; set; } = 1;
 }
 
 public sealed record PolicyEditor(OperationalPolicy Policy, long Version);
@@ -51,12 +53,14 @@ public sealed class OperationalPolicyService(StanzaDbContext db, AccessService a
 
     public async Task SaveAsync(Guid actor, PolicyEditor edit, CancellationToken ct = default)
     {
+        edit.Policy.TrustedProxyAddresses ??= "";
         var errors = new List<ValidationResult>();
         if (!Validator.TryValidateObject(edit.Policy, new ValidationContext(edit.Policy), errors, true)
             || edit.Policy.MaximumUploadBytes > edit.Policy.MaximumWorkspaceBytes
             || edit.Policy.MaximumTextBytes > edit.Policy.MaximumWorkspaceBytes
             || edit.Policy.MaximumConnectionsPerUser > edit.Policy.MaximumConnections)
             throw new SettingsOperationException("Operational limits are invalid or inconsistent.");
+        TrustedProxyPolicy.Parse(edit.Policy.TrustedProxyAddresses);
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await SecurityWriteGuard.LockAsync(db, ct);
         if (!await db.Accounts.AnyAsync(x => x.Id == actor && x.Enabled && (x.Role == AccountRole.Admin || x.Role == AccountRole.SystemAdmin), ct))

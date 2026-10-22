@@ -7,6 +7,16 @@ namespace Stanza.ControlPlane.Deployments;
 
 public sealed partial class DeploymentDraftService
 {
+    internal Task<DeploymentDraftSummary> ReassignPortablePlacementAsync(Guid actorId, Guid id, long expectedRevision,
+        Guid agentId, CancellationToken ct = default) => MutateAsync(actorId, id, expectedRevision, async payload =>
+        {
+            // MutateAsync holds the shared security write guard through authorization, revision CAS and commit.
+            await RequireAsync(actorId, "deployment.move", id, ct);
+            if (!await access.IsAllowedAsync(actorId, "agent.manage", "agent", agentId, ct)) throw new DeploymentDraftAccessException();
+            await ValidateTargetAsync(actorId, agentId, ct);
+            payload.TargetAgentId = agentId;
+        }, ct);
+
     /// <summary>Creates one complete immutable encrypted revision. Creation grants do not imply read/edit grants on the new identity.</summary>
     internal async Task<DeploymentDraftSummary> CreatePortableWorkspaceAsync(Guid actorId, string name, Guid? targetAgentId,
         string composeText, string environmentText, IReadOnlyList<ManagedFileSnapshot> files,

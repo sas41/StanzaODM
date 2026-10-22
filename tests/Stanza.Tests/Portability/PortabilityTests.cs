@@ -287,6 +287,9 @@ public sealed class PortabilityTests : IAsyncLifetime
         Assert.Equal("placement", (await moves.ReadAsync(root, id)).State);
         await moves.AdvanceAsync(id);
         Assert.Equal("complete", (await moves.ReadAsync(root, id)).State);
+        var warnings = (await moves.ReadAsync(root, id)).Warnings;
+        Assert.Contains("Architecture compatibility is not established", warnings);
+        Assert.Contains("not all host ports", warnings);
         Assert.Equal(destinationAgent, (await drafts.ReadAsync(root, source)).Draft.TargetAgentId);
         Assert.Equal(new[] { "validate", "status", "stop", "deploy", "status" }, ops.Submissions.Select(x => x.Kind));
         Assert.Equal(new[] { destinationAgent, destinationAgent, sourceAgent, destinationAgent, destinationAgent }, ops.Submissions.Select(x => x.AgentId!.Value));
@@ -295,6 +298,7 @@ public sealed class PortabilityTests : IAsyncLifetime
     }
 
     [Theory]
+    [InlineData("validate")]
     [InlineData("stop")]
     [InlineData("deploy")]
     [InlineData("status")]
@@ -379,6 +383,35 @@ public sealed class PortabilityTests : IAsyncLifetime
         await moves.AdvanceAsync(id);
         Assert.Equal("recovery", (await moves.ReadAsync(root, id)).State);
         Assert.Empty(ops.Submissions);
+    }
+
+    [Fact]
+    public async Task Revoked_destination_approval_pauses_move_before_stopping_source()
+    {
+        var source = await Source(); var ops = new FakeOperations(); var moves = Moves(ops);
+        var id = await moves.QueueAsync(root, source, destinationAgent, true);
+        await db.Set<AgentEntity>().Where(x => x.Id == destinationAgent).ExecuteUpdateAsync(u => u.SetProperty(x => x.Status, "revoked"));
+        await moves.AdvanceAsync(id);
+        Assert.Equal("recovery", (await moves.ReadAsync(root, id)).State);
+        Assert.Empty(ops.Submissions);
+        Assert.Equal(sourceAgent, (await drafts.ReadAsync(root, source)).Draft.TargetAgentId);
+    }
+
+    [Fact]
+    public async Task Placement_commit_rechecks_move_permission_under_the_same_guard_as_revision_commit()
+    {
+        var source = await Source();
+        foreach (var action in new[] { "deployment.read", "files.write" })
+            await access.AddGrantAsync(root, user, null, action, "deployment", source);
+        foreach (var action in new[] { "agent.read", "agent.manage" })
+            await access.AddGrantAsync(root, user, null, action, "agent", destinationAgent);
+        var move = await access.AddGrantAsync(root, user, null, "deployment.move", "deployment", source);
+        var before = await drafts.ReadAsync(root, source);
+        await access.RemoveGrantAsync(root, move.Id);
+        await Assert.ThrowsAsync<DeploymentDraftAccessException>(() => store.ReassignAsync(user, source, before.ViewedRevision, destinationAgent, CancellationToken.None));
+        var after = await drafts.ReadAsync(root, source);
+        Assert.Equal(before.ViewedRevision, after.ViewedRevision);
+        Assert.Equal(sourceAgent, after.Draft.TargetAgentId);
     }
 
     [Fact]

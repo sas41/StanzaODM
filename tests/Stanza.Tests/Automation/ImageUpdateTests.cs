@@ -90,6 +90,42 @@ public sealed class ImageUpdateTests
         Assert.Null(probe.Actor); Assert.Empty(s.Operations.Submissions); Assert.Equal("denied", (await s.Service.ReadRunAsync(s.Root, run.Id)).Run.State);
     }
 
+    [Theory]
+    [InlineData(false, "baseline-unknown")][InlineData(true, "updates-available-baseline-unknown")]
+    public async Task UnknownSelectedBaselineIsNotReportedUnchangedAndBlocksWholeDeploymentAutoApply(bool otherUpdate, string result)
+    {
+        await using var s = await AutomationTestStore.Create();
+        var services = otherUpdate ? "app,worker" : "app";
+        var policy = await s.Service.SaveImagePolicyAsync(s.Root, new() { Name = "Uninstalled baseline", DeploymentId = s.Deployment, Services = services, Mode = "auto-deploy" }, 0);
+        await s.Service.CheckImagesAsync(s.Root, policy.Id);
+        var images = new List<ImageDigestObservation> { Image() with { CurrentDigest = null } };
+        if (otherUpdate) images.Add(Image() with { Service = "worker" });
+        await s.Executor(new Probe(images)).ExecuteNextAsync();
+        Assert.Empty(s.Operations.Submissions);
+        Assert.Equal(result, (await s.Db.Set<ImageUpdatePolicy>().AsNoTracking().SingleAsync()).LastResult);
+    }
+
+    [Theory]
+    [InlineData("image-probe-pending-manual-changes", "image-probe-pending-manual-changes")]
+    [InlineData("private-password registry diagnostic must not be shown", "probe-failed-or-unavailable")]
+    public async Task ProbeFailuresExposeOnlyKnownActionableCodesAndAlwaysUseFailureBackoff(string error, string expected)
+    {
+        await using var s = await AutomationTestStore.Create();
+        var policy = await s.Service.SaveImagePolicyAsync(s.Root, new() { Name = "Probe diagnostics", DeploymentId = s.Deployment,
+            Services = "app", FrequencyMinutes = 5, FailureBackoffMinutes = 17 }, 0);
+        await s.Service.CheckImagesAsync(s.Root, policy.Id);
+        await s.Executor(new FailureProbe(error)).ExecuteNextAsync();
+        var saved = await s.Db.Set<ImageUpdatePolicy>().AsNoTracking().SingleAsync();
+        Assert.Equal(expected, saved.LastResult); Assert.Equal(s.Service.Now + 17 * 60, saved.NextRunAt);
+        Assert.DoesNotContain("private-password", saved.LastResult);
+    }
+
+    private sealed class FailureProbe(string error) : IImageDigestProbe
+    {
+        public Task<IReadOnlyList<ImageDigestObservation>> ProbeAsync(Guid actorId, Guid deploymentId, IReadOnlyList<string> services, CancellationToken ct = default) =>
+            throw new AutomationException(error);
+    }
+
     private sealed class Probe(IReadOnlyList<ImageDigestObservation> images) : IImageDigestProbe
     {
         public Guid? Actor { get; private set; }

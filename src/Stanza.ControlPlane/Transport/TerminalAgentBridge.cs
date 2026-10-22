@@ -26,7 +26,7 @@ public sealed class TerminalAgentBridge(AgentCommandBroker broker, AgentPolicySe
 }
 
 internal sealed class BrokerTerminalSession(Guid id, Func<AgentWireMessage, CancellationToken, Task> send,
-    Action<Guid> remove) : IAgentTerminalSession
+    Action<Guid> remove, bool readOnly = false) : IAgentTerminalSession
 {
     private readonly Channel<TerminalOutput> output = Channel.CreateBounded<TerminalOutput>(new BoundedChannelOptions(16)
     { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });
@@ -41,6 +41,7 @@ internal sealed class BrokerTerminalSession(Guid id, Func<AgentWireMessage, Canc
         if (message.Type == "terminal.output")
         {
             if (!opened.Task.IsCompletedSuccessfully || message.Data is not { Length: > 0 and <= 87384 }) throw new IOException("Invalid terminal output.");
+            if (Volatile.Read(ref closing) != 0) return true; // Do not allocate one close task per late output frame.
             var bytes = Convert.FromBase64String(message.Data);
             if (bytes.Length is 0 or > TerminalProtocol.MaximumInputBytes) throw new IOException("Invalid terminal output.");
             return output.Writer.TryWrite(new(bytes));
@@ -68,11 +69,13 @@ internal sealed class BrokerTerminalSession(Guid id, Func<AgentWireMessage, Canc
     }
     public async ValueTask WriteInputAsync(ReadOnlyMemory<byte> input, CancellationToken cancellationToken)
     {
+        if (readOnly) throw new IOException("Container log streams are read-only.");
         if (input.Length is 0 or > TerminalProtocol.MaximumInputBytes || Volatile.Read(ref closed) != 0 || Volatile.Read(ref closing) != 0) throw new IOException("Terminal is closed or input exceeds limit.");
         await send(new("terminal.input", id, Data: Convert.ToBase64String(input.Span)), cancellationToken);
     }
     public async ValueTask ResizeAsync(int columns, int rows, CancellationToken cancellationToken)
     {
+        if (readOnly) throw new IOException("Container log streams cannot be resized.");
         if (!TerminalProtocol.ValidDimensions(columns, rows) || Volatile.Read(ref closed) != 0 || Volatile.Read(ref closing) != 0) throw new IOException("Invalid terminal resize.");
         await send(new("terminal.resize", id, Data: JsonSerializer.Serialize(new[] { columns, rows })), cancellationToken);
     }

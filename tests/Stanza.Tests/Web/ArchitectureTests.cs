@@ -75,8 +75,9 @@ public sealed class ArchitectureTests
 
     internal static string RepositoryRoot()
     {
-        for (var current = new DirectoryInfo(AppContext.BaseDirectory); current is not null; current = current.Parent)
-            if (File.Exists(Path.Combine(current.FullName, "Stanza.slnx"))) return current.FullName;
+        foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory, Environment.GetEnvironmentVariable("GITHUB_WORKSPACE") })
+            for (var current = string.IsNullOrWhiteSpace(start) ? null : new DirectoryInfo(start); current is not null; current = current.Parent)
+                if (File.Exists(Path.Combine(current.FullName, "Stanza.slnx"))) return current.FullName;
         throw new InvalidOperationException("The repository root could not be located.");
     }
 }

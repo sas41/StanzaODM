@@ -33,7 +33,13 @@ public sealed record PortableExportSelection(IReadOnlyList<Guid> Deployments, IR
 public sealed record PortableImportMapping(IReadOnlyDictionary<string, Guid> Agents,
     IReadOnlyDictionary<string, string> DeploymentNames, IReadOnlyDictionary<string, string> Resources);
 public sealed record PortablePreview(Guid Id, string Fingerprint, long ExpiresAt, IReadOnlyList<string> Deployments,
-    IReadOnlyList<string> Warnings, IReadOnlyList<string> Conflicts, bool CanApply);
+    IReadOnlyList<string> Warnings, IReadOnlyList<string> Conflicts, bool CanApply)
+{
+    public IReadOnlyList<string> Sections { get; init; } = [];
+    public IReadOnlyDictionary<string, Guid> AgentMappings { get; init; } = new Dictionary<string, Guid>();
+    public IReadOnlyDictionary<string, string> ResourceMappings { get; init; } = new Dictionary<string, string>();
+    public IReadOnlyList<PortableResourceReference> References { get; init; } = [];
+}
 public sealed record PortableApplyResult(Guid Id, string State, IReadOnlyList<Guid> CreatedDeployments, string? Failure)
 {
     public IReadOnlyDictionary<string, Guid> CreatedResources { get; init; } = new Dictionary<string, Guid>();

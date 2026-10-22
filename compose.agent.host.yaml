@@ -1,0 +1,13 @@
+# OPTIONAL, HIGH PRIVILEGE: enables host actions in addition to normal Docker workloads.
+# Run only on hosts where administrators are trusted to execute commands as host root:
+# docker compose -f compose.agent.yaml -f compose.agent.host.yaml up --build -d
+# Also enable AllowHostActions in the Control Plane operational policy. No host terminal is exposed.
+services:
+  agent:
+    user: "0:0"
+    pid: host
+    cap_add:
+      - SYS_ADMIN
+      - SYS_CHROOT
+    environment:
+      Agent__HostExecution__Enabled: "true"

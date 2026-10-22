@@ -3,9 +3,9 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Stanza.ControlPlane.Automation;
 
-/// <summary>The operation owner implements this adapter using the authenticated Agent image-digests
-/// operation. It must resolve service configuration, scoped registry credentials and target platform
-/// from a single immutable deployment snapshot. No registry calls run in the Control Plane.</summary>
+/// <summary>Read-only authenticated Agent inspection of an immutable applied deployment snapshot.
+/// CurrentDigest and RemoteDigest are comparable image config digests, not manifest/index digests.
+/// Registry manifest identities remain separate Agent response metadata. No registry calls run here.</summary>
 public interface IImageDigestProbe
 {
     Task<IReadOnlyList<ImageDigestObservation>> ProbeAsync(Guid actorId, Guid deploymentId, IReadOnlyList<string> services, CancellationToken ct = default);
@@ -25,6 +25,19 @@ public sealed class UnavailableImageDigestProbe : IImageDigestProbe
 
 public static partial class ImageUpdates
 {
+    public static string ProbeFailureCode(Exception error) => error switch
+    {
+        AutomationException { Message: "image-probe-not-deployed" or "image-probe-deployment-unavailable" or
+            "image-probe-pending-manual-changes" or "image-probe-pending-placement-change" or "image-probe-pending-environment-changes" or
+            "image-probe-pending-source-changes" or "image-probe-deployment-operation-pending" or "image-probe-applied-state-changed" or
+            "image-probe-applied-snapshot-unavailable" or "image-probe-applied-snapshot-invalid" or "image-probe-applied-commit-unavailable" or
+            "image-probe-agent-environment-unavailable" or "image-probe-agent-failed" or "image-probe-invalid-response" or
+            "image-probe-invalid-services" or "image-probe-execution-disabled" } known => known.Message,
+        Stanza.ControlPlane.Transport.AgentUnavailableException => "image-probe-agent-offline",
+        AutomationAccessException or Stanza.ControlPlane.Sources.SourceAccessException => "image-probe-access-denied",
+        OperationCanceledException => "image-probe-timeout",
+        _ => "probe-failed-or-unavailable"
+    };
     [GeneratedRegex("^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$", RegexOptions.CultureInvariant)] private static partial Regex ServicePattern();
     [GeneratedRegex("^sha256:[0-9a-f]{64}$", RegexOptions.CultureInvariant)] private static partial Regex DigestPattern();
     public static IReadOnlyList<string> ServiceNames(string services)

@@ -76,6 +76,7 @@ public sealed class GroupsParticipant(StanzaDbContext db, AccessService access, 
         var section = ParticipantSupport.Read<PortableGroups>(content);
         ParticipantSupport.Bound(section.Groups.Count, 100); ParticipantSupport.Bound(section.Users.Count);
         if (section.Groups.Select(g => g.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != section.Groups.Count
+            || section.Groups.Select(g => Name(g, c)).Distinct(StringComparer.OrdinalIgnoreCase).Count() != section.Groups.Count
             || section.Users.Select(u => u.Username).Distinct(StringComparer.OrdinalIgnoreCase).Count() != section.Users.Count)
             throw new PortabilityException("Duplicate groups or account-grant definitions.");
         var existingNames = await db.Groups.Select(x => x.Name).ToListAsync(ct);
@@ -87,7 +88,9 @@ public sealed class GroupsParticipant(StanzaDbContext db, AccessService access, 
             if (existingNames.Contains(name, StringComparer.OrdinalIgnoreCase)) conflicts.Add($"Group name conflict: '{name}'. Supply resource mapping 'group:{group.Name}' to a new name.");
             ParticipantSupport.Bound(group.Members.Count); ParticipantSupport.Bound(group.Grants.Count);
             if (group.Members.Distinct().Count() != group.Members.Count) throw new PortabilityException("Duplicate group members.");
-            foreach (var member in group.Members) await support.Owner(c, member, ct, true);
+            var mappedMembers = new HashSet<Guid>();
+            foreach (var member in group.Members)
+                if (!mappedMembers.Add(await support.Owner(c, member, ct, true))) throw new PortabilityException("Multiple group member references map to the same account.");
             await ValidateGrants(group.Grants, c, ct);
         }
         foreach (var user in section.Users)
@@ -133,5 +136,5 @@ public sealed class GroupsParticipant(StanzaDbContext db, AccessService access, 
         }
     }
     private static string Name(PortableGroup group, PortableParticipantImportContext c) =>
-        c.Mapping.Resources.TryGetValue("group:" + group.Name, out var value) ? value : group.Name;
+        (c.Mapping.Resources.TryGetValue("group:" + group.Name, out var value) ? value : group.Name).Trim();
 }

@@ -48,7 +48,9 @@ public sealed class RecoveryPostgresTests
             Assert.Empty(await target.Db.Accounts.ToListAsync());
             var result = await target.Service.RestoreAsync(backup, RecoveryServiceTests.Passphrase);
             Assert.True(result.RestartRequired);
-            Assert.Equal(expected, await target.SnapshotAsync());
+            var restoredStamp = (await target.Db.Accounts.AsNoTracking().SingleAsync()).SecurityStamp;
+            Assert.NotEqual(root.SecurityStamp, restoredStamp);
+            Assert.Equal(expected.Replace(root.SecurityStamp, restoredStamp, StringComparison.Ordinal), await target.SnapshotAsync());
             Assert.NotNull(await target.Accounts.AuthenticateAsync("postgres-root", RecoveryServiceTests.Password));
             var restarted = DataProtectionProvider.Create(new DirectoryInfo(target.Keys), builder => builder.SetApplicationName("Stanza.ControlPlane")).CreateProtector("recovery-tests");
             Assert.Equal("actual-postgres-recoverable-secret", restarted.Unprotect((await target.Db.Settings.SingleAsync(x => x.Key == "recovery-postgres-secret")).Value));

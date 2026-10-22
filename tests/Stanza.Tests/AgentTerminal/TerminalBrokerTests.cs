@@ -47,7 +47,21 @@ public sealed class TerminalBrokerTests
         await fixture.SendAsync(new("terminal.exited", fixture.LastSession, Data: "125"));
         Assert.True(fixture.Broker.IsConnected(fixture.Agent));
         for (var i = 0; i < 16; i++) Assert.Single((await session.ReadOutputAsync(fixture.Token)).Data.ToArray());
+        try { Assert.Equal(125, (await session.ReadOutputAsync(fixture.Token)).ExitCode); }
+        catch (IOException) { /* Exit can arrive while the bounded queue is still full. */ }
         await Assert.ThrowsAsync<IOException>(() => session.ReadOutputAsync(fixture.Token).AsTask());
+    }
+
+    [Fact]
+    public async Task Full64KiBBinaryInputWithBase64PlusCharactersFitsBoundedAgentFrame()
+    {
+        await using var fixture = await WireFixture.CreateAsync();
+        var session = await fixture.OpenAsync();
+        var input = Enumerable.Repeat((byte)251, 65536).ToArray();
+        await session.WriteInputAsync(input, fixture.Token);
+        // AgentCommandChannel.ReceiveAsync enforces the complete 96-KiB terminal wire frame bound.
+        var frame = await fixture.ReadAsync(); Assert.Equal("terminal.input", frame.Type);
+        Assert.Equal(input, Convert.FromBase64String(frame.Data!));
     }
 
     [Fact]

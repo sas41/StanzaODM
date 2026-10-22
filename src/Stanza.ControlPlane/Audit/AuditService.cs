@@ -48,14 +48,25 @@ public static class AuditExtensions
 {
     public static IApplicationBuilder UseStanzaAudit(this IApplicationBuilder app) => app.Use(async (context, next) =>
     {
+        if (context.Request.Method is "POST" or "PUT" or "PATCH" or "DELETE" && !context.Request.Path.StartsWithSegments("/api/agent-enrollment") && !context.Items.ContainsKey("stanza-audit"))
+        {
+            context.Items["stanza-audit"] = true;
+            // Persist before response headers are released: clients can safely dispose their
+            // request/host after reading a response without racing an unobserved DB writer.
+            context.Response.OnStarting(async () =>
+            {
+                try
+                {
+                    var actor = Guid.TryParse(context.User.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : (Guid?)null;
+                    if (actor is null && !await context.RequestServices.GetRequiredService<StanzaDbContext>().Accounts.AnyAsync(CancellationToken.None)) return;
+                    var controller = context.Request.RouteValues.GetValueOrDefault("controller")?.ToString() ?? "api";
+                    var action = context.Request.RouteValues.GetValueOrDefault("action")?.ToString() ?? "mutation";
+                    var resource = Guid.TryParse(context.Request.RouteValues.GetValueOrDefault("id")?.ToString(), out var resourceId) ? resourceId.ToString() : controller;
+                    await context.RequestServices.GetRequiredService<AuditService>().WriteAsync(actor, controller + "." + action, resource, context.Response.StatusCode.ToString(), CancellationToken.None);
+                }
+                catch (Exception) { context.RequestServices.GetRequiredService<ILogger<AuditService>>().LogError("Audit persistence failed for an HTTP mutation."); }
+            });
+        }
         await next();
-        if (context.Request.Method is not ("POST" or "PUT" or "PATCH" or "DELETE") || context.Request.Path.StartsWithSegments("/api/agent-enrollment")) return;
-        var actor = Guid.TryParse(context.User.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : (Guid?)null;
-        if (actor is null && !await context.RequestServices.GetRequiredService<StanzaDbContext>().Accounts.AnyAsync(CancellationToken.None)) return;
-        var controller = context.Request.RouteValues.GetValueOrDefault("controller")?.ToString() ?? "api";
-        var action = context.Request.RouteValues.GetValueOrDefault("action")?.ToString() ?? "mutation";
-        var resource = Guid.TryParse(context.Request.RouteValues.GetValueOrDefault("id")?.ToString(), out var resourceId) ? resourceId.ToString() : controller;
-        try { await context.RequestServices.GetRequiredService<AuditService>().WriteAsync(actor, controller + "." + action, resource, context.Response.StatusCode.ToString(), CancellationToken.None); }
-        catch (Exception) { context.RequestServices.GetRequiredService<ILogger<AuditService>>().LogError("Audit persistence failed for an HTTP mutation."); }
     });
 }

@@ -1,4 +1,5 @@
 @model AgentListModel
+@inject Stanza.ControlPlane.Transport.AgentCommandBroker Connections
 @{ ViewData["Title"] = "Agents"; }
 <span class="eyebrow">SERVER MANAGEMENT</span><h1>Agents</h1><p class="muted">Agents connect outbound and require explicit approval. Identity is verified using a persistent signing key.</p>
 @if (TempData["EnrollmentToken"] is string enrollmentToken)
@@ -9,7 +10,9 @@
 <section class="panel table-panel"><table><thead><tr><th>Server</th><th>Registration</th><th>Last signed contact</th><th>Actions</th></tr></thead><tbody>
 @foreach (var agent in Model.Agents)
 {
-    <tr><td><strong>@agent.Hostname</strong><br /><code>@agent.Id</code><details><summary>Identity fingerprint</summary><code>@agent.Identity</code></details></td><td><span class="badge">@agent.Status</span></td><td>@DateTimeOffset.FromUnixTimeSeconds(agent.LastSeenAt).ToString("u")</td><td>
+    <tr><td><strong>@agent.Hostname</strong><br /><code>@agent.Id</code><details><summary>Identity fingerprint</summary><code>@agent.Identity</code></details>
+    <p>@(Connections.IsConnected(agent.Id) ? "Connected" : "Offline")</p>@if (Connections.Capabilities(agent.Id) is { } capability) { <p class="field-help">@capability.Runtime @capability.DockerVersion · Compose @capability.ComposeVersion · @capability.Architecture · Terminal: @capability.TerminalAvailable · Host actions: @capability.HostExecutionAvailable</p> }
+    </td><td><span class="badge">@agent.Status</span></td><td>@DateTimeOffset.FromUnixTimeSeconds(agent.LastSeenAt).ToString("u")</td><td>
     @if (agent.Status == "pending")
     {
         <form method="post" asp-action="Status" asp-route-id="@agent.Id"><button class="button primary" name="status" value="approved" type="submit">Approve</button> <button class="button" name="status" value="rejected" type="submit">Reject</button></form>

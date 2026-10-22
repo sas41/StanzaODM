@@ -7,12 +7,13 @@ using Stanza.ControlPlane.Deployments;
 using Stanza.ControlPlane.Persistence;
 using Stanza.ControlPlane.Security;
 using Stanza.Core.Security;
+using Stanza.ControlPlane.Audit;
 
 namespace Stanza.ControlPlane.Portability;
 
 public sealed class PortabilityService(StanzaDbContext db, AccessService access, DeploymentDraftService drafts,
     IPortableDraftStore store, IDataProtectionProvider protection, TimeProvider clock,
-    IEnumerable<IPortableConfigurationParticipant> participants)
+    IEnumerable<IPortableConfigurationParticipant> participants, AuditService? audit = null)
 {
     public IReadOnlyList<string> SupportedSections => participants.Select(x => x.Kind).Order().ToArray();
 
@@ -24,7 +25,10 @@ public sealed class PortabilityService(StanzaDbContext db, AccessService access,
         if (selection.Deployments.Count > 100 || selection.Deployments.Distinct().Count() != selection.Deployments.Count)
             throw new PortabilityException("Select at most 100 distinct deployments.");
         var selectedParticipants = ResolveParticipants(selection.Sections);
-        if (selection.Sections.Count > 0) await RequireAsync(actor, "configuration.export", "instance", null, ct);
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await SecurityWriteGuard.LockAsync(db, ct);
+        if (selection.Sections.Count > 0 && (selection.Deployments.Count == 0 || selectedParticipants.Any(p => p.Kind is not ("sources" or "automation"))))
+            await RequireAsync(actor, "configuration.export", "instance", null, ct);
         var agents = new List<PortableAgent>();
         var agentIds = new Dictionary<Guid, string>();
         var deployments = new List<PortableDeployment>();
@@ -62,17 +66,26 @@ public sealed class PortabilityService(StanzaDbContext db, AccessService access,
         PortableBundleValidator.Validate(bundle);
         var output = JsonSerializer.SerializeToUtf8Bytes(bundle, PortableBundleValidator.JsonOptions);
         if (output.Length > PortableBundleValidator.MaximumBundleBytes) throw new PortabilityException("The selected export exceeds 32 MiB; select a smaller scope.");
+        if (audit is not null)
+        {
+            foreach (var id in selection.Deployments) await audit.WriteAsync(actor, "configuration.export.deployment", id.ToString(), "plaintext-acknowledged", ct);
+            foreach (var reference in resourceReferences.Where(r => r.Value.Type == "credential"))
+                await audit.WriteAsync(actor, "configuration.export.credential", reference.Key.ToString(), "plaintext-acknowledged", ct);
+            await audit.WriteAsync(actor, "configuration.export", "instance", $"deployments:{deployments.Count};sections:{sections.Count}", ct);
+        }
+        await transaction.CommitAsync(ct);
         return output;
     }
 
     public async Task<PortablePreview> PreviewAsync(Guid actor, byte[] bytes, PortableImportMapping mapping, CancellationToken ct = default)
     {
         await RequireAsync(actor, "configuration.import", "instance", null, ct);
-        await RequireAsync(actor, "deployment.create", "instance", null, ct);
-        var bundle = PortableBundleValidator.Parse(bytes);
+        var bundle = WithSourceReservations(PortableBundleValidator.Parse(bytes));
+        if (bundle.Deployments.Count > 0) await RequireAsync(actor, "deployment.create", "instance", null, ct);
         var content = new PreviewContent(bundle, mapping);
         var conflicts = await ValidateImportAsync(actor, content, new Dictionary<string, Guid>(), ct);
         var canonical = JsonSerializer.SerializeToUtf8Bytes(content, PortableBundleValidator.JsonOptions);
+        if (canonical.Length > PortableBundleValidator.MaximumBundleBytes) throw new PortabilityException("The canonical import preview exceeds 32 MiB; select a smaller scope.");
         var hash = Convert.ToHexString(SHA256.HashData(canonical));
         var existing = await db.Set<PortableImportEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.ActorId == actor && x.Fingerprint == hash, ct);
         if (existing is not null) throw new PortabilityException("This exact preview already exists or has been applied; use its existing run instead of submitting duplicates.");
@@ -99,11 +112,11 @@ public sealed class PortabilityService(StanzaDbContext db, AccessService access,
     {
         if (!acknowledged) throw new PortabilityException("Confirm the preview, inactive automation, and no persistent data transfer before applying.");
         await RequireAsync(actor, "configuration.import", "instance", null, ct);
-        await RequireAsync(actor, "deployment.create", "instance", null, ct);
         var row = await RequiredRunAsync(actor, id, ct);
         if (row.State != "preview" || row.ExpiresAt <= clock.GetUtcNow().ToUnixTimeSeconds() || !string.Equals(row.Fingerprint, fingerprint, StringComparison.Ordinal))
             throw new PortabilityException("The preview has expired, changed, or was already applied. No repeat application is allowed.");
         var content = ReadContent(row);
+        if (content.Bundle.Deployments.Count > 0) await RequireAsync(actor, "deployment.create", "instance", null, ct);
         var conflicts = await ValidateImportAsync(actor, content, new Dictionary<string, Guid>(), ct);
         if (conflicts.Count > 0) throw new PortabilityException("Resolve all preview conflicts before applying.");
         var claimed = await db.Set<PortableImportEntity>().Where(x => x.Id == id && x.ActorId == actor && x.State == "preview" && x.ExpiresAt > clock.GetUtcNow().ToUnixTimeSeconds())
@@ -115,6 +128,8 @@ public sealed class PortabilityService(StanzaDbContext db, AccessService access,
         string? currentSection = "deployment-workspaces";
         try
         {
+            if (audit is not null) await audit.WriteAsync(actor, "configuration.import.claimed", id.ToString(), "staged-inactive", ct);
+            await SaveResourceProgressAsync(id, resources, completedSections, currentSection, ct);
             foreach (var deployment in content.Bundle.Deployments)
             {
                 try
@@ -135,6 +150,7 @@ public sealed class PortabilityService(StanzaDbContext db, AccessService access,
                 currentSection = section.Kind;
                 await SaveResourceProgressAsync(id, resources, completedSections, currentSection, ct);
                 var participant = ResolveParticipants([section.Kind]).Single();
+                await RequireAsync(actor, "configuration.import", "instance", null, ct);
                 await RequireSecurityPolicyAsync(actor, participant, ct);
                 var errors = await participant.ValidateAsync(section.Content, context, ct);
                 if (errors.Count != 0) throw new PortabilityException("A participant's references changed during import.");
@@ -145,6 +161,7 @@ public sealed class PortabilityService(StanzaDbContext db, AccessService access,
             await SaveProgressAsync(id, created, CancellationToken.None);
             await FinishAsync(id, "complete", null, CancellationToken.None);
             await SaveResourceProgressAsync(id, resources, completedSections, null, CancellationToken.None);
+            if (audit is not null) await audit.WriteAsync(actor, "configuration.import.complete", id.ToString(), "inactive", CancellationToken.None);
             return new(id, "complete", created.Values.ToArray(), null) { CreatedResources = resources, CompletedSections = completedSections };
         }
         catch (Exception)
@@ -154,6 +171,7 @@ public sealed class PortabilityService(StanzaDbContext db, AccessService access,
             await SaveResourceProgressAsync(id, resources, completedSections, currentSection, CancellationToken.None);
             const string message = "Import interrupted. Configuration may be partially applied; inspect listed deployments and participant resources. Workloads were not started. This run cannot be replayed.";
             await FinishAsync(id, "partial", message, CancellationToken.None);
+            if (audit is not null) await audit.WriteAsync(actor, "configuration.import.partial", id.ToString(), "inspect-staged-results", CancellationToken.None);
             return new(id, "partial", created.Values.ToArray(), message) { CreatedResources = resources, CompletedSections = completedSections, CurrentSection = currentSection };
         }
     }
@@ -210,6 +228,7 @@ public sealed class PortabilityService(StanzaDbContext db, AccessService access,
             foreach (var section in sections.OrderBy(s => selected.Single(x => x.Kind == s.Kind).Priority))
                 await selected.Single(x => x.Kind == section.Kind).ApplyAsync(section.Content,
                     importContext, ct);
+            if (audit is not null) await audit.WriteAsync(actor, "configuration.clone.created", id.ToString(), "inactive-no-data-transfer", ct);
         }
         catch (Exception) { throw new PortablePartialCreationException(id); }
         return id;
@@ -331,7 +350,9 @@ public sealed class PortabilityService(StanzaDbContext db, AccessService access,
             ["Credentials, tokens, environment values and files are plaintext in this bundle. Imported workloads and automation remain inactive. Existing grants are not copied implicitly.",
              "Import uses individually committed configuration services. Interrupted imports are reported as partial, not rolled back or automatically replayed.",
              .. content.Bundle.Deployments.SelectMany(d => PortableBundleValidator.Warnings(d.Compose)).Distinct()],
-            conflicts, conflicts.Count == 0 && row.State == "preview" && row.ExpiresAt > clock.GetUtcNow().ToUnixTimeSeconds());
+            conflicts, conflicts.Count == 0 && row.State == "preview" && row.ExpiresAt > clock.GetUtcNow().ToUnixTimeSeconds())
+        { Sections = content.Bundle.Sections.OrderBy(s => ResolveParticipants([s.Kind]).Single().Priority).Select(s => s.Kind).ToArray(),
+            AgentMappings = content.Mapping.Agents, ResourceMappings = content.Mapping.Resources, References = content.Bundle.References };
     private IDataProtector Protector(Guid id, Guid actor) => protection.CreateProtector("Stanza.PortablePreview.v1", id.ToString("N"), actor.ToString("N"));
     private static string Name(PortableDeployment d, PortableImportMapping mapping) => mapping.DeploymentNames.TryGetValue(d.Id, out var name) ? name : d.Name;
     private Task<int> SaveProgressAsync(Guid id, IReadOnlyDictionary<string, Guid> created, CancellationToken ct) =>

@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
@@ -28,9 +29,11 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         ["validate"] = "deployment.validate", ["build"] = "deployment.build", ["pull"] = "deployment.deploy",
         ["deploy"] = "deployment.deploy", ["start"] = "deployment.start", ["stop"] = "deployment.stop",
         ["restart"] = "deployment.restart", ["remove"] = "deployment.remove", ["status"] = "deployment.read",
-        ["logs"] = "logs.read", ["container-exec"] = "container.execute", ["image-digests"] = "automation.read"
+        ["logs"] = "logs.read", ["container-exec"] = "container.execute", ["image-digests"] = "automation.read",
+        ["environment-preview"] = "deployment.read"
     };
     public static bool Terminal(string state) => state is "Succeeded" or "Failed" or "Cancelled" or "Unknown";
+    internal static bool ControlsExistingContainers(string kind) => kind is "start" or "stop" or "restart" or "remove" or "status" or "logs" or "container-exec";
     public async Task<OperationSummary> EnqueueAsync(OperationSubmission submission, CancellationToken token = default)
     {
         if (maintenance?.Paused == true) throw new OperationException("Recovery requires a Control Plane restart before execution can resume.");
@@ -42,27 +45,32 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         var files = new List<AgentFile>();
         var environments = new List<AgentEnvironmentFile>();
         var sourceSnapshot = new DeploymentSourcesSnapshot([], []);
+        Guid? parentAppliedOperationId = null;
         long revision = 0;
         Guid? target = submission.AgentId;
         if (submission.DeploymentId is { } deploymentId)
         {
             await AuthorizeAsync(submission.ActorId, deploymentId, submission.Kind, token);
             var snapshot = await drafts.SnapshotForExecutionAsync(submission.ActorId, deploymentId, ct: token);
-            revision = snapshot.Revision;
-            target ??= snapshot.AgentId;
-            files.AddRange(snapshot.Files);
-            var inherited = await settings.ReadInternalAsync(token);
-            var agentEnvironment = "";
-            if (target is { } environmentAgent)
+            var runtime = await db.Set<DeploymentRuntimeEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.DeploymentId == deploymentId, token);
+            revision = ControlsExistingContainers(submission.Kind) ? runtime?.Revision ?? 0 : snapshot.Revision;
+            target ??= ControlsExistingContainers(submission.Kind) && runtime is not null ? runtime.AgentId : snapshot.AgentId;
+            if (!ControlsExistingContainers(submission.Kind))
             {
-                var agent = await db.Set<AgentEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == environmentAgent, token)
-                    ?? throw new OperationException("The target Agent does not exist.");
-                agentEnvironment = protection.CreateProtector("Stanza.AgentEnvironment.v1").CreateProtector(environmentAgent.ToString("N")).Unprotect(agent.ProtectedEnvironment);
+                files.AddRange(snapshot.Files);
+                var inherited = await settings.ReadInternalAsync(token);
+                var agentEnvironment = "";
+                if (target is { } environmentAgent)
+                {
+                    var agent = await db.Set<AgentEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == environmentAgent, token)
+                        ?? throw new OperationException("The target Agent does not exist.");
+                    agentEnvironment = protection.CreateProtector("Stanza.AgentEnvironment.v1").CreateProtector(environmentAgent.ToString("N")).Unprotect(agent.ProtectedEnvironment);
+                }
+                environments.Add(new("global.env", inherited.GlobalEnvironment));
+                environments.Add(new("agent.env", agentEnvironment));
+                environments.Add(new("deployment.env", snapshot.EnvironmentText));
+                if (submission.Kind != "environment-preview") sourceSnapshot = await sources.PrepareAsync(submission.ActorId, deploymentId, token);
             }
-            environments.Add(new("global.env", inherited.GlobalEnvironment));
-            environments.Add(new("agent.env", agentEnvironment));
-            environments.Add(new("deployment.env", snapshot.EnvironmentText));
-            sourceSnapshot = await sources.PrepareAsync(submission.ActorId, deploymentId, token);
         }
         else if (submission.Kind != "host-exec") throw new OperationException("A deployment is required for this operation.");
         if (target is null || target == Guid.Empty) throw new OperationException("Assign an approved Agent before running this operation.");
@@ -77,14 +85,28 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         if (submission.Execution is { } execution && (string.IsNullOrWhiteSpace(execution.Executable) || execution.Executable.Contains('\0') || execution.Arguments.Count > 256 || execution.Arguments.Any(x => x is null || x.Length > 8192 || x.Contains('\0'))))
             throw new OperationException("Invalid command arguments.");
         if (submission.Trigger.Length is < 1 or > 100 || submission.Trigger.Any(char.IsControl)) throw new OperationException("Invalid operation trigger.");
+        if (submission.Kind == "environment-preview")
+            await RequireEnvironmentPreviewAsync(submission.ActorId, submission.DeploymentId!.Value, target.Value, token);
+        if (await IsImagePolicyAsync(submission.ActorId, submission.Trigger, submission.Kind, submission.DeploymentId, token))
+        {
+            if (automationGuard is null) throw new OperationException("Image-policy execution authorization is unavailable.");
+            await automationGuard.AuthorizeAsync(submission.ActorId, submission.Trigger, submission.Kind, submission.DeploymentId, target.Value, token);
+            var baseline = await ImageBaselineAsync(submission.ActorId, submission.DeploymentId!.Value, target.Value, sourceSnapshot, null, null, token);
+            parentAppliedOperationId = baseline.Operation.Id;
+            sourceSnapshot = baseline.Sources;
+        }
         var request = new AgentWorkRequest(id, submission.DeploymentId ?? Guid.Empty, submission.Kind, files, environments,
             submission.Execution, sourceSnapshot.Git, sourceSnapshot.Registries, await agentPolicies.RuntimeAsync(target.Value, token));
-        var serialized = JsonSerializer.Serialize(request);
-        if (System.Text.Encoding.UTF8.GetByteCount(serialized) > 30 * 1024 * 1024) throw new OperationException("The execution snapshot exceeds the transport limit.");
+        var serialized = JsonSerializer.SerializeToNode(request)!;
+        if (submission.DeploymentId is { } sourceDeployment && !ControlsExistingContainers(submission.Kind) && submission.Kind != "environment-preview")
+            serialized["_stanzaSourceDefinitions"] = JsonSerializer.SerializeToNode(await SourceDefinitionsAsync(sourceDeployment, token));
+        var requestText = serialized.ToJsonString();
+        if (System.Text.Encoding.UTF8.GetByteCount(requestText) > 30 * 1024 * 1024) throw new OperationException("The execution snapshot exceeds the transport limit.");
         var operation = new OperationEntity { Id = id, ActorId = submission.ActorId, DeploymentId = submission.DeploymentId,
             RequiresMovePermission = submission.AgentId.HasValue && submission.DeploymentId.HasValue,
+            ParentAppliedOperationId = parentAppliedOperationId,
             AgentId = target.Value, Revision = revision, Kind = submission.Kind, Trigger = submission.Trigger,
-            CreatedAt = clock.GetUtcNow().ToUnixTimeSeconds(), ProtectedRequest = Protector(id).Protect(serialized) };
+            CreatedAt = clock.GetUtcNow().ToUnixTimeSeconds(), ProtectedRequest = Protector(id).Protect(requestText) };
         db.Set<OperationEntity>().Add(operation);
         try { await db.SaveChangesAsync(token); await transaction.CommitAsync(token); }
         finally { db.Entry(operation).State = EntityState.Detached; }
@@ -114,8 +136,9 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
     {
         var row = await RequiredAsync(id, ct);
         if (!await CanReadAsync(actor, row, ct)) throw new OperationException("Operation read access is denied.");
-        var output = row.ProtectedResponse is not null && (row.DeploymentId is { } deployment
-            ? await access.IsAllowedAsync(actor, "logs.read", "deployment", deployment, ct)
+        var output = row.ProtectedResponse is not null && (row.Kind == "environment-preview" && row.DeploymentId is { } previewDeployment
+            ? await CanRevealEnvironmentPreviewAsync(actor, previewDeployment, row.AgentId, ct)
+            : row.DeploymentId is { } deployment ? await access.IsAllowedAsync(actor, "logs.read", "deployment", deployment, ct)
             : await access.IsAllowedAsync(actor, "host.execute", "agent", row.AgentId, ct))
             ? JsonSerializer.Deserialize<AgentWorkResponse>(Protector(id).Unprotect(row.ProtectedResponse))?.Output : null;
         return new(Summary(row), output);
@@ -156,11 +179,27 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         {
             await AuthorizeAsync(row.ActorId, deployment, row.Kind, ct);
             if (row.RequiresMovePermission) await RequireAsync(row.ActorId, "deployment.move", "deployment", deployment, ct);
-            var current = await sources.PrepareAsync(row.ActorId, deployment, ct);
+            var current = ControlsExistingContainers(row.Kind) || row.Kind == "environment-preview"
+                ? new DeploymentSourcesSnapshot([], []) : await sources.PrepareAsync(row.ActorId, deployment, ct);
             var captured = Request(row);
-            if (JsonSerializer.Serialize(current.Git) != JsonSerializer.Serialize(captured.Sources ?? []) || JsonSerializer.Serialize(current.Registries) != JsonSerializer.Serialize(captured.Registries ?? []))
+            var imagePolicy = await IsImagePolicyAsync(row.ActorId, row.Trigger, row.Kind, deployment, ct);
+            if (imagePolicy != row.ParentAppliedOperationId.HasValue) throw new OperationException("The image-policy baseline is invalid.");
+            if (imagePolicy)
+            {
+                if (automationGuard is null) throw new OperationException("Image-policy execution authorization is unavailable.");
+                var baseline = await ImageBaselineAsync(row.ActorId, deployment, row.AgentId, current, row.ParentAppliedOperationId, row.Id, ct);
+                if (row.Revision != baseline.Operation.Revision || !SameFiles(captured.Files, baseline.Request.Files) ||
+                    !SameEnvironment(captured.EnvironmentFiles, baseline.Request.EnvironmentFiles))
+                    throw new OperationException("The applied image-policy configuration changed; create a new operation snapshot.");
+                current = baseline.Sources;
+            }
+            if (!SameSources(current, captured))
                 throw new OperationException("Source credentials or definitions changed; create a new operation snapshot.");
+            if (!ControlsExistingContainers(row.Kind) && row.Kind != "environment-preview" &&
+                JsonSerializer.Serialize(await SourceDefinitionsAsync(deployment, ct)) != JsonSerializer.Serialize(ReadSourceDefinitions(row)))
+                throw new OperationException("Source bindings changed; create a new operation snapshot.");
             await RequireAsync(row.ActorId, "agent.read", "agent", row.AgentId, ct);
+            if (row.Kind == "environment-preview") await RequireEnvironmentPreviewAsync(row.ActorId, deployment, row.AgentId, ct);
         }
         else await RequireAsync(row.ActorId, "host.execute", "agent", row.AgentId, ct);
         if (!(await agentPolicies.RuntimeAsync(row.AgentId, ct)).ExecutionEnabled) throw new OperationException("Agent execution has been disabled.");
@@ -183,6 +222,130 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         if (!Permissions.TryGetValue(kind, out var permission)) throw new OperationException("Unsupported operation.");
         await RequireAsync(actor, permission, "deployment", deployment, ct);
     }
+    private async Task<bool> CanRevealEnvironmentPreviewAsync(Guid actor, Guid deployment, Guid agent, CancellationToken ct) =>
+        await access.IsAllowedAsync(actor, "deployment.read", "deployment", deployment, ct) &&
+        await access.IsAllowedAsync(actor, "agent.read", "agent", agent, ct) &&
+        await access.IsAllowedAsync(actor, "environment.reveal", "instance", null, ct) &&
+        await access.IsAllowedAsync(actor, "environment.reveal", "agent", agent, ct) &&
+        await access.IsAllowedAsync(actor, "environment.reveal", "deployment", deployment, ct);
+
+    private async Task RequireEnvironmentPreviewAsync(Guid actor, Guid deployment, Guid agent, CancellationToken ct)
+    {
+        if (!await CanRevealEnvironmentPreviewAsync(actor, deployment, agent, ct))
+            throw new OperationException("Environment preview requires deployment/Agent read and reveal access to all three environment scopes.");
+    }
+
+    private async Task<bool> IsImagePolicyAsync(Guid actor, string trigger, string kind, Guid? deployment, CancellationToken ct)
+    {
+        if (!trigger.StartsWith("automation:", StringComparison.Ordinal)) return false;
+        if (!Guid.TryParseExact(trigger[11..], "N", out var runId)) throw new OperationException("Invalid automation execution identity.");
+        var run = await db.Set<AutomationRun>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == runId, ct)
+            ?? throw new OperationException("The automation execution no longer exists.");
+        if (run.OwnerId != actor || run.State != "running" || run.CancelRequested || run.LeaseUntil < clock.GetUtcNow().ToUnixTimeSeconds())
+            throw new OperationException("The automation execution is no longer authorized.");
+        if (run.Source is not ("image-policy" or "manual-image-policy")) return false;
+        if (kind != "deploy" || deployment is null || run.DeploymentId != deployment || run.Operation != "image-check" || run.ActionId is not null)
+            throw new OperationException("An image policy may only redeploy its own applied deployment.");
+        return true;
+    }
+
+    private sealed record ImageBaseline(OperationEntity Operation, AgentWorkRequest Request, DeploymentSourcesSnapshot Sources);
+    private sealed record GitDefinition(Guid Id, string Url, string Reference, string Destination, Guid? CredentialId, int Position);
+    private sealed record SourceDefinitions(IReadOnlyList<GitDefinition> Git, IReadOnlyList<Guid> RegistryCredentialIds);
+
+    private async Task<SourceDefinitions> SourceDefinitionsAsync(Guid deployment, CancellationToken ct) => new(
+        await db.Set<DeploymentGitSourceEntity>().AsNoTracking().Where(x => x.DeploymentId == deployment)
+            .OrderBy(x => x.Position).ThenBy(x => x.Id).Select(x => new GitDefinition(x.Id, x.Url, x.Reference, x.Destination, x.CredentialId, x.Position)).ToArrayAsync(ct),
+        (await db.Set<DeploymentRegistryBindingEntity>().AsNoTracking().Where(x => x.DeploymentId == deployment).Select(x => x.CredentialId).ToArrayAsync(ct)).Order().ToArray());
+
+    private SourceDefinitions ReadSourceDefinitions(OperationEntity row)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(Protector(row.Id).Unprotect(row.ProtectedRequest));
+            return document.RootElement.TryGetProperty("_stanzaSourceDefinitions", out var definitions)
+                ? definitions.Deserialize<SourceDefinitions>() ?? throw new JsonException()
+                : throw new OperationException("The applied source-definition snapshot is unavailable. Create a new deployment snapshot.");
+        }
+        catch (Exception error) when (error is JsonException or CryptographicException)
+        { throw new OperationException("The applied source-definition snapshot is invalid."); }
+    }
+
+    private async Task<ImageBaseline> ImageBaselineAsync(Guid actor, Guid deployment, Guid agent, DeploymentSourcesSnapshot fresh,
+        Guid? expectedParent, Guid? currentOperation, CancellationToken ct)
+    {
+        var runtime = await db.Set<DeploymentRuntimeEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.DeploymentId == deployment, ct);
+        var draft = await drafts.SnapshotForExecutionAsync(actor, deployment, ct: ct);
+        var currentDraft = await db.Set<DeploymentDraftEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == deployment, ct);
+        if (runtime is null || currentDraft is null || runtime.Revision < 1 || runtime.AgentId != agent || draft.AgentId != agent ||
+            currentDraft.TargetAgentId != agent || draft.Revision != runtime.Revision)
+            throw new OperationException("Automatic image updates cannot apply pending configuration or placement changes.");
+        if (await db.Set<OperationEntity>().AnyAsync(x => x.DeploymentId == deployment && x.Id != currentOperation &&
+                (x.State == "Queued" || x.State == "Running" || x.State == "CancellationRequested" || x.State == "Unknown"), ct))
+            throw new OperationException("Another pending or uncertain operation prevents this automatic image update.");
+        var latest = await db.Set<OperationEntity>().AsNoTracking().Where(x => x.DeploymentId == deployment && x.Kind == "deploy" && x.State == "Succeeded")
+            .OrderByDescending(x => x.CompletedAt).ThenByDescending(x => x.CreatedAt).Take(2).ToArrayAsync(ct);
+        if (latest.Length == 0 || latest[0].AgentId != agent || latest[0].Revision != runtime.Revision ||
+            expectedParent.HasValue && latest[0].Id != expectedParent || latest[0].CompletedAt is null ||
+            latest.Length > 1 && latest[0].CompletedAt == latest[1].CompletedAt && latest[0].CreatedAt == latest[1].CreatedAt)
+            throw new OperationException("The applied image-policy baseline changed or cannot be identified unambiguously.");
+        var applied = latest[0];
+        AgentWorkRequest original;
+        AgentWorkResponse response;
+        try
+        {
+            original = Request(applied);
+            var metadata = applied.ProtectedAppliedMetadata ?? applied.ProtectedResponse;
+            response = metadata is null ? throw new OperationException("Applied commit metadata is unavailable.") :
+                JsonSerializer.Deserialize<AgentWorkResponse>(Protector(applied.Id).Unprotect(metadata)) ?? throw new JsonException();
+        }
+        catch (Exception error) when (error is CryptographicException or JsonException)
+        { throw new OperationException("The applied image-policy snapshot could not be decrypted."); }
+        if (original.Id != applied.Id || original.DeploymentId != deployment || original.Operation != "deploy" ||
+            response.Id != applied.Id || !response.Succeeded || response.Code == "uncertain" ||
+            original.EnvironmentFiles.Count != 3 || !original.EnvironmentFiles.Select(x => x.Name).SequenceEqual(new[] { "global.env", "agent.env", "deployment.env" }))
+            throw new OperationException("The applied image-policy snapshot is invalid.");
+        var inherited = await settings.ReadInternalAsync(ct);
+        var agentRow = await db.Set<AgentEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == agent, ct)
+            ?? throw new OperationException("The applied Agent no longer exists.");
+        string agentEnvironment;
+        try { agentEnvironment = protection.CreateProtector("Stanza.AgentEnvironment.v1", agent.ToString("N")).Unprotect(agentRow.ProtectedEnvironment); }
+        catch (CryptographicException) { throw new OperationException("The applied Agent environment could not be decrypted."); }
+        var environments = new AgentEnvironmentFile[] { new("global.env", inherited.GlobalEnvironment), new("agent.env", agentEnvironment), new("deployment.env", draft.EnvironmentText) };
+        if (!SameFiles(draft.Files, original.Files) || !SameEnvironment(environments, original.EnvironmentFiles))
+            throw new OperationException("Automatic image updates cannot apply pending file or environment changes.");
+
+        // Keep authored references/binding identities in private encrypted persistence metadata, not the
+        // wire contract: an automatic request uses SHA refs, while the authored definition remains a branch.
+        var definitions = ReadSourceDefinitions(applied);
+        var currentDefinitions = await SourceDefinitionsAsync(deployment, ct);
+        if (JsonSerializer.Serialize(definitions) != JsonSerializer.Serialize(currentDefinitions) ||
+            definitions.Git.Count != fresh.Git.Count || !definitions.Git.Zip(fresh.Git).All(pair =>
+                pair.First.Url == pair.Second.Url && pair.First.Reference == pair.Second.Reference && pair.First.Destination == pair.Second.Destination) ||
+            !(original.Registries ?? []).Select(x => x.Server).Order(StringComparer.Ordinal)
+                .SequenceEqual(fresh.Registries.Select(x => x.Server).Order(StringComparer.Ordinal), StringComparer.Ordinal))
+            throw new OperationException("Automatic image updates cannot apply pending source definitions or registry bindings.");
+        var pinned = new List<AgentGitSource>();
+        foreach (var source in fresh.Git)
+        {
+            if (response.ResolvedSources is null || !response.ResolvedSources.TryGetValue(source.Destination, out var commit) ||
+                commit is null || commit.Length != 40 || !commit.All(Uri.IsHexDigit))
+                throw new OperationException("An exact applied Git commit is unavailable; automatic image update denied.");
+            pinned.Add(source with { Reference = commit });
+        }
+        return new(applied, original, new(pinned, fresh.Registries));
+    }
+
+    private static bool SameFiles(IReadOnlyList<AgentFile> left, IReadOnlyList<AgentFile> right) => left.Count == right.Count &&
+        left.Zip(right).All(pair => pair.First.Path == pair.Second.Path && pair.First.IsDirectory == pair.Second.IsDirectory &&
+            pair.First.Content.AsSpan().SequenceEqual(pair.Second.Content));
+    private static bool SameEnvironment(IReadOnlyList<AgentEnvironmentFile> left, IReadOnlyList<AgentEnvironmentFile> right) =>
+        left.Count == right.Count && left.Zip(right).All(pair => pair.First.Name == pair.Second.Name && pair.First.Text == pair.Second.Text);
+    private static bool SameSources(DeploymentSourcesSnapshot current, AgentWorkRequest captured) =>
+        JsonSerializer.Serialize(current.Git) == JsonSerializer.Serialize(captured.Sources ?? []) &&
+        JsonSerializer.Serialize(current.Registries.OrderBy(x => x.Server, StringComparer.Ordinal)) ==
+        JsonSerializer.Serialize((captured.Registries ?? []).OrderBy(x => x.Server, StringComparer.Ordinal));
+
     private async Task RequireAsync(Guid actor, string action, string type, Guid? id, CancellationToken ct)
     {
         if (!await access.IsAllowedAsync(actor, action, type, id, ct)) throw new OperationException($"Permission required: {action}.");

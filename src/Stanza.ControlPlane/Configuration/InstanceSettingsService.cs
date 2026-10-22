@@ -59,7 +59,7 @@ public sealed class InstanceSettingsService(StanzaDbContext store, IDataProtecti
         var settings = new InstanceSettings(publicUrl ?? original.PublicUrl, environment ?? original.GlobalEnvironment, version);
         Validate(settings);
         var row = await store.Settings.SingleOrDefaultAsync(x => x.Key == Key, token);
-        var currentVersion = row is null ? 0 : Decode(row.Value).Version;
+        var currentVersion = original.Version;
         if (settings.Version != currentVersion)
             throw new SettingsOperationException("Settings were changed by another user. Reload before saving.");
         var value = protector.Protect(System.Text.Json.JsonSerializer.Serialize(settings with { Version = checked(currentVersion + 1) }));

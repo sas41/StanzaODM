@@ -7,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Stanza.ControlPlane.Agents;
 using Stanza.ControlPlane.Audit;
+using Stanza.ControlPlane.Automation;
 using Stanza.ControlPlane.Configuration;
 using Stanza.ControlPlane.Deployments;
 using Stanza.ControlPlane.Operations;
@@ -47,6 +48,7 @@ internal sealed class OperationTestHarness : IAsyncDisposable
         registrations.AddScoped<DeploymentDraftService>(); registrations.AddScoped<InstanceSettingsService>();
         registrations.AddScoped<OperationalPolicyService>(); registrations.AddScoped<AgentPolicyService>();
         registrations.AddScoped<AgentAdministrationService>(); registrations.AddScoped<AuditService>();
+        registrations.AddScoped<AutomationAuthorization>(); registrations.AddScoped<AutomationService>(); registrations.AddScoped<AutomationOperationGuard>();
         registrations.AddScoped<SourceService>();
         registrations.AddScoped<ISourceSnapshotProvider>(services => services.GetRequiredService<SourceService>());
         registrations.AddScoped<OperationService>();

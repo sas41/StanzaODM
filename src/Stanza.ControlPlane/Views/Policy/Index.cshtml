@@ -7,7 +7,9 @@
 {
     <label for="@property.Name">@property.Name</label>
     @if (property.PropertyType == typeof(bool)) { <input id="@property.Name" name="@property.Name" type="checkbox" value="true" checked="@((bool)property.GetValue(Model.Policy)!)" /><input type="hidden" name="@property.Name" value="false" /> }
+    else if (property.PropertyType == typeof(string)) { <input id="@property.Name" name="@property.Name" value="@property.GetValue(Model.Policy)" /> }
     else { <input id="@property.Name" name="@property.Name" type="number" value="@property.GetValue(Model.Policy)" required /> }
 }
 @if (User.IsInRole("Admin") || User.IsInRole("SystemAdmin")) { <button class="button primary" type="submit">Save policy</button> }
 </section></form>
+<div class="notice warning">For HTTPS termination at a reverse proxy, configure only that proxy's actual IP or narrowly scoped network above and preserve the original Host header. Unconfigured forwarded headers are ignored; trust-all networks are rejected. The public URL in Settings must match the browser origin.</div>

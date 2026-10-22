@@ -28,6 +28,7 @@ public sealed class SettingsController(InstanceSettingsService settings) : Contr
         model.CanWriteSettings = await settings.CanAsync(ActorId, "settings.write", token);
         model.CanRevealEnvironment = await settings.CanAsync(ActorId, "environment.reveal", token);
         model.CanWriteEnvironment = await settings.CanAsync(ActorId, "environment.write", token);
+        if (!model.CanWriteSettings && !model.CanWriteEnvironment) return Forbid();
         if (!ModelState.IsValid) return View(model);
         try
         {

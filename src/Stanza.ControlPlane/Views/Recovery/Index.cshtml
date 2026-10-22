@@ -7,6 +7,8 @@
         <h2>Restore completed — restart required</h2>
         <p>The database and persisted encryption keys were restored. Restart every Control Plane process before signing in or using restored secrets; the running process may have cached its previous key ring.</p>
         <p>Use the restored account credentials after restarting. Agent identities and approval/enrollment state are preserved on the server, but Agent private-key files must still be retained on their original Agents.</p>
+        <p>Previously issued browser sessions were invalidated. Background execution remains paused until the restart.</p>
+        @if (ViewData["RestartTicket"] is string ticket) { <form method="post" asp-action="Restart"><input name="ticket" type="hidden" value="@ticket" /><button class="button primary" type="submit">Restart Control Plane</button></form> }
     </section>
 }
 else

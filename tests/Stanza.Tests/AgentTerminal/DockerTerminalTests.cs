@@ -1,6 +1,7 @@
 using System.Net.Sockets;
 using System.Text;
 using System.Threading.Channels;
+using System.Collections.Concurrent;
 using Stanza.Agent.Runtime;
 using Stanza.Agent.Terminals;
 using Stanza.Core.Contracts;
@@ -93,6 +94,31 @@ public sealed class DockerTerminalTests
             new(id, Guid.NewGuid(), "terminal.open", [], [], new("/bin/sh", []), Policy: new(ExecutionEnabled: false))), _ => Task.CompletedTask, default));
         using var client = new DockerTerminalClient("unix:///var/run/docker.sock");
         await Assert.ThrowsAsync<IOException>(() => client.ResolveAsync(Guid.NewGuid(), new("/bin/sh", []), default));
+    }
+
+    [Fact]
+    public async Task AgentSessionAndInputQueuesAreBoundedAndDisconnectReleasesAllPendingOpens()
+    {
+        var socketPath = Path.Combine("/tmp/opencode", "stanza-terminal-bound-" + Guid.NewGuid().ToString("N") + ".sock");
+        using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        listener.Bind(new UnixDomainSocketEndPoint(socketPath)); listener.Listen(64);
+        var manager = new AgentTerminalManager();
+        var sent = new ConcurrentQueue<AgentWireMessage>();
+        Task Send(AgentWireMessage message) { sent.Enqueue(message); return Task.CompletedTask; }
+        var ids = Enumerable.Range(0, 17).Select(_ => Guid.NewGuid()).ToArray();
+        try
+        {
+            foreach (var id in ids)
+                await manager.HandleAsync(new("terminal.open", id, new(id, Guid.NewGuid(), "terminal.open", [], [],
+                    new("/bin/sh", [], Container: "scoped"), Policy: new(DockerEndpoint: "unix://" + socketPath))), Send, default);
+            var rejected = Assert.Single(sent); Assert.Equal(ids[^1], rejected.Id); Assert.Equal("125", rejected.Data);
+            await Assert.ThrowsAsync<IOException>(() => manager.HandleAsync(new("terminal.input", ids[0], Data: new string('A', 87385)), Send, default));
+            await Assert.ThrowsAsync<IOException>(() => manager.HandleAsync(new("terminal.resize", ids[0], Data: "[501,20]"), Send, default));
+            for (var i = 0; i < 17; i++) await manager.HandleAsync(new("terminal.input", ids[0], Data: "YQ=="), Send, default);
+            await manager.CloseAllAsync();
+            Assert.Equal(17, sent.Count); Assert.All(sent, message => Assert.Equal("terminal.exited", message.Type));
+        }
+        finally { await manager.CloseAllAsync(); File.Delete(socketPath); }
     }
 
     [DockerIntegrationFact]

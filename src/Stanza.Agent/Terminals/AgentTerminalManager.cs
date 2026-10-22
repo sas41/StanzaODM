@@ -20,7 +20,7 @@ public sealed class AgentTerminalManager
         if (message.Type == "terminal.open")
         {
             if (message.Request is not { } request || request.Id != message.Id || request.Operation != "terminal.open" ||
-                request.Policy is not { ExecutionEnabled: true } || request.Execution is null || request.Files is not { Count: 0 } ||
+                request.Policy is not { ExecutionEnabled: true } || request.Execution is null || request.Execution.Mode is not ("exec" or "logs") || request.Files is not { Count: 0 } ||
                 request.EnvironmentFiles is not { Count: 0 } || request.Sources?.Count > 0 || request.Registries?.Count > 0 ||
                 JsonSerializer.SerializeToUtf8Bytes(request, JsonSerializerOptions.Web).Length > 40 * 1024)
                 throw new IOException("Invalid terminal open.");
@@ -37,6 +37,8 @@ public sealed class AgentTerminalManager
         }
         // Late in-flight frames after a close are deliberately ignored; they cannot open/replay a session.
         if (!sessions.TryGetValue(message.Id, out var current)) return;
+        if (current.ReadOnly && message.Type is "terminal.input" or "terminal.resize")
+        { current.Cancel(); return; } // Protocol violation ends only this read-only stream; never invoke exec or resize.
         if (message.Type == "terminal.close") current.Cancel();
         else if (message.Type == "terminal.input")
         {
@@ -77,6 +79,7 @@ public sealed class AgentTerminalManager
         private string? exec;
         private int pid;
         public Task? Work { get; set; }
+        public bool ReadOnly => request.Execution!.Mode == "logs";
         public Session(AgentWorkRequest request, Func<AgentWireMessage, Task> send, CancellationToken token)
         {
             this.request = request; this.send = send;
@@ -91,6 +94,11 @@ public sealed class AgentTerminalManager
             try
             {
                 var execution = request.Execution!;
+                if (ReadOnly)
+                {
+                    exit = await RunLogsAsync(execution);
+                    return;
+                }
                 Validate(execution);
                 client = new(request.Policy!.DockerEndpoint);
                 using var opening = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
@@ -102,17 +110,21 @@ public sealed class AgentTerminalManager
                 exec = await client.CreateAsync(container, new { AttachStdin = true, AttachStdout = true, AttachStderr = true,
                     Tty = true, Cmd = command, User = execution.User ?? "", WorkingDir = execution.WorkingDirectory ?? "",
                     Env = execution.Environment?.Select(x => x.Key + "=" + x.Value).ToArray() ?? [] }, opening.Token);
-                stream = await client.StartAsync(exec, opening.Token);
+                // Once start can execute remotely, finish the tiny PID handshake even if the channel disappears.
+                // Otherwise cancellation between start and the first read could orphan a still-running exec.
+                using var handshake = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                stream = await client.StartAsync(exec, handshake.Token);
                 var marker = new List<byte>(); var one = new byte[1];
                 while (marker.Count < 64)
                 {
-                    if (await stream.ReadAsync(one, opening.Token) == 0) throw new IOException("Terminal launcher unavailable.");
+                    if (await stream.ReadAsync(one, handshake.Token) == 0) throw new IOException("Terminal launcher unavailable.");
                     marker.Add(one[0]); if (one[0] == 31) break;
                 }
                 var text = Encoding.ASCII.GetString(marker.ToArray());
                 const string prefix = "\u001eSTANZA_PID:";
                 if (!text.StartsWith(prefix, StringComparison.Ordinal) || !text.EndsWith('\u001f') ||
                     !int.TryParse(text[prefix.Length..^1], out pid) || pid <= 1) throw new IOException("Invalid terminal launcher.");
+                lifetime.Token.ThrowIfCancellationRequested();
                 await send(new("terminal.opened", request.Id));
                 inputPump = PumpInputAsync();
                 var buffer = new byte[MaximumChunk];
@@ -133,6 +145,22 @@ public sealed class AgentTerminalManager
                 try { await send(new("terminal.exited", request.Id, Data: exit.ToString(System.Globalization.CultureInfo.InvariantCulture))); }
                 catch (Exception) { /* The authenticated channel may already be gone. */ }
             }
+        }
+        private async Task<int> RunLogsAsync(AgentExecution execution)
+        {
+            // Executable and arguments have no meaning in this mode. No launcher, exec, or workspace is touched.
+            client = new(request.Policy!.DockerEndpoint);
+            using var opening = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+            opening.CancelAfter(TimeSpan.FromSeconds(20));
+            var target = await client.ResolveTargetAsync(request.DeploymentId, execution, false, opening.Token);
+            await using var logs = await client.OpenLogsAsync(target, opening.Token);
+            opening.CancelAfter(Timeout.InfiniteTimeSpan);
+            await send(new("terminal.opened", request.Id));
+            var buffer = new byte[MaximumChunk];
+            int count;
+            while ((count = await logs.ReadAsync(buffer, lifetime.Token)) != 0)
+                await send(new("terminal.output", request.Id, Data: Convert.ToBase64String(buffer, 0, count)));
+            return 0;
         }
         public Task InputAsync(byte[] bytes, CancellationToken token)
         {

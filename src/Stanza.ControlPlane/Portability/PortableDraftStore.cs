@@ -47,7 +47,6 @@ public sealed class PortableDraftStore(DeploymentDraftService drafts, AccessServ
 
     public async Task ReassignAsync(Guid actorId, Guid deploymentId, long expectedRevision, Guid agentId, CancellationToken ct)
     {
-        var current = await drafts.ReadAsync(actorId, deploymentId, ct: ct);
-        await drafts.SaveAsync(actorId, deploymentId, new(current.Draft.Name, agentId, expectedRevision, null, null), ct);
+        await drafts.ReassignPortablePlacementAsync(actorId, deploymentId, expectedRevision, agentId, ct);
     }
 }

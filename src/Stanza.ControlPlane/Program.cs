@@ -20,6 +20,7 @@ using Stanza.ControlPlane.Recovery;
 using Stanza.ControlPlane.Automation;
 using Stanza.ControlPlane.Portability;
 using Stanza.ControlPlane.Terminals;
+using Stanza.ControlPlane.Logs;
 
 namespace Stanza.ControlPlane;
 
@@ -37,9 +38,12 @@ public sealed class ControlPlaneEntryPoint
         builder.Services.AddSingleton<InstanceMaintenance>();
         builder.Services.AddScoped<IRecoveryAuditSink, RecoveryAuditAdapter>();
         builder.Services.AddStanzaRecovery();
+        builder.Services.AddScoped<IImageDigestProbe, AgentImageDigestProbe>();
         builder.Services.AddStanzaAutomation();
         builder.Services.AddStanzaPortability();
         builder.Services.AddStanzaTerminals();
+        builder.Services.AddStanzaAgentTerminalBridge();
+        builder.Services.AddStanzaLogs();
         builder.Services.AddScoped<AuditService>();
         builder.Services.AddScoped<SourceService>();
         builder.Services.AddScoped<ISourceSnapshotProvider>(provider => provider.GetRequiredService<SourceService>());
@@ -138,6 +142,7 @@ public sealed class ControlPlaneEntryPoint
         });
         app.UseStaticFiles();
         app.UseRouting();
+        app.UseStanzaForwardedHeaders();
         app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
         app.UseOperationalPolicy();
         app.UseRateLimiter();
@@ -159,6 +164,8 @@ public sealed class ControlPlaneEntryPoint
         app.MapStanzaLiveStatus();
         app.MapStanzaAgentTransport();
         app.MapStanzaTerminals();
+        app.MapStanzaLogs();
+        app.MapStanzaOperationLive();
         await app.RunAsync();
     }
 }
