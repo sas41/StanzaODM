@@ -1,0 +1,141 @@
+name: Verify and publish Docker images
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-images-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: Test application
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up .NET LTS
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Set up Node for client tests
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+
+      - name: Set up Chrome for browser tests
+        id: chrome
+        uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4 # v2
+        with:
+          chrome-version: stable
+          install-dependencies: true
+
+      - name: Restore solution
+        run: dotnet restore Stanza.slnx
+
+      - name: Test solution in Release
+        run: dotnet test Stanza.slnx --configuration Release --no-restore --logger trx --results-directory artifacts/test-results
+        env:
+          STANZA_BROWSER_BINARY: ${{ steps.chrome.outputs.chrome-path }}
+
+      - name: Test browser status client
+        run: node --test tests/Stanza.Tests/Live/status.test.cjs
+
+      - name: Validate Compose manifests
+        run: |
+          docker compose -f compose.yaml config --quiet
+          docker compose -f compose.agent.yaml config --quiet
+        env:
+          STANZA_CONTROL_PLANE_URL: https://stanza.example.invalid
+          STANZA_ENROLLMENT_TOKEN: validation-only-token-not-an-enrollment-credential
+          STANZA_DOCKER_GID: "999"
+
+      - name: Lint GitHub workflow
+        run: |
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/repo:ro" \
+            --workdir /repo \
+            rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
+            .github/workflows/docker-images.yml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-results
+          path: artifacts/test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
+  images:
+    name: Build ${{ matrix.component }} image
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: control-plane
+            dockerfile: src/Stanza.ControlPlane/Dockerfile
+          - component: agent
+            dockerfile: src/Stanza.Agent/Dockerfile
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Derive image name and publish policy
+        id: image
+        shell: bash
+        run: bash .github/scripts/image-metadata.sh
+        env:
+          COMPONENT: ${{ matrix.component }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR for publishing only
+        if: steps.image.outputs.publish == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image tags and labels
+        id: metadata
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest,enable=${{ steps.image.outputs.latest == 'true' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+
+      - name: Build and optionally publish image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: ${{ steps.image.outputs.publish == 'true' }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}

@@ -1,0 +1,24 @@
+@model GroupsModel
+@{ ViewData["Title"] = "Groups & permissions"; }
+<span class="eyebrow">ACTION-LEVEL ACCESS</span><h1>Groups &amp; permissions</h1><p class="muted">Ordinary users inherit additive grants from their groups. Privileged accounts do not need group membership.</p>
+<div class="notice warning">Deployment draft permissions are enforced per action and resource. Agent and instance settings screens currently remain administrator-only; delegated access on those screens and permissions for future execution features are still being integrated.</div>
+<section class="panel narrow"><h2>Create group</h2><form method="post" asp-action="Create"><label for="group-name">Name</label><input id="group-name" name="name" maxlength="100" required /><button class="button primary" type="submit">Create group</button></form></section>
+@foreach (var group in Model.Groups)
+{
+    <section class="panel"><h2>@group.Name</h2><code>@group.Id</code>
+    <details><summary>Rename or delete</summary><form method="post" asp-action="Rename" asp-route-id="@group.Id"><label for="name-@group.Id">Group name</label><input id="name-@group.Id" name="name" value="@group.Name" maxlength="100" required /><button class="button" type="submit">Rename</button></form><form method="post" asp-action="Delete" asp-route-id="@group.Id"><button class="button" type="submit">Delete group and its grants</button></form></details>
+    <h3>Members</h3>
+    @foreach (var memberId in group.Members)
+    {
+        <form method="post" asp-action="RemoveMember" asp-route-id="@group.Id"><input name="accountId" type="hidden" value="@memberId" /><span>@(Model.Accounts.FirstOrDefault(x => x.Id == memberId)?.Username ?? memberId.ToString())</span> <button class="button" type="submit">Remove member</button></form>
+    }
+    <form method="post" asp-action="AddMember" asp-route-id="@group.Id"><label for="member-@group.Id">Add ordinary user</label><select id="member-@group.Id" name="accountId" required><option value="">Select user</option>@foreach (var account in Model.Accounts.Where(x => x.Role == AccountRole.User && !group.Members.Contains(x.Id))) { <option value="@account.Id">@account.Username</option> }</select><button class="button" type="submit">Add member</button></form>
+    <h3>Permissions</h3><p class="field-help">An empty resource ID covers every resource of the selected exact type. No wildcard action names are supported. Grants for unfinished features do not enable those features.</p>
+    @foreach (var grant in group.Grants)
+    {
+        <form method="post" asp-action="RemoveGrant" asp-route-id="@grant.Id"><code>@grant.Action · @grant.ResourceType · @(grant.ResourceId?.ToString() ?? "all")</code> <button class="button" type="submit">Remove grant</button></form>
+    }
+    <form method="post" asp-action="AddGrant" asp-route-id="@group.Id"><label for="permission-@group.Id">Action</label><select id="permission-@group.Id" name="permission" required>@foreach (var permission in PermissionCatalog.All) { <option value="@permission.Action|@permission.ResourceType">@permission.Description (@permission.Action / @permission.ResourceType)</option> }</select><label for="resource-@group.Id">Resource ID (optional UUID)</label><input id="resource-@group.Id" name="resourceId" placeholder="Empty means all resources of this type" /><button class="button primary" type="submit">Grant permission</button></form>
+    </section>
+}
+@if (Model.Groups.Count == 0) { <section class="panel"><p class="muted">No groups yet. Create one to assign reusable action-level access.</p></section> }

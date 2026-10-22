@@ -1,0 +1,16 @@
+@model AccountAccessModel
+@{ ViewData["Title"] = "Effective permissions"; }
+<span class="eyebrow">EFFECTIVE ACCESS</span><h1>@Model.Account.Username</h1><p class="muted">@Model.Access.Explanation</p>
+<p class="field-help">These are policy decisions, not a list of available features. Agent and instance settings screens still require an administrator; execution and automation features are not enabled yet.</p>
+<section class="panel"><h2>Direct grants</h2>
+@foreach (var grant in Model.Access.DirectGrants)
+{
+    <form method="post" asp-action="RemoveGrant" asp-route-id="@Model.Account.Id"><input type="hidden" name="grantId" value="@grant.Id" /><code>@grant.Action · @grant.ResourceType · @(grant.ResourceId?.ToString() ?? "all")</code> <button class="button" type="submit">Remove grant</button></form>
+}
+@if (Model.Account.Role == AccountRole.User)
+{
+    <form method="post" asp-action="AddGrant" asp-route-id="@Model.Account.Id"><label for="permission">Action</label><select id="permission" name="permission" required>@foreach (var permission in PermissionCatalog.All) { <option value="@permission.Action|@permission.ResourceType">@permission.Description (@permission.Action / @permission.ResourceType)</option> }</select><label for="resource">Resource ID (optional UUID)</label><input id="resource" name="resourceId" /><p class="field-help">Empty covers all resources of that exact type.</p><button class="button primary" type="submit">Grant permission</button></form>
+}
+</section>
+<section class="panel"><h2>Group membership</h2>@foreach (var group in Model.Access.Groups) { <p><strong>@group.Name</strong> · @group.Grants.Count grants</p> }<a href="/groups">Manage groups →</a></section>
+<section class="panel table-panel"><table><thead><tr><th>Action</th><th>Resource</th><th>Allowed</th><th>Source</th></tr></thead><tbody>@foreach (var decision in Model.Access.EffectivePermissions) { <tr><td>@decision.Action</td><td>@decision.ResourceType · @(decision.ResourceId?.ToString() ?? "all")</td><td>@(decision.Allowed ? "Yes" : "No")</td><td>@string.Join(", ", decision.Sources)</td></tr> }</tbody></table></section><a href="/users">← Back to users</a>

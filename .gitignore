@@ -1,0 +1,75 @@
+# .NET build, publish, package, and test outputs
+**/bin/
+**/obj/
+**/TestResults/
+/artifacts/
+*.trx
+*.coverage
+*.coveragexml
+coverage/
+*.nupkg
+*.snupkg
+
+# Local credentials and environment overrides (examples remain trackable)
+.env
+.env.*
+*.env
+*.env.*
+!.env.example
+!.env.*.example
+!*.env.example
+!*.env.*.example
+appsettings.Local.json
+appsettings.*.local.json
+appsettings.*.secrets.json
+secrets/
+.secrets/
+*.pfx
+*.p12
+*.pem
+*.key
+**/keys/key-*.xml
+
+# Per-host Compose overrides; keep compose.yaml and compose.agent.yaml
+compose.override.yml
+compose.override.yaml
+compose.*.override.yml
+compose.*.override.yaml
+docker-compose.override.yml
+docker-compose.override.yaml
+
+# Runtime state, local databases, and diagnostics
+/data/
+/src/Stanza.ControlPlane/data/
+/src/Stanza.Agent/data/
+/logs/
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
+*.dmp
+
+# Editor and OS state
+.vs/
+.idea/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local tooling caches
+node_modules/
+.cache/

@@ -1,0 +1,21 @@
+@model DeploymentListModel
+@{ ViewData["Title"] = "Deployment drafts"; }
+<span class="eyebrow">MANAGED CONFIGURATION</span><h1>Deployment drafts</h1>
+<p class="muted">Encrypted configuration drafts with immutable revision history. Saving a draft never starts or changes workloads.</p>
+<div class="notice warning">Runtime validation and deployment dispatch are not implemented yet. No deployed status is reported.</div>
+@if (Model.CanCreate) { <p><a class="button primary" asp-action="Create">Create deployment draft</a></p> }
+<section class="panel">
+@if (Model.Drafts.Count == 0)
+{
+    <h2>No accessible deployment drafts</h2><p class="muted">An administrator can create a draft or grant access to an existing one. Creating a draft does not automatically grant an ordinary User read access.</p>
+}
+else
+{
+    <table><thead><tr><th>Name</th><th>State</th><th>Agent reference</th><th>Saved revision</th></tr></thead><tbody>
+    @foreach (var draft in Model.Drafts)
+    {
+        <tr><td><a asp-action="Details" asp-route-id="@draft.Id">@draft.Name</a></td><td>Draft only</td><td>@(draft.TargetAgentId?.ToString() ?? "Unassigned")</td><td>@draft.Revision</td></tr>
+    }
+    </tbody></table>
+}
+</section>

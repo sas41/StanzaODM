@@ -1,0 +1,21 @@
+.syntax-editor { position: relative; width: 100%; margin-bottom: 1rem; }
+.syntax-editor .syntax-input, .syntax-preview {
+    box-sizing: border-box; margin: 0; padding: 1rem; border: 1px solid transparent;
+    width: 100%; font: 14px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+    letter-spacing: normal; tab-size: 4; white-space: pre; overflow: auto; border-radius: .4rem;
+}
+.syntax-preview { position: absolute; inset: 0; height: 100%; pointer-events: none; background: #111827; color: #e5e7eb; }
+.syntax-editor textarea.syntax-input { position: relative; display: block; background: transparent; color: transparent; caret-color: #fff; resize: vertical; }
+.syntax-input::selection { background: #44649c88; color: transparent; }
+.syntax-comment { color: #99b28e; }
+.syntax-string { color: #e4bb85; }
+.syntax-key { color: #89c5f0; }
+.syntax-keyword { color: #d3a3ee; }
+.syntax-variable { color: #f0d374; }
+.revision-diff { white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff-added { background: #17452b; color: #bdf4ce; }
+.diff-removed { background: #4e2026; color: #ffc2c9; }
+@media (forced-colors: active) {
+    .syntax-editor textarea.syntax-input { color: CanvasText; caret-color: CanvasText; }
+    .syntax-preview { visibility: hidden; }
+}

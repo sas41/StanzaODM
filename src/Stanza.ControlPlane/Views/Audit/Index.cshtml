@@ -1,0 +1,4 @@
+@model IReadOnlyList<Stanza.ControlPlane.Audit.AuditEvent>
+@{ ViewData["Title"] = "Audit history"; }
+<h1>Audit history</h1><p class="muted">Metadata only: secret values, request bodies, terminal input, and command output are never included.</p><form method="get"><label for="search">Filter</label><input id="search" name="search" maxlength="100" /><button class="button" type="submit">Search</button></form>
+<section class="panel table-panel"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Resource</th><th>Result</th></tr></thead><tbody>@foreach (var item in Model) { <tr><td>@DateTimeOffset.FromUnixTimeSeconds(item.At).ToString("u")</td><td>@item.ActorId</td><td>@item.Action</td><td>@item.Resource</td><td>@item.Result</td></tr> }</tbody></table></section>

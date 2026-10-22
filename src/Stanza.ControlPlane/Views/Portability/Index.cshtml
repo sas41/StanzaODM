@@ -1,0 +1,43 @@
+@model Stanza.ControlPlane.Models.PortabilityIndexModel
+@{ ViewData["Title"] = "Configuration portability"; }
+<span class="eyebrow">CONFIGURATION, NOT WORKLOAD DATA</span><h1>Clone, move, export and import</h1>
+<div class="notice warning">Persistent application data is never transferred. Bind mounts, volumes, ports, explicit container names, networks and architecture need destination review. Configuration imports and clones never start workloads; automation is disabled. Access grants are not copied implicitly.</div>
+<label><input type="checkbox" disabled /> Transfer persistent data — not yet available</label>
+<section class="panel"><h2>Clone deployment configuration</h2>
+<form method="post" asp-action="Clone">
+    <label for="clone-source">Source deployment</label><select id="clone-source" name="sourceId" required>@foreach (var d in Model.Deployments) { <option value="@d.Id">@d.Name</option> }</select>
+    <label for="clone-name">New deployment name</label><input id="clone-name" name="name" maxlength="100" required />
+    <label for="clone-agent">Approved destination Agent</label><select id="clone-agent" name="destinationAgent" required>@foreach (var a in Model.Agents) { <option value="@a.Id">@a.Hostname — @a.Id</option> }</select>
+    <p class="field-help">Copies the exact Compose text, deployment .env, and every managed text/binary file into a new identity. Destination Global/Agent environment may change effective values. Existing source/credential references are not implicitly reused. Select supported participant sections explicitly; use import resource mappings for references needing remapping.</p>
+    @foreach (var kind in Model.SupportedSections.Where(k => k is "sources" or "automation")) { <label><input type="checkbox" name="sections" value="@kind" /> @kind — @(kind == "sources" ? "explicitly copy all selected deployment Git/registry bindings and create fresh credential identities" : "explicitly copy actions/schedules/webhooks/image policies, disabled and with existing owner usernames preserved")</label> }
+    <label><input type="checkbox" name="acknowledgeStorage" value="true" required /> I reviewed the source Compose, destination environment, ports, names, networks, platform, bind mounts and volumes. Persistent data is not copied.</label>
+    <button class="button primary" type="submit">Create inactive clone — do not start</button>
+    <button class="button" type="submit" formaction="@Url.Action("DestinationPreview")" formnovalidate>Preview destination variables and storage warnings</button>
+</form></section>
+<section class="panel"><h2>Move deployment placement</h2>
+<p class="muted">Durable destination validation → destination project status/conflict inspection → source stop → destination deploy → runtime health → placement update. Architecture capabilities and host-wide conflict detection are not available; these remain explicit warnings, not compatibility claims. Failures retain recovery state. Destination deploy may create a workload before placement changes. No source files or volumes are automatically removed. After a completed move, the requesting operator can explicitly queue removal of stopped source containers/networks; volumes, bind mounts and managed files are retained.</p>
+<form method="post" asp-action="Move">
+    <label for="move-source">Deployment</label><select id="move-source" name="sourceId" required>@foreach (var d in Model.Deployments) { <option value="@d.Id">@d.Name</option> }</select>
+    <label for="move-agent">Approved destination Agent</label><select id="move-agent" name="destinationAgent" required>@foreach (var a in Model.Agents) { <option value="@a.Id">@a.Hostname — @a.Id</option> }</select>
+    <label><input type="checkbox" name="acknowledgeStorage" value="true" required /> I prepared destination mounts/volumes and reviewed conflicts and inherited variables; no persistent data is transferred. I explicitly authorize stopping source and starting destination.</label>
+    <button class="button" type="submit">Queue guided move</button>
+    <button class="button" type="submit" formaction="@Url.Action("DestinationPreview")" formnovalidate>Preview destination variables and storage warnings</button>
+</form></section>
+<section class="panel"><h2>Plaintext export</h2>
+<div class="notice warning">The downloaded JSON contains readable credentials, tokens, environment values and configuration files in the selected scope. Binary file base64 is encoding, NOT encryption. Protect the download. This is not an instance backup and excludes passwords/hashes, sessions, Agent private identities and workload volumes.</div>
+<form method="post" asp-action="Export">
+    @foreach (var d in Model.Deployments) { <label><input type="checkbox" name="deploymentIds" value="@d.Id" /> @d.Name — Compose, deployment environment, all managed files</label> }
+    @foreach (var kind in Model.SupportedSections) { <label><input type="checkbox" name="sections" value="@kind" /> @kind</label> }
+    <p class="field-help">Additional sections: @string.Join(", ", Model.SupportedSections). Sources includes plaintext Git/registry credentials and deployment source bindings; automation includes actions, schedules, webhook secrets and image policies. Environment includes Global and readable Agent scopes. Agent templates contain labels/environment only and must map to separately enrolled, approved Agents; their labels are descriptive, not replacements for Agent-reported hostnames. Policies and groups/grants are System-Admin-only. Accounts, password hashes, sessions, enrollment tokens and Agent private identities are never included.</p>
+    <label><input type="checkbox" name="acknowledgePlaintext" value="true" required /> I understand every selected secret is readable plaintext, and acknowledge this before the export is generated.</label>
+    <button class="button" type="submit">Generate selected plaintext export</button>
+</form></section>
+<section class="panel"><h2>Import preview</h2>
+<p class="muted">Upload version 1 JSON (maximum 32 MiB). No archive extraction. Map logical Agent IDs to the approved destination GUIDs shown above; specify new deployment names where conflicts exist. Preview is encrypted server-side for 20 minutes and may be applied once. Each configuration service commits separately; partial results are reported explicitly.</p>
+<form method="post" enctype="multipart/form-data" asp-action="Preview">
+    <label for="bundle">Plaintext JSON bundle</label><input id="bundle" type="file" name="bundle" accept="application/json,.json" required />
+    <label for="agent-mappings">Agent mappings (JSON)</label><textarea id="agent-mappings" name="agentMappings" class="code-editor" rows="3" placeholder='{"agent-0":"approved-destination-guid"}'>{}</textarea>
+    <label for="deployment-names">Deployment name mappings (JSON)</label><textarea id="deployment-names" name="deploymentNames" class="code-editor" rows="3" placeholder='{"deployment-0":"New name"}'>{}</textarea>
+    <label for="resource-mappings">Resource / existing-account mappings (JSON)</label><textarea id="resource-mappings" name="resourceMappings" class="code-editor" rows="3" placeholder='{"deployment-reference-0":"existing-deployment-guid","account:source-owner":"existing-destination-username"}'>{}</textarea>
+    <button class="button" type="submit">Validate and preview only</button>
+</form></section>

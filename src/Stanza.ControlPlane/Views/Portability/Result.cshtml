@@ -1,0 +1,9 @@
+@model Stanza.ControlPlane.Portability.PortableApplyResult
+@{ ViewData["Title"] = "Import result"; }
+<h1>Import result: @Model.State</h1>
+@if (Model.Failure is not null) { <div class="notice warning">@Model.Failure</div> }
+<section class="panel"><p>Run <code>@Model.Id</code>. Configuration import never starts workloads. No persistent data was transferred.</p>
+<h2>Created or partially configured deployments</h2><ul>@foreach (var id in Model.CreatedDeployments) { <li><code>@id</code> — inspect via your authorized deployments list</li> }</ul>
+<h2>Created resources</h2><ul>@foreach (var resource in Model.CreatedResources) { <li><code>@resource.Key</code> → <code>@resource.Value</code></li> }</ul>
+<p>Completed sections: @string.Join(", ", Model.CompletedSections). Current/interrupted section: @(Model.CurrentSection ?? "none"). Individually committed resources from an interrupted section may need inspection; they are never automatically replayed.</p>
+<a class="button" asp-action="Index">Back to portability</a></section>

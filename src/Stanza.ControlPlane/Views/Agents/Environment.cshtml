@@ -1,0 +1,4 @@
+@model AgentEnvironmentModel
+@{ ViewData["Title"] = "Agent environment"; }
+<span class="eyebrow">PER-AGENT DEFAULTS</span><h1>Agent environment</h1><p class="muted">Overrides matching Global variables and is overridden by deployment-specific variables.</p>
+<section class="panel"><form method="post" asp-action="Environment" asp-route-id="@Model.Id"><div asp-validation-summary="All" class="validation" role="alert"></div><input asp-for="Version" type="hidden" /><label asp-for="Text">Raw .env text</label><textarea asp-for="Text" class="code-editor" rows="20" spellcheck="false" autocomplete="off"></textarea><p class="field-help">Text is preserved and encrypted at rest. Saving does not restart workloads. Future operations snapshot these values between Global and Deployment scope.</p><button class="button primary" type="submit">Save environment</button></form></section><a href="/agents">← Back to Agents</a>

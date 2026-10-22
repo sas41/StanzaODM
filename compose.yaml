@@ -1,0 +1,71 @@
+# Start: docker compose up --build -d
+# Open http://localhost:8080/setup and create the first System Admin.
+# Database credentials are generated once; no default application credentials exist.
+# Use HTTPS at a trusted reverse proxy before exposing this application to a network.
+# Retain ALL named volumes, including database-secrets and control-plane-data, for recovery.
+name: stanza
+services:
+  initialize:
+    image: postgres:18-alpine
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ ! -s /secrets/database-password ]; then
+          umask 077
+          head -c 48 /dev/urandom | base64 > /secrets/database-password
+        fi
+        chmod 0444 /secrets/database-password
+        mkdir -p /control-plane/keys
+        chown -R 1654:1654 /control-plane
+        chmod 0700 /control-plane /control-plane/keys
+    volumes:
+      - database-secrets:/secrets
+      - control-plane-data:/control-plane
+    restart: "no"
+
+  database:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: stanza
+      POSTGRES_USER: stanza
+      POSTGRES_PASSWORD_FILE: /run/stanza-secrets/database-password
+    volumes:
+      - database-data:/var/lib/postgresql
+      - database-secrets:/run/stanza-secrets:ro
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stanza -d stanza"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  control-plane:
+    build:
+      context: .
+      dockerfile: src/Stanza.ControlPlane/Dockerfile
+    ports:
+      - "${STANZA_BIND_ADDRESS:-127.0.0.1}:${STANZA_HTTP_PORT:-8080}:8080"
+    environment:
+      Database__Host: database
+      Database__Name: stanza
+      Database__Username: stanza
+      Database__PasswordFile: /run/stanza-secrets/database-password
+      Stanza__DataRoot: /var/lib/stanza
+    volumes:
+      - control-plane-data:/var/lib/stanza
+      - database-secrets:/run/stanza-secrets:ro
+    depends_on:
+      database:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  database-data:
+  database-secrets:
+  control-plane-data:

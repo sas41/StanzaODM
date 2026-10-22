@@ -1,0 +1,21 @@
+@model ScheduleEditorModel
+@{ ViewData["Title"] = "Schedule editor"; }
+<h1>Schedule editor</h1>
+<form method="post" action="/automation/schedules/edit">@Html.AntiForgeryToken()
+<div asp-validation-summary="All"></div><input asp-for="Id" type="hidden" /><input asp-for="Revision" type="hidden" />
+<label asp-for="Name"></label><input asp-for="Name" />
+<label asp-for="DeploymentId">Owning deployment ID</label><input asp-for="DeploymentId" />
+<label asp-for="ActionId">Action ID (optional; may target other authorized deployments/hosts)</label><input asp-for="ActionId" />
+<label asp-for="Operation">Operation (when no action selected)</label><select asp-for="Operation">@foreach (var op in Stanza.ControlPlane.Automation.AutomationRules.Operations) { <option value="@op">@op</option> }</select>
+<label asp-for="Expression">Cron: minute hour day-of-month month weekday</label><input asp-for="Expression" />
+<label asp-for="TimeZone">IANA timezone (for example UTC or America/New_York)</label><input asp-for="TimeZone" />
+<label><input asp-for="Enabled" /> Enabled</label>
+<label asp-for="Overlap"></label><select asp-for="Overlap"><option value="skip">Skip overlapping occurrence</option><option value="queue">Queue overlapping occurrence</option></select>
+<label asp-for="MissedRun"></label><select asp-for="MissedRun"><option value="skip">Skip occurrences missed by over one minute</option><option value="run-once">Run once after downtime; do not replay every missed occurrence</option></select>
+<button type="submit">Save schedule</button>
+<button type="submit" formaction="/automation/schedules/preview" hx-post="/automation/schedules/preview" hx-target="#occurrences" hx-include="closest form">Preview next five runs</button>
+</form>
+<div id="occurrences"></div>
+<p>Five-field cron supports numeric lists, ranges and steps. Weekday 0/7 is Sunday. Restricted day-of-month and weekday are ORed. During spring DST gaps, nonexistent local times are skipped. During autumn ambiguity, a local time runs once at its earlier UTC occurrence. All history timestamps are UTC.</p>
+<p>Configuration is persisted, and due occurrences are claimed atomically. A run interrupted after dispatch becomes uncertain and is not replayed automatically. An action/policy lock remains until an operator reconciles it.</p>
+<a href="/automation">Back</a>

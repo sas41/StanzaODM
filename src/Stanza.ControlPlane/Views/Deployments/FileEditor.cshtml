@@ -1,0 +1,18 @@
+@model DeploymentFileModel
+@{ ViewData["Title"] = Model.IsNew ? "Create supporting text file" : "Edit supporting text file"; }
+<span class="eyebrow">MANAGED FILE EDITOR</span><h1>@ViewData["Title"]</h1>
+<p class="muted">These are managed deployment files, not host files. Saving creates a new draft revision.</p>
+<section class="panel"><form method="post" asp-action="FileEditor" asp-route-id="@Model.Id">
+    <div asp-validation-summary="All" class="validation" role="alert"></div>
+    <input asp-for="ExpectedRevision" type="hidden" /><input asp-for="IsNew" type="hidden" />
+    @if (Model.IsNew)
+    {
+        <label asp-for="Path">Relative managed path</label><input asp-for="Path" maxlength="1024" placeholder="build/Dockerfile" autocomplete="off" />
+    }
+    else { <input asp-for="Path" type="hidden" /><h2>@Model.Path</h2> }
+    <label asp-for="Text">Raw file text</label><textarea asp-for="Text" rows="28" class="code-editor" data-language="text" spellcheck="false" autocomplete="off"></textarea>
+    <p class="field-help">Use the main editor for compose.yaml and .env. Unchanged text retains stored line endings; edited text uses browser-submitted line endings. Highlighting does not validate syntax.</p>
+    <button class="button primary" type="submit">Save file revision</button> <a class="button" asp-action="Details" asp-route-id="@Model.Id">Reload latest / cancel</a>
+</form></section>
+<link rel="stylesheet" href="~/css/editor.css" asp-append-version="true" />
+<script src="~/js/editor.js" asp-append-version="true" defer></script>

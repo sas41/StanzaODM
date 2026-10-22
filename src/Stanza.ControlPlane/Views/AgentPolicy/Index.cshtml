@@ -1,0 +1,9 @@
+@model Stanza.ControlPlane.Configuration.AgentPolicyEditor
+@{ ViewData["Title"] = "Agent runtime policy"; }
+<h1>Agent runtime policy</h1><p class="muted">Commands are accepted only through the authenticated approved-Agent channel. Docker socket access is effectively host administration.</p>
+<section class="panel"><form method="post"><div asp-validation-summary="All" class="validation"></div><input name="version" type="hidden" value="@Model.Version" />
+<label><input name="executionEnabled" type="checkbox" value="true" checked="@Model.Policy.ExecutionEnabled" /> Enable workload execution</label><input name="executionEnabled" type="hidden" value="false" />
+<label for="timeout">Operation timeout (seconds)</label><input id="timeout" name="timeoutSeconds" type="number" value="@Model.Policy.TimeoutSeconds" min="1" max="3600" required />
+<label for="output">Maximum output characters</label><input id="output" name="maximumOutputCharacters" type="number" value="@Model.Policy.MaximumOutputCharacters" min="1024" max="1048576" required />
+<label for="endpoint">Local Docker endpoint</label><input id="endpoint" name="dockerEndpoint" value="@Model.Policy.DockerEndpoint" required /><button class="button primary" type="submit">Save Agent policy</button></form></section>
+<div class="notice warning">Host execution is a separate capability: enable it in operational policy and explicitly deploy the host-execution Compose override on the Agent host. This form cannot grant host kernel capabilities.</div><a href="/agents">← Agents</a>

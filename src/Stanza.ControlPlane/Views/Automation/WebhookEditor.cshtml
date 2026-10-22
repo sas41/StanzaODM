@@ -1,0 +1,18 @@
+@model WebhookEditorModel
+@{ ViewData["Title"] = "Webhook editor"; }
+<h1>Webhook editor</h1>
+<form method="post" action="/automation/webhooks/edit">@Html.AntiForgeryToken()
+<div asp-validation-summary="All"></div><input asp-for="Id" type="hidden" /><input asp-for="Revision" type="hidden" />
+<label asp-for="Name"></label><input asp-for="Name" />
+<label asp-for="DeploymentId">Owning deployment ID</label><input asp-for="DeploymentId" />
+<label asp-for="ActionId">Action ID (optional)</label><input asp-for="ActionId" />
+<label asp-for="Operation">Operation (when no action selected)</label><select asp-for="Operation">@foreach (var op in Stanza.ControlPlane.Automation.AutomationRules.Operations) { <option value="@op">@op</option> }</select>
+<label asp-for="Provider"></label><select asp-for="Provider"><option value="github">GitHub</option><option value="generic">Generic signed JSON</option></select>
+<label asp-for="Events">Accepted events (comma-separated exact names)</label><input asp-for="Events" />
+<label asp-for="Refs">Accepted refs (comma-separated exact refs; empty accepts all)</label><textarea asp-for="Refs"></textarea>
+<label asp-for="ParameterMapping">Parameter mapping JSON: action parameter name to payload object path</label><textarea asp-for="ParameterMapping"></textarea>
+<label><input asp-for="Enabled" /> Enabled</label><button>Save webhook</button></form>
+<p>The secret is encrypted at rest and shown only once on creation/rotation. All requests use HMAC-SHA256 of the exact raw request body, formatted as <code>sha256=HEX_DIGEST</code>. Use HTTPS.</p>
+<p>GitHub headers: X-Hub-Signature-256, X-GitHub-Delivery, X-GitHub-Event. Generic headers: X-Stanza-Signature-256, X-Stanza-Delivery, X-Stanza-Event. JSON must be an object; ref filters compare the top-level ref (e.g. refs/heads/main).</p>
+<p>Example mapping: <code>{"message":"head_commit.message"}</code>. Only declared typed parameters can receive scalar JSON fields; they replace whole structured arguments only. Targets and executables cannot be set by payloads. Delivery IDs are deduplicated for the configured history-retention period; reuse an ID only for retries.</p>
+<a href="/automation">Back</a>

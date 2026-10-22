@@ -1,0 +1,12 @@
+@model LoginModel
+@{ ViewData["Title"] = "Sign in"; }
+<section class="auth-panel">
+    <span class="eyebrow">CONTROL PLANE ACCESS</span><h1>Welcome back.</h1><p class="muted">Sign in to your Stanza account.</p>
+    <form method="post" asp-action="Login">
+        <div asp-validation-summary="All" class="validation" role="alert"></div>
+        <input asp-for="ReturnUrl" type="hidden" />
+        <label asp-for="Username">Username</label><input asp-for="Username" autocomplete="username" maxlength="64" required />
+        <label asp-for="Password">Password</label><input asp-for="Password" autocomplete="current-password" maxlength="1024" required />
+        <button type="submit" class="button primary wide">Sign in</button>
+    </form>
+</section>

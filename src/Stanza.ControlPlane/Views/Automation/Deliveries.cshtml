@@ -1,0 +1,8 @@
+@model WebhookHistoryModel
+@{ ViewData["Title"] = "Webhook deliveries"; }
+<h1>Webhook delivery history</h1>
+<p>Metadata only: request bodies, signatures, mapped values, and secrets are never retained in delivery history.</p>
+<table><thead><tr><th>UTC time</th><th>Delivery ID</th><th>Event</th><th>Result</th><th>Run</th></tr></thead><tbody>
+@foreach (var x in Model.Deliveries)
+{ <tr><td>@DateTimeOffset.FromUnixTimeSeconds(x.ReceivedAt).ToString("u")</td><td>@x.DeliveryId</td><td>@x.Event</td><td>@x.State</td><td>@if (x.RunId is { } id) { <a href="/automation/runs/@id">Execution</a> }</td></tr> }
+</tbody></table><a href="/automation">Back</a>

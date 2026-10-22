@@ -1,0 +1,26 @@
+@model AgentListModel
+@{ ViewData["Title"] = "Agents"; }
+<span class="eyebrow">SERVER MANAGEMENT</span><h1>Agents</h1><p class="muted">Agents connect outbound and require explicit approval. Identity is verified using a persistent signing key.</p>
+@if (TempData["EnrollmentToken"] is string enrollmentToken)
+{
+    <section class="panel"><h2>New enrollment token</h2><p>Copy this token now. It will not be shown again. Its first claim expires at @TempData["EnrollmentExpires"].</p><code>@enrollmentToken</code><p class="field-help">Set Agent__EnrollmentToken when starting the Agent. Keep the token private; it becomes bound to the first verified identity that claims it. Approval is still required.</p></section>
+}
+<section class="panel narrow"><h2>Register a server</h2><form method="post" asp-action="IssueToken"><label for="lifetime">Enrollment lifetime (minutes)</label><input id="lifetime" name="lifetimeMinutes" type="number" value="15" min="1" max="1440" required /><button class="button primary" type="submit">Generate enrollment token</button></form><p class="field-help">Use compose.agent.yaml on the target host. Configure the HTTPS Control Plane origin and token before launch. No inbound Agent port is required.</p></section>
+<section class="panel table-panel"><table><thead><tr><th>Server</th><th>Registration</th><th>Last signed contact</th><th>Actions</th></tr></thead><tbody>
+@foreach (var agent in Model.Agents)
+{
+    <tr><td><strong>@agent.Hostname</strong><br /><code>@agent.Id</code><details><summary>Identity fingerprint</summary><code>@agent.Identity</code></details></td><td><span class="badge">@agent.Status</span></td><td>@DateTimeOffset.FromUnixTimeSeconds(agent.LastSeenAt).ToString("u")</td><td>
+    @if (agent.Status == "pending")
+    {
+        <form method="post" asp-action="Status" asp-route-id="@agent.Id"><button class="button primary" name="status" value="approved" type="submit">Approve</button> <button class="button" name="status" value="rejected" type="submit">Reject</button></form>
+    }
+    @if (agent.Status is "pending" or "approved")
+    {
+        <form method="post" asp-action="Status" asp-route-id="@agent.Id"><button class="button" name="status" value="revoked" type="submit">Revoke registration</button></form>
+    }
+    <a href="/agents/@agent.Id/environment">Edit Agent environment</a> · <a href="/agents/@agent.Id/policy">Runtime policy</a>
+    <form method="post" asp-action="Rotate" asp-route-id="@agent.Id"><button class="button" type="submit">Rotate credential / re-enroll</button></form></td></tr>
+}
+@if (Model.Agents.Count == 0) { <tr><td colspan="4" class="muted">No registration requests yet. Start an Agent with an enrollment token to begin.</td></tr> }
+</tbody></table></section>
+<div class="notice warning">Approval enables the authenticated command channel. Last signed contact is not a workload health check. Execution can be disabled in Agent runtime policy; host actions additionally require explicit host namespace configuration.</div>

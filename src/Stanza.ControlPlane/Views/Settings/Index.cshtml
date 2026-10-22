@@ -1,0 +1,19 @@
+@model SettingsModel
+@{ ViewData["Title"] = "Instance settings"; }
+<span class="eyebrow">INSTANCE CONFIGURATION</span><h1>Settings</h1><p class="muted">Settings are stored in PostgreSQL. Sensitive configuration is encrypted using the persisted instance keys.</p>
+<section class="panel"><form method="post" asp-action="Index">
+    <div asp-validation-summary="All" class="validation" role="alert"></div>
+    <input asp-for="Version" type="hidden" />
+    <label asp-for="PublicUrl">Public Control Plane URL</label><input asp-for="PublicUrl" type="url" maxlength="2048" placeholder="https://stanza.example.com" readonly="@(!Model.CanWriteSettings)" />
+    <p class="field-help">The externally reachable origin for Agent enrollment and the trusted browser WebSocket origin behind TLS termination. This does not configure your reverse proxy or TLS certificate. Once set, access the dashboard through this origin.</p>
+    @if (Model.CanRevealEnvironment || Model.CanWriteEnvironment) {
+    <label asp-for="GlobalEnvironment">Global environment defaults (.env)</label><textarea asp-for="GlobalEnvironment" rows="16" spellcheck="false" autocomplete="off" class="code-editor" readonly="@(!Model.CanWriteEnvironment)"></textarea>
+    @if (!Model.CanRevealEnvironment) { <label><input asp-for="ReplaceEnvironment" /> Replace the hidden environment with the text above (existing secret values are not revealed).</label> }
+    }
+    <p class="field-help">Raw text is preserved. The hierarchy is Global → Agent → Deployment, with more specific values overriding defaults. Each queued operation captures all three raw files; Docker Compose performs interpolation. Saving does not restart workloads.</p>
+    <div class="notice warning">These values may contain secrets. Future configuration exports will be fully plaintext and require explicit acknowledgement.</div>
+    @if (Model.CanWriteSettings || Model.CanWriteEnvironment) { <button class="button primary" type="submit">Save settings</button> }
+</form></section>
+<section class="panel"><h2>Operational policy</h2><p>Manage session, execution, upload, retention, and live-connection limits.</p><a href="/policy">Open operational policy →</a></section>
+@if (User.IsInRole("SystemAdmin")) { <section class="panel"><h2>Instance recovery</h2><p>Encrypted database and encryption-key backup. Workload volumes are not included.</p><a href="/recovery">Backup and recovery →</a></section> }
+<section class="panel"><h2>Pre-launch and host prerequisites</h2><p class="muted">Database connectivity is configured before launch. Container mounts, host Docker permissions, listening ports, and reverse-proxy TLS are deployment prerequisites, not settings this process can safely modify.</p></section>

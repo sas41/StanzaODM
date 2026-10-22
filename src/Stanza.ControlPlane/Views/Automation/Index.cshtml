@@ -1,0 +1,44 @@
+@model Stanza.ControlPlane.Automation.AutomationOverview
+@{ ViewData["Title"] = "Automation"; }
+<h1>Automation</h1>
+<p>Runs use current owner access, plus separate permission checks for every target. Revoked owners cannot execute queued work.</p>
+<p><a href="/automation/actions/edit">New action</a> · <a href="/automation/schedules/edit">New schedule</a> · <a href="/automation/webhooks/edit">New webhook</a> · <a href="/automation/images/edit">New image policy</a> · <a href="/automation/limits">Limits and retention</a></p>
+<h2>Reusable actions</h2>
+@foreach (var x in Model.Actions)
+{
+    <section><h3>@x.Name</h3><p>@x.Id · @(x.Enabled ? "Enabled" : "Disabled") · concurrency: @x.Concurrency · owner: @x.OwnerId</p>
+    <a href="/automation/actions/edit?id=@x.Id">Edit</a>
+    <form method="post" action="/automation/actions/@x.Id/run">@Html.AntiForgeryToken()
+        <label>Parameter values (JSON string dictionary)<textarea name="parametersJson">{}</textarea></label><button type="submit">Run action</button>
+    </form></section>
+}
+<h2>Schedules</h2>
+@foreach (var x in Model.Schedules)
+{
+    <section><h3>@x.Name</h3><p>@x.Expression in @x.TimeZone · @(x.Enabled ? "Enabled" : "Paused") · next: @DateTimeOffset.FromUnixTimeSeconds(x.NextRunAt).ToString("u") · overlap @x.Overlap · missed @x.MissedRun</p>
+    <p>@Stanza.ControlPlane.Automation.AutomationRules.DescribeCron(x.Expression) Timezone: @x.TimeZone.</p>
+    <a href="/automation/schedules/edit?id=@x.Id">Edit / preview next runs</a>
+    <form method="post" action="/automation/schedules/@x.Id/enabled">@Html.AntiForgeryToken()<input type="hidden" name="enabled" value="@((!x.Enabled).ToString().ToLowerInvariant())" /><button>@(x.Enabled ? "Pause" : "Resume")</button></form>
+    <form method="post" action="/automation/schedules/@x.Id/run">@Html.AntiForgeryToken()<button>Run now as me</button></form></section>
+}
+<h2>Webhooks</h2>
+@foreach (var x in Model.Webhooks)
+{
+    <section><h3>@x.Name</h3><p>@(x.Enabled ? "Enabled" : "Disabled") · @x.Provider · <code>/hooks/@x.Id</code> · events: @x.Events · refs: @x.Refs</p>
+    <a href="/automation/webhooks/edit?id=@x.Id">Edit</a> · <a href="/automation/webhooks/@x.Id/deliveries">Delivery history</a>
+    <form method="post" action="/automation/webhooks/@x.Id/secret">@Html.AntiForgeryToken()<button name="revoke" value="false">Rotate secret (old secret stops working)</button><button name="revoke" value="true">Revoke and disable</button></form></section>
+}
+<h2>Automatic image updates</h2>
+@foreach (var x in Model.ImagePolicies)
+{
+    <section><h3>@x.Name</h3><p>@x.Mode · @(x.Enabled ? "Enabled" : "Disabled") · services: @x.Services · last result: @x.LastResult</p>
+    <p>Last check: @(x.LastCheckAt is { } checkedAt ? DateTimeOffset.FromUnixTimeSeconds(checkedAt).ToString("u") : "Never") · next: @DateTimeOffset.FromUnixTimeSeconds(x.NextRunAt).ToString("u")</p>
+    <details><summary>Checked image identities and available updates</summary><pre>@x.DigestsJson</pre></details>
+    <a href="/automation/images/edit?id=@x.Id">Edit</a>
+    <form method="post" action="/automation/images/@x.Id/check">@Html.AntiForgeryToken()<button>Check now</button></form></section>
+}
+<h2>Recent execution history</h2>
+<table><thead><tr><th>Created (UTC)</th><th>Trigger</th><th>State</th><th>Result</th></tr></thead><tbody>
+@foreach (var x in Model.Runs)
+{ <tr><td><a href="/automation/runs/@x.Id">@DateTimeOffset.FromUnixTimeSeconds(x.CreatedAt).ToString("u")</a></td><td>@x.Source</td><td>@x.State</td><td>@x.Code</td></tr> }
+</tbody></table>

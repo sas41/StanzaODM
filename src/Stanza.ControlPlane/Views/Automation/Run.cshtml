@@ -1,0 +1,17 @@
+@model Stanza.ControlPlane.Automation.AutomationRunDetails
+@{ ViewData["Title"] = "Automation run"; }
+<h1>Automation run</h1>
+<p>@Model.Run.Id · @Model.Run.Source · @Model.Run.State · @Model.Run.Code</p>
+<p>Execution identity: @Model.Run.OwnerId · requested by: @Model.Run.RequestedBy · requested: @DateTimeOffset.FromUnixTimeSeconds(Model.Run.CreatedAt).ToString("u")</p>
+@if (Model.Run.OperationId is { } operation) { <p>Correlated operation: <code>@operation</code></p> }
+<table><thead><tr><th>Step</th><th>Kind</th><th>Deployment</th><th>Resolved Agent</th><th>Operation</th><th>Result</th></tr></thead><tbody>
+@foreach (var x in Model.Steps)
+{ <tr><td>@(x.Index + 1)</td><td>@x.Kind</td><td>@x.DeploymentId</td><td>@x.AgentId</td><td>@x.OperationId</td><td>@x.State · @x.Code</td></tr> }
+</tbody></table>
+@if (Model.Run.State is "queued" or "running")
+{ <form method="post" action="/automation/runs/@Model.Run.Id/cancel">@Html.AntiForgeryToken()<button>Request cancellation</button></form> }
+@if (Model.Run.State == "uncertain")
+{ <p><strong>Do not replay blindly.</strong> An interrupted command may already have changed the target. Reconcile the actual host/container/deployment state before retrying. Its action/image-policy concurrency lock remains held.</p>
+  <form method="post" action="/automation/runs/@Model.Run.Id/reconcile">@Html.AntiForgeryToken()<label><input type="checkbox" name="confirmedStopped" value="true" required /> I verified externally that the command has stopped and reconciled the target state. I understand this does not undo side effects or retry anything.</label><button>Record reconciliation and release automation lock</button></form> }
+@if (Model.Run.ReconciledBy is { } reconciler) { <p>Externally reconciled by @reconciler. No automatic replay occurred.</p> }
+<p><a href="/automation/runs/@Model.Run.Id">Refresh</a> · <a href="/automation">Back</a></p>

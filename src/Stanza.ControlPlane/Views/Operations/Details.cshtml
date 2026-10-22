@@ -1,0 +1,8 @@
+@model Stanza.ControlPlane.Operations.OperationDetail
+@{ ViewData["Title"] = "Operation"; }
+<h1>@Model.Summary.Kind</h1><p><code>@Model.Summary.Id</code> · <strong>@Model.Summary.State</strong> · @Model.Summary.Code</p>
+<p>Agent: @Model.Summary.AgentId · Deployment: @Model.Summary.DeploymentId · Trigger: @Model.Summary.Trigger</p>
+@if (!Stanza.ControlPlane.Operations.OperationService.Terminal(Model.Summary.State)) { <form method="post" asp-action="Cancel" asp-route-id="@Model.Summary.Id"><button class="button" type="submit">Request cancellation</button></form><p class="field-help">Cancellation cannot undo side effects already performed. Reload to inspect the latest persisted result.</p> }
+@if (Model.Summary.State == "Unknown") { <div class="notice warning">Execution may have taken place. Inspect current runtime status before explicitly acknowledging this outcome. This operation will never be retried automatically.</div><form method="post" asp-action="Reconcile" asp-route-id="@Model.Summary.Id"><label><input type="checkbox" name="acknowledged" value="true" required /> I inspected a fresh successful status operation and acknowledge the uncertainty.</label><button class="button" type="submit">Acknowledge inspected outcome</button></form> }
+@if (Model.Output is not null) { <section class="panel"><h2>Sensitive operation output</h2><pre>@Model.Output</pre></section> }
+<a href="/operations">← Operations</a>

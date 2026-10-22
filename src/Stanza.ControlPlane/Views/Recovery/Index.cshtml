@@ -1,0 +1,44 @@
+@model RecoveryModel
+@{ ViewData["Title"] = "Instance recovery"; }
+<h1>Instance recovery</h1>
+@if (Model.Restored)
+{
+    <section role="status">
+        <h2>Restore completed — restart required</h2>
+        <p>The database and persisted encryption keys were restored. Restart every Control Plane process before signing in or using restored secrets; the running process may have cached its previous key ring.</p>
+        <p>Use the restored account credentials after restarting. Agent identities and approval/enrollment state are preserved on the server, but Agent private-key files must still be retained on their original Agents.</p>
+    </section>
+}
+else
+{
+    <p>This is whole-instance recovery, not portable configuration export. It includes all mapped PostgreSQL application tables, managed files stored in those tables, password hashes, credentials, enrollment state, Agent server identities, and persisted Data Protection encryption keys.</p>
+    <p><strong>It does not include workload volumes, host bind-mount data, Git working directories, or Agent private-key files.</strong> Retain Agent storage and back up workload data separately. The pre-launch database connection and container configuration must be supplied on the destination.</p>
+    <p>Archives are encrypted with AES-256-GCM using your passphrase. <strong>A lost passphrase cannot be recovered.</strong> Keep the archive and passphrase separately in trusted offline storage. The archive has a 128 MiB limit, with additional bounded row, cell, and key counts.</p>
+    <p>Use the same application database schema and database provider. Recovery does not run migrations, overwrite an initialized database, or transfer workload data.</p>
+    <div asp-validation-summary="All" role="alert"></div>
+    @if (Model.FreshInstance)
+    {
+        <h2>Restore a fresh instance</h2>
+        <p>Restore is only available before initial System Admin setup. As with first-run setup, protect access to this endpoint using the supplied loopback listener or a trusted setup network. Stop other Control Plane replicas during recovery.</p>
+        <p><strong>Restart the Control Plane after restoring, before using any restored secrets.</strong> Existing destination encryption keys are retained; restored keys are added without overwriting existing files.</p>
+        <form asp-action="Restore" method="post" enctype="multipart/form-data">
+            <label asp-for="Archive">Encrypted instance archive (maximum 128 MiB)</label>
+            <input asp-for="Archive" type="file" required />
+            <label asp-for="Passphrase">Recovery passphrase</label>
+            <input asp-for="Passphrase" type="password" autocomplete="off" minlength="16" maxlength="1024" required />
+            <label><input asp-for="Acknowledge" required /> I understand this restores all instance security state, excludes workload data, and requires a restart.</label>
+            <button type="submit">Restore instance</button>
+        </form>
+    }
+    else
+    {
+        <h2>Create an encrypted backup</h2>
+        <p>Only an enabled System Admin may create a backup. The database is read in a consistent snapshot. No external PostgreSQL command-line tools are required.</p>
+        <form asp-action="Backup" method="post">
+            <label asp-for="Passphrase">New recovery passphrase (at least 16 characters)</label>
+            <input asp-for="Passphrase" type="password" autocomplete="new-password" minlength="16" maxlength="1024" required />
+            <label><input asp-for="Acknowledge" required /> I understand this backup includes all password hashes, secrets, and enrollment state; excludes workload data; and cannot be decrypted if I lose the passphrase.</label>
+            <button type="submit">Download encrypted instance backup</button>
+        </form>
+    }
+}

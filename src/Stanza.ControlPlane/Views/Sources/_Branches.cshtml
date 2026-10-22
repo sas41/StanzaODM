@@ -1,0 +1,19 @@
+@model BranchPartialModel
+@if (Model.Error is not null)
+{
+    <p role="alert">@Model.Error</p><p>The saved reference is unchanged. Use Refresh to retry.</p>
+}
+else if (Model.Page is { } page)
+{
+    @if (page.SelectedMissing) { <p role="alert">The saved reference “@(page.Selected)” was not returned by the remote. It may have been deleted, be an exact commit, or fall outside the bounded listing. Choose an existing reference or verify the commit before executing.</p> }
+    <label>Remote branches and tags
+        <select data-branch-choice aria-label="Remote branches and tags">
+            <option value="@(page.Selected)" selected>@(page.Selected) (saved@(page.SelectedMissing ? "; not in listing" : ""))</option>
+            @foreach (var reference in page.References.Where(x => x != page.Selected)) { <option value="@reference">@reference</option> }
+        </select>
+    </label>
+    @if (page.References.Count == 0) { <p>No remote references match this search. The saved selection is preserved.</p> }
+    <p>Page @(page.Page + 1), up to 50 references per page; retrieval capped at 10,000.</p>
+    @if (page.Page > 0) { <button class="button" type="button" hx-get="/sources/@Model.DeploymentId/@Model.SourceId/branches?page=@(page.Page - 1)&amp;search=@Uri.EscapeDataString(page.Search)" hx-target="#branches-@Model.SourceId">Previous</button> }
+    @if (page.HasMore) { <button class="button" type="button" hx-get="/sources/@Model.DeploymentId/@Model.SourceId/branches?page=@(page.Page + 1)&amp;search=@Uri.EscapeDataString(page.Search)" hx-target="#branches-@Model.SourceId">Next</button> }
+}

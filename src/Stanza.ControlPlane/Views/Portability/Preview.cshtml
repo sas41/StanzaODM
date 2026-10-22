@@ -1,0 +1,16 @@
+@model Stanza.ControlPlane.Portability.PortablePreview
+@{ ViewData["Title"] = "Import preview"; }
+<span class="eyebrow">NO CONFIGURATION APPLIED YET</span><h1>Import preview</h1>
+@foreach (var warning in Model.Warnings) { <div class="notice warning">@warning</div> }
+<section class="panel"><h2>New inactive deployments</h2><ul>@foreach (var name in Model.Deployments) { <li>@name</li> }</ul>
+<p>Preview expires @DateTimeOffset.FromUnixTimeSeconds(Model.ExpiresAt).ToString("u").</p>
+<p class="field-help">Fingerprint <code>@Model.Fingerprint</code>. The content and mappings are stored encrypted on the server, not accepted from this form.</p>
+@if (Model.Conflicts.Count > 0) { <h3>Conflicts — apply blocked</h3><ul>@foreach (var conflict in Model.Conflicts) { <li>@conflict</li> }</ul> }
+@if (Model.CanApply) {
+    <form method="post" asp-action="Apply" asp-route-id="@Model.Id">
+        <input type="hidden" name="fingerprint" value="@Model.Fingerprint" />
+        <label><input type="checkbox" name="acknowledgeApply" value="true" required /> I confirm this configuration-only import. Workloads and automation stay inactive; persistent data is not transferred. Interrupted imports may be partially committed and cannot be replayed.</label>
+        <button class="button primary" type="submit">Apply configuration once — do not activate</button>
+    </form>
+}
+<a class="button" asp-action="Index">Back to portability</a></section>

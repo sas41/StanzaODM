@@ -1,0 +1,10 @@
+@{ ViewData["Title"] = "Overview"; }
+<div class="page-heading"><div><span class="eyebrow">YOUR INFRASTRUCTURE, IN FOCUS</span><h1>Control Plane</h1><p class="muted">A single place for your servers and deployments.</p></div><span class="badge">FOUNDATION BUILD</span></div>
+<div id="system-status" hx-get="/status" hx-trigger="load" hx-swap="innerHTML" aria-live="polite"><p class="muted">Checking database status…</p></div>
+<section class="panel"><h2>Getting started</h2><ol class="checklist">
+    <li><span class="step complete">1</span><div><strong>Secure your Control Plane</strong><p>The initial System Admin is configured. Use HTTPS before exposing this instance.</p></div></li>
+    <li><span class="step">2</span><div><strong>Set up your team</strong><p>Administrators can manage ordinary users. Only System Admins can manage privileged accounts.</p>@if (User.IsInRole("Admin") || User.IsInRole("SystemAdmin")) { <a href="/users">Manage users →</a> }</div></li>
+    <li><span class="step">3</span><div><strong>Connect your infrastructure</strong><p>Generate an enrollment token, start an Agent, and review its registration. Deployment dispatch and automation remain under implementation.</p>@if (User.IsInRole("Admin") || User.IsInRole("SystemAdmin")) { <a href="/agents">Manage Agents →</a> }</div></li>
+</ol></section>
+<section class="panel"><h2>Prepare a deployment</h2><p class="muted">Create and revise your Compose file, .env, Dockerfiles, and supporting assets in the persistent draft editor. Workload execution is not enabled yet.</p><a href="/deployments">Open deployments →</a></section>
+<section class="panel"><h2>Implementation status</h2><p class="muted">This is an incremental build, not the complete initial release. Unfinished deployment controls are intentionally not enabled. Track implementation and verification in PLAN.md.</p></section>

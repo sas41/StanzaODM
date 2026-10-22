@@ -1,0 +1,53 @@
+@model SourceDetailsModel
+@{ ViewData["Title"] = "Sources — " + Model.Deployment.Name; var d = Model.Deployment; }
+<h1>@d.Name — sources</h1>
+<p><a href="/deployments/@d.DeploymentId">Deployment / manually authored Compose</a> · <a href="/credentials">Credentials / registries</a></p>
+<p>Checkouts are isolated build inputs, not browser-editable files. Submodules are unsupported: repositories containing .gitmodules are rejected, not initialized. Compose remains manually managed; use each destination as a relative build context. Operation history records resolved commits.</p>
+@if (!d.TargetAgentId.HasValue) { <p role="alert">No Agent is selected. Choose an approved deployment Agent before browsing references or executing workloads.</p> }
+@if (!d.CanManage) { <p>Read-only. Editing sources requires sources.manage and files.write for this deployment.</p> }
+@if (d.CanManage) { <a class="button" href="/sources/@d.DeploymentId/edit">Add Git source</a> }
+@if (d.Git.Count == 0) { <p>No Git sources. Public/private image services can still use this deployment.</p> }
+@for (var index = 0; index < d.Git.Count; index++)
+{
+    var item = d.Git[index];
+    <section class="panel">
+        <h2>@(index + 1). @item.Destination</h2><p>@item.Url</p><p>Selected: <code>@item.Reference</code> · Credential: @(item.CredentialId?.ToString() ?? "public")</p>
+        <form method="post" action="/sources/@d.DeploymentId/save" data-branch-form>
+            @Html.AntiForgeryToken()
+            <input type="hidden" name="Id" value="@item.Id" /><input type="hidden" name="ExpectedVersion" value="@item.Version" />
+            <input type="hidden" name="Url" value="@item.Url" /><input type="hidden" name="Destination" value="@item.Destination" /><input type="hidden" name="CredentialId" value="@item.CredentialId" />
+            <label>Branch/tag/commit<input name="Reference" value="@item.Reference" maxlength="256" required readonly="@(!d.CanManage)" /></label>
+            <label>Search remote references<input type="search" name="search" placeholder="Filter branches and tags" hx-get="/sources/@d.DeploymentId/@item.Id/branches" hx-trigger="input changed delay:400ms, search" hx-target="#branches-@item.Id" hx-indicator="#loading-@item.Id" /></label>
+            <button class="button" type="button" hx-get="/sources/@d.DeploymentId/@item.Id/branches" hx-target="#branches-@item.Id" hx-include="closest form" hx-params="search" hx-indicator="#loading-@item.Id">Refresh references</button>
+            <span id="loading-@item.Id" class="htmx-indicator" role="status" hidden>Loading remote references…</span>
+            <div id="branches-@item.Id" hx-get="/sources/@d.DeploymentId/@item.Id/branches" hx-trigger="load" hx-indicator="#loading-@item.Id" aria-live="polite"><p>Loading branch and tag list from the deployment Agent…</p></div>
+            @if (d.CanManage) { <button class="button primary" type="submit">Save selected reference</button> }
+        </form>
+        @if (d.CanManage)
+        {
+            <a href="/sources/@d.DeploymentId/edit?id=@item.Id">Edit endpoint / destination</a>
+            <form method="post" action="/sources/@d.DeploymentId/delete">@Html.AntiForgeryToken()<input type="hidden" name="id" value="@item.Id" /><input type="hidden" name="expectedVersion" value="@item.Version" /><button class="button" type="submit">Remove source</button></form>
+            @if (index > 0)
+            {
+                var ordered = d.Git.ToList(); (ordered[index - 1], ordered[index]) = (ordered[index], ordered[index - 1]);
+                <form method="post" action="/sources/@d.DeploymentId/reorder">@Html.AntiForgeryToken()
+                    @foreach (var source in ordered) { <input type="hidden" name="ids" value="@source.Id" /><input type="hidden" name="versions" value="@source.Version" /> }
+                    <button class="button" type="submit">Move earlier</button>
+                </form>
+            }
+        }
+    </section>
+}
+<section class="panel"><h2>Private registry bindings</h2>
+    <p>Public registries need no credentials. Bind at most one credential per registry endpoint. Usage is checked again at execution time.</p>
+    <form method="post" action="/sources/@d.DeploymentId/registries">
+        @Html.AntiForgeryToken()
+        @foreach (var id in d.RegistryCredentialIds) { <input type="hidden" name="expectedCredentialIds" value="@id" /> }
+        @foreach (var c in Model.Credentials.Where(x => x.Kind == "registry"))
+        { <label><input type="checkbox" name="credentialIds" value="@c.Id" checked="@(d.RegistryCredentialIds.Contains(c.Id))" disabled="@(!d.CanManage)" /> @c.Name — @c.Endpoint</label> }
+        @foreach (var id in d.RegistryCredentialIds.Where(id => Model.Credentials.All(c => c.Id != id)))
+        { <p role="alert">Bound credential @id is not usable by your account. Remove it or request credential.use permission.</p> }
+        @if (d.CanManage) { <button class="button primary" type="submit">Save registry bindings</button> }
+    </form>
+</section>
+<script src="~/js/branches.js" asp-append-version="true" defer></script>

@@ -1,0 +1,16 @@
+@model GitSourceEditModel
+@{ ViewData["Title"] = Model.Id.HasValue ? "Edit Git source" : "Add Git source"; }
+<h1>@ViewData["Title"]</h1>
+<div asp-validation-summary="All" class="validation" role="alert"></div>
+<form method="post" action="/sources/@Model.DeploymentId/save" class="panel">
+    @Html.AntiForgeryToken()<input asp-for="Id" type="hidden" /><input asp-for="ExpectedVersion" type="hidden" />
+    <label asp-for="Url">HTTPS repository URL</label><input asp-for="Url" required maxlength="2048" />
+    <label asp-for="CredentialId">Credential</label><select asp-for="CredentialId"><option value="">Public repository (no credential)</option>
+        @foreach (var c in Model.Credentials) { <option value="@c.Id">@c.Name — @c.Endpoint</option> }
+    </select>
+    <label asp-for="Reference">Branch, tag, full ref, or exact commit</label><input asp-for="Reference" required maxlength="256" />
+    <p>Save the endpoint first, then browse/search remote branches and tags on the source page. Commit hashes may be entered directly.</p>
+    <label asp-for="Destination">Isolated relative destination</label><input asp-for="Destination" required maxlength="512" />
+    <p>Use this directory in your manually authored Compose build.context, for example ./sources/app. Checkouts are read-only in the browser; Stanza never commits, pushes, or rewrites Compose. Submodules are unsupported: repositories containing .gitmodules are rejected, not initialized.</p>
+    <button class="button primary" type="submit">Save source</button><a class="button" href="/sources/@Model.DeploymentId">Cancel</a>
+</form>

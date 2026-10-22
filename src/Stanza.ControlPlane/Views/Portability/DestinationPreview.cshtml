@@ -1,0 +1,19 @@
+@model Stanza.ControlPlane.Portability.PortableDestinationPreview
+@{ ViewData["Title"] = "Destination configuration preview"; }
+<span class="eyebrow">READ-ONLY PREVIEW — NO WORKLOAD CHANGED</span><h1>Destination configuration preview</h1>
+<p>Source <code>@Model.DeploymentId</code>, saved revision @Model.Revision, destination <code>@Model.DestinationAgentId</code>.</p>
+@foreach (var warning in Model.Warnings) { <div class="notice warning">@warning</div> }
+<section class="panel"><h2>Exactly one manually authored Compose file</h2><pre>@Model.Compose</pre>
+<h3>Managed file selection — all copied unchanged</h3><ul>@foreach (var file in Model.Files) { <li><code>@file.Path</code> (@file.Kind)</li> }</ul>
+<p class="field-help">Sources, credentials, automation and grants are not implicitly copied. Select supported participant sections explicitly or use export/import mappings. Persistent volume contents and host paths are not copied.</p></section>
+<section class="panel"><h2>Destination-effective environment and provenance</h2>
+<p class="field-help">Global → destination Agent → deployment overrides. Literal assignments only; this is not a Compose-compatible interpreter. Values are shown only after authorizing reveal at every scope. Container service environment/env_file settings are separate.</p>
+@if (Model.EnvironmentUnavailable is not null) { <div class="notice warning">@Model.EnvironmentUnavailable</div> }
+@if (Model.Environment is { IsSupported: true } environment) {
+    <table><thead><tr><th>Key</th><th>Effective value</th><th>Source</th><th>Occurrences / overrides</th></tr></thead><tbody>
+    @foreach (var item in environment.Values.Values.OrderBy(x => x.Key)) { <tr><td><code>@item.Key</code></td><td><code>@item.Value</code></td><td>@item.Source</td><td>@string.Join(" → ", item.Occurrences.Select(x => $"{x.Scope} line {x.Line}"))</td></tr> }
+    </tbody></table>
+}
+@if (Model.Environment is { IsSupported: false } refused) { <ul>@foreach (var diagnostic in refused.Diagnostics) { <li>@diagnostic.Scope line @diagnostic.Line: @diagnostic.Message</li> }</ul> }
+<label><input type="checkbox" disabled /> Transfer persistent data — not yet available</label>
+<a class="button" asp-action="Index">Back to explicitly clone or move</a></section>

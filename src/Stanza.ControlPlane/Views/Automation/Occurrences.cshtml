@@ -1,0 +1,2 @@
+@model IReadOnlyList<DateTimeOffset>
+<h2>Upcoming occurrences (UTC)</h2><ol>@foreach (var occurrence in Model) { <li>@occurrence.ToString("u")</li> }</ol>

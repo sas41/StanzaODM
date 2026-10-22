@@ -1,0 +1,7 @@
+@model IReadOnlyList<Stanza.ControlPlane.Sources.DeploymentSourceSummary>
+@{ ViewData["Title"] = "Deployment sources"; }
+<h1>Deployment sources</h1>
+<p>Bind Git checkouts and private registry credentials without modifying manually authored Compose files.</p>
+<a href="/credentials">Manage credentials and registry endpoints</a>
+@if (Model.Count == 0) { <p>No readable deployments. Create a deployment or request deployment.read access.</p> }
+@foreach (var item in Model) { <section class="panel"><h2><a href="/sources/@item.DeploymentId">@item.Name</a></h2><p>@item.Git.Count Git sources · @item.RegistryCredentialIds.Count registry bindings</p></section> }

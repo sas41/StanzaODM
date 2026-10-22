@@ -1,0 +1,24 @@
+@model IReadOnlyList<AccountSummary>
+@{ ViewData["Title"] = "Users"; }
+<div class="page-heading"><div><span class="eyebrow">ACCESS MANAGEMENT</span><h1>Users</h1><p class="muted">Local accounts and administrative boundaries.</p></div><a class="button primary" href="/users/create">Create user</a></div>
+<section class="panel table-panel"><table><thead><tr><th>Username</th><th>Account type</th><th>Status</th><th>Management</th></tr></thead><tbody>
+@foreach (var account in Model)
+{
+    var canManage = User.IsInRole("SystemAdmin") || account.Role == AccountRole.User;
+    <tr><td><strong>@account.Username</strong><br /><a href="/users/@account.Id/access">Effective permissions</a></td><td>@account.Role</td><td><span class="badge">@(account.Enabled ? "Enabled" : "Disabled")</span></td><td>
+    @if (canManage)
+    {
+        <details><summary>Manage account</summary><div class="account-actions">
+        <form method="post" asp-action="Enabled" asp-route-id="@account.Id"><input type="hidden" name="enabled" value="@(!account.Enabled ? "true" : "false")" /><button type="submit" class="button">@(account.Enabled ? "Disable account" : "Enable account")</button></form>
+        @if (User.IsInRole("SystemAdmin"))
+        {
+            <form method="post" asp-action="Role" asp-route-id="@account.Id"><label for="role-@account.Id">Account type</label><select id="role-@account.Id" name="role">@foreach (var role in Enum.GetValues<AccountRole>()) { <option value="@role" selected="@(role == account.Role)">@role</option> }</select><button class="button" type="submit">Update type</button></form>
+        }
+        <form method="post" asp-action="ResetPassword" asp-route-id="@account.Id"><label for="password-@account.Id">New password</label><input id="password-@account.Id" name="password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required /><button class="button" type="submit">Reset password</button></form>
+        <form method="post" asp-action="Delete" asp-route-id="@account.Id"><button class="button" type="submit">Delete account</button></form>
+        </div></details>
+    }
+    else { <span class="muted">System Admin only</span> }
+    </td></tr>
+}
+</tbody></table></section>

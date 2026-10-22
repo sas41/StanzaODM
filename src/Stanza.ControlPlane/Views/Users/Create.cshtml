@@ -1,0 +1,11 @@
+@model CreateUserModel
+@{ ViewData["Title"] = "Create user"; }
+<span class="eyebrow">ACCESS MANAGEMENT</span><h1>Create user</h1><p class="muted">Ordinary users receive no operational access until permissions are granted.</p>
+<section class="panel narrow"><form method="post" asp-action="Create">
+    <div asp-validation-summary="All" class="validation" role="alert"></div>
+    <label asp-for="Username">Username</label><input asp-for="Username" autocomplete="off" maxlength="64" required />
+    <label asp-for="Password">Initial password</label><input asp-for="Password" autocomplete="new-password" minlength="12" maxlength="1024" required />
+    @if (User.IsInRole("SystemAdmin")) { <label asp-for="Role">Account type</label><select asp-for="Role" asp-items="Html.GetEnumSelectList<AccountRole>()"></select> }
+    else { <input asp-for="Role" type="hidden" value="User" /><p class="field-help">Only System Admins can create privileged accounts.</p> }
+    <button class="button primary" type="submit">Create account</button>
+</form></section>

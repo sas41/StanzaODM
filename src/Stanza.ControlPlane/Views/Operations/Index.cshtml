@@ -1,0 +1,4 @@
+@model IReadOnlyList<Stanza.ControlPlane.Operations.OperationSummary>
+@{ ViewData["Title"] = "Operations"; }
+<h1>Operations</h1><p class="muted">Durable operations capture an immutable configuration revision. Uncertain outcomes are never automatically retried.</p>
+<section class="panel table-panel"><table><thead><tr><th>Operation</th><th>State</th><th>Trigger</th><th>Created</th></tr></thead><tbody>@foreach (var item in Model) { <tr><td><a href="/operations/@item.Id">@item.Kind</a></td><td>@item.State · @item.Code</td><td>@item.Trigger</td><td>@DateTimeOffset.FromUnixTimeSeconds(item.CreatedAt).ToString("u")</td></tr> }</tbody></table></section>

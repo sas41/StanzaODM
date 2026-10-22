@@ -1,0 +1,17 @@
+@model SetupModel
+@{ ViewData["Title"] = "First-run setup"; }
+<section class="auth-panel">
+    <p><a href="/recovery">Restore an encrypted instance backup instead →</a></p>
+    <span class="eyebrow">WELCOME TO STANZA</span>
+    <h1>Make it yours.</h1>
+    <p class="muted">Create the first System Admin to secure this Control Plane. There are no default accounts.</p>
+    @if (!Context.Request.IsHttps) { <div class="notice warning">This connection is not HTTPS. Use a trusted local connection for setup and configure TLS before exposing Stanza to a network.</div> }
+    <form method="post" asp-action="Index">
+        <div asp-validation-summary="All" class="validation" role="alert"></div>
+        <label asp-for="Username">Username</label><input asp-for="Username" autocomplete="username" maxlength="64" required />
+        <label asp-for="Password">Password</label><input asp-for="Password" autocomplete="new-password" minlength="12" maxlength="1024" required />
+        <span class="field-help">At least 12 characters. Use a unique password.</span>
+        <label asp-for="ConfirmPassword">Confirm password</label><input asp-for="ConfirmPassword" autocomplete="new-password" maxlength="1024" required />
+        <button type="submit" class="button primary wide">Create System Admin</button>
+    </form>
+</section>

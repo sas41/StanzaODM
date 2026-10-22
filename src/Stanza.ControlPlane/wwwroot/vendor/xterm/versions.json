@@ -1,0 +1,14 @@
+{
+  "xterm": {
+    "package": "@xterm/xterm",
+    "version": "5.5.0",
+    "license": "MIT",
+    "source": "https://www.npmjs.com/package/@xterm/xterm/v/5.5.0"
+  },
+  "fit": {
+    "package": "@xterm/addon-fit",
+    "version": "0.10.0",
+    "license": "MIT",
+    "source": "https://www.npmjs.com/package/@xterm/addon-fit/v/0.10.0"
+  }
+}

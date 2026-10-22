@@ -1,0 +1,41 @@
+# On each target host:
+# 1. Set STANZA_CONTROL_PLANE_URL to the HTTPS Control Plane origin.
+# 2. Generate an enrollment token in /agents and set STANZA_ENROLLMENT_TOKEN.
+# 3. Set STANZA_DOCKER_GID to: stat -c %g /var/run/docker.sock
+# 4. Run: docker compose -f compose.agent.yaml up --build -d
+# The Agent opens only outbound management connections; no host ports are published.
+# Docker socket access is effectively privileged host access. Host actions remain unavailable.
+# This foundation registers Agents but deliberately does not enable workload execution yet.
+name: stanza-agent
+services:
+  initialize-agent:
+    image: alpine:3.22
+    user: "0:0"
+    command: ["sh", "-ec", "mkdir -p /agent-data && chown 1654:1654 /agent-data && chmod 0700 /agent-data"]
+    volumes:
+      - agent-data:/agent-data
+    restart: "no"
+
+  agent:
+    build:
+      context: .
+      dockerfile: src/Stanza.Agent/Dockerfile
+    environment:
+      Agent__ControlPlaneUrl: ${STANZA_CONTROL_PLANE_URL:?Set STANZA_CONTROL_PLANE_URL to your HTTPS Control Plane origin}
+      Agent__EnrollmentToken: ${STANZA_ENROLLMENT_TOKEN:?Generate an enrollment token in the Control Plane UI}
+      Agent__PersistentDataRoot: /var/lib/stanza-agent
+      Agent__Docker__EnableExecution: "false"
+    group_add:
+      - "${STANZA_DOCKER_GID:?Set STANZA_DOCKER_GID to the host Docker socket group ID}"
+    volumes:
+      - agent-data:/var/lib/stanza-agent
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      initialize-agent:
+        condition: service_completed_successfully
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  agent-data:

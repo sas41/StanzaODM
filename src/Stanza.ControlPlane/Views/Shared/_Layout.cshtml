@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="htmx-config" content='{"allowEval":false,"includeIndicatorStyles":false,"selfRequestsOnly":true}' />
+    <title>@(ViewData["Title"] ?? "Control Plane") · Stanza</title>
+    <link rel="stylesheet" href="~/css/stanza.css" asp-append-version="true" />
+    <script src="~/vendor/htmx.min.js" defer asp-append-version="true"></script>
+    <script src="~/js/status.js" defer asp-append-version="true"></script>
+</head>
+<body>
+    <aside class="sidebar">
+        <a class="brand" href="/"><span class="brand-mark">S</span><span>Stanza<small>OPEN DEPLOYMENT MANAGER</small></span></a>
+        @if (User.Identity?.IsAuthenticated == true)
+        {
+            <div class="nav-label">CONTROL PLANE</div>
+            <nav aria-label="Main navigation">
+                <a href="/">Overview</a>
+                <a href="/deployments">Deployments</a>
+                <a href="/operations">Operations</a>
+                <a href="/sources">Git sources</a>
+                <a href="/credentials">Credentials &amp; registries</a>
+                <a href="/agents">Agents</a>
+                <a href="/settings">Settings</a>
+                <a href="/portability">Clone, move &amp; import/export</a>
+                <a href="/automation">Actions &amp; automation</a>
+                @if (User.IsInRole("Admin") || User.IsInRole("SystemAdmin"))
+                {
+                    <a href="/users">Users</a>
+                    <a href="/groups">Groups &amp; permissions</a>
+                    <a href="/audit">Audit history</a>
+                    <a href="/recovery">Backup &amp; recovery</a>
+                }
+                <a href="/account/password">Account security</a>
+            </nav>
+            <div class="sidebar-footer"><strong>@User.Identity.Name</strong><span>@User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value</span>
+                <form method="post" asp-controller="Account" asp-action="Logout"><button class="button subtle" type="submit">Sign out</button></form>
+            </div>
+        }
+        else
+        {
+            <p class="sidebar-copy">Your servers.<br />Your deployments.<br />One control plane.</p>
+        }
+    </aside>
+    <main>
+        <header class="topbar"><span>STANZA / CONTROL PLANE</span><span class="version">.NET 10 LTS</span></header>
+        <div class="content">
+            @if (TempData["Success"] is string success) { <div class="notice success" role="status">@success</div> }
+            @if (TempData["Error"] is string error) { <div class="notice error" role="alert">@error</div> }
+            @RenderBody()
+        </div>
+    </main>
+</body>
+</html>

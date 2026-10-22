@@ -1,0 +1,29 @@
+@model Stanza.ControlPlane.Portability.PortableMoveEntity
+@{ ViewData["Title"] = "Move progress"; }
+<h1>Move: @Model.State</h1>
+<section class="panel" hx-get="@Url.Action("Move", new { id = Model.Id })" hx-trigger="every 5s" hx-select="section.panel" hx-swap="outerHTML">
+    <p>Deployment <code>@Model.DeploymentId</code>, source <code>@Model.SourceAgentId</code>, destination <code>@Model.DestinationAgentId</code>.</p>
+    <p>Current phase: <strong>@Model.State</strong>. Operation: <code>@Model.OperationId</code>.</p>
+    @if (Model.Failure is not null) { <div class="notice warning">@Model.Failure</div> }
+    @foreach (var warning in System.Text.Json.JsonSerializer.Deserialize<string[]>(Model.Warnings) ?? []) { <div class="notice warning">@warning</div> }
+    <div class="notice warning">No persistent data is transferred. No source files, bind mounts or volumes are automatically deleted. Placement updates only after destination health evidence; unknown outcomes require manual reconciliation. Source cleanup is a separate explicit operation after inspection.</div>
+    <label><input type="checkbox" disabled /> Transfer persistent data — not yet available</label>
+    @if (ViewData["CanCleanup"] is true) {
+        <form method="post" asp-action="Cleanup" asp-route-id="@Model.Id">
+            <label><input type="checkbox" name="acknowledgeCleanup" value="true" required /> Explicitly remove stopped source containers and Compose networks. Retain all named volumes, bind-mounted data and managed source files. This is not persistent-data transfer or deletion.</label>
+            <button class="button" type="submit">Queue source cleanup without volume deletion</button>
+        </form>
+    }
+    @if (Model.State == "recovery") {
+        <h2>Explicit recovery inspection</h2>
+        <p>Commands with unknown outcomes are never replayed automatically. Inspect both Agents, reconcile workloads through explicit authorized operations, then close this recovery record without changing placement. Fresh successful inspections of both Agents (within 10 minutes and after the failure) are required.</p>
+        <form method="post" asp-action="InspectRecovery" asp-route-id="@Model.Id"><input type="hidden" name="destination" value="false" /><button class="button" type="submit">Inspect source runtime status</button></form>
+        <form method="post" asp-action="InspectRecovery" asp-route-id="@Model.Id"><input type="hidden" name="destination" value="true" /><button class="button" type="submit">Inspect destination runtime status</button></form>
+        <form method="post" asp-action="CloseRecovery" asp-route-id="@Model.Id">
+            <label><input type="checkbox" name="acknowledgeRecovery" value="true" required /> I inspected fresh source/destination results and reconciled workloads. Close the recovery record only; do not change placement, replay commands or delete persistent data.</label>
+            <button class="button" type="submit">Close inspected recovery without replay</button>
+        </form>
+    }
+    <a class="button" asp-action="Move" asp-route-id="@Model.Id">Refresh progress</a>
+    <a class="button" asp-action="Index">Back to portability</a>
+</section>

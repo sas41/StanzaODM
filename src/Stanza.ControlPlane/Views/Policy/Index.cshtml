@@ -1,0 +1,13 @@
+@model Stanza.ControlPlane.Configuration.PolicyEditor
+@{ ViewData["Title"] = "Operational policy"; }
+<h1>Operational policy</h1><p class="muted">Limits apply to new requests and operations. Hard safety ceilings protect process memory and protocol compatibility. Host actions additionally require opt-in Agent host namespace configuration.</p>
+<form method="post"><div asp-validation-summary="All" class="validation"></div><input type="hidden" name="version" value="@Model.Version" />
+<section class="panel">
+@foreach (var property in typeof(Stanza.ControlPlane.Configuration.OperationalPolicy).GetProperties())
+{
+    <label for="@property.Name">@property.Name</label>
+    @if (property.PropertyType == typeof(bool)) { <input id="@property.Name" name="@property.Name" type="checkbox" value="true" checked="@((bool)property.GetValue(Model.Policy)!)" /><input type="hidden" name="@property.Name" value="false" /> }
+    else { <input id="@property.Name" name="@property.Name" type="number" value="@property.GetValue(Model.Policy)" required /> }
+}
+@if (User.IsInRole("Admin") || User.IsInRole("SystemAdmin")) { <button class="button primary" type="submit">Save policy</button> }
+</section></form>

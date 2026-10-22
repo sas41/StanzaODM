@@ -1,0 +1,21 @@
+@model Stanza.ControlPlane.Terminals.TerminalTarget
+@{ ViewData["Title"] = "Container terminal"; }
+<link rel="stylesheet" href="~/vendor/xterm/xterm.css" asp-append-version="true" />
+<script src="~/vendor/xterm/xterm.js" defer asp-append-version="true"></script>
+<script src="~/vendor/xterm/addon-fit.js" defer asp-append-version="true"></script>
+<script src="~/js/terminal.js" defer asp-append-version="true"></script>
+<h1>Container terminal · @Model.Name</h1>
+<p>Deployed revision @Model.Revision. Only containers belonging to this deployment are eligible. Closing this page closes the terminal process; sessions are not resumed automatically.</p>
+<form id="terminal-connect" data-deployment-id="@Model.DeploymentId">
+    <label>Target type <select name="targetType"><option value="service">Compose service</option><option value="container">Container name or ID</option></select></label>
+    <label>Service or container <input name="target" required maxlength="128" autocomplete="off" /></label>
+    <label>Executable <input name="executable" value="/bin/sh" required maxlength="1024" autocomplete="off" /></label>
+    <label>Arguments (JSON array; no shell concatenation) <input name="arguments" value="[]" maxlength="8192" autocomplete="off" /></label>
+    <label>Container user (optional) <input name="user" maxlength="128" autocomplete="off" /></label>
+    <label>Working directory (optional absolute path) <input name="workingDirectory" maxlength="1024" autocomplete="off" /></label>
+    <button type="submit">Connect</button>
+    <button type="button" id="terminal-disconnect" disabled>Disconnect</button>
+</form>
+<p id="terminal-status" role="status">Disconnected.</p>
+<div id="container-terminal" aria-label="Interactive container terminal"></div>
+<p><a href="/deployments/@Model.DeploymentId">Back to deployment</a></p>

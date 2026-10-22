@@ -1,0 +1,10 @@
+@model Stanza.ControlPlane.Editing.DeploymentRevisionDiff
+@{ ViewData["Title"] = "Revision comparison"; }
+<h1>Revision @Model.Revision → latest saved revision @Model.LatestRevision</h1>
+<p class="field-help">Line-level comparison, preserving original line endings in the comparison. Binary changes are identified without rendering bytes. Only files you may reveal are included.</p>
+@foreach (var file in Model.Files)
+{
+    <section class="panel"><h2>@file.Path · @file.Status</h2><pre class="revision-diff">@foreach (var line in file.Lines) {<span class="diff-@line.Kind">@(line.Kind == "added" ? "+ " : line.Kind == "removed" ? "- " : "  ")@line.Text</span>}</pre></section>
+}
+<a class="button" asp-action="Details" asp-route-id="@Model.DeploymentId">Latest saved revision</a>
+<link rel="stylesheet" href="~/css/editor.css" asp-append-version="true" />
