@@ -4,13 +4,34 @@
 
 All work starts here. Move a task, including its acceptance criteria and test requirements, to `IN-PROGRESS` when implementation begins and to `DONE` only after implementation and verification are complete. Keep task identifiers stable. The order below reflects implementation dependencies; every listed capability is part of the initial release unless explicitly marked future-only.
 
-All remaining feature areas have implementation work recorded under IN-PROGRESS. Work is PAUSED at the user's request; this section does not imply any background implementation is running. A task is not complete merely because a subagent implemented part of it.
+All remaining original feature areas have implementation work recorded under IN-PROGRESS. Execution resumed at the user's request on 2026-10-23, starting with Agent configuration synchronization. A task is not complete merely because part of it is implemented.
 
 ## IN-PROGRESS
 
+### P21 — Agent startup and configuration-change synchronization
+
+- After approval, synchronize the Control Plane Agent ID, runtime policy, Global/Agent environment, and assigned deployment files/environment/source definitions on every startup and reconnect.
+- Detect saved changes at the UI-configured status interval and transfer only changed configuration; disconnected Agents receive a complete snapshot when reconnecting.
+- Keep a private deployment-specific configuration cache separate from immutable execution workspaces. Synchronization does not need to restart workloads; explicit operations continue to apply workload changes.
+- Remove unassigned/deleted deployment caches without touching running containers, execution workspaces, bind mounts or volumes. Keep source credential secrets operation-scoped rather than retaining unnecessary credentials in the cache.
+- Expose acknowledged synchronization state in the Agent UI, with bounded authenticated transport, safe paths, atomic file replacement and secret-free diagnostics.
+- Tests: initial/reconnect synchronization, change detection and unchanged suppression, assignment isolation/removal, files/directories/binary/environment round trips, runtime-policy changes, malformed input/path/symlink rejection, interrupted writes, and actual authenticated channel integration.
+- Implemented 2026-10-23: versioned authenticated configuration messages; complete per-connection bootstrap/reconnect snapshots; change detection at the existing UI-configured StatusIntervalSeconds; per-deployment delta transfers; disk acknowledgements and Agent UI timestamps; private configuration-cache with staged deployment replacement and safe assignment cleanup. Cache updates never invoke Docker or alter operation workspaces. Source definitions/references synchronize, while credential secrets remain operation-scoped.
+- Focused and full in-process verification passes, including actual outbound WebSocket startup/change/reconnect replication. Remains IN-PROGRESS pending rebuilt-container startup/reconnect verification. This host currently has no Docker daemon socket, so packaged deployment was not exercised.
+
+#### Resumed implementation — 2026-10-23
+
+- Work resumed at the user's request, prioritizing configuration sync and getting the packaged application running. No subagents are active.
+- Latest complete solution run after packaging/workflow updates: **1,542 passed, zero failed, 8 skipped; 1,550 total (Release)**. All four existing JavaScript suites pass (**33 cases**); the updated workflow uses the same client-discovery command. These supersede the earlier failing in-process baseline, but do not establish Docker/PostgreSQL runtime readiness.
+- One intervening full run timed out in the existing automation-browser schedule-preview case; that case passed in isolation and the subsequent final full run passed. The intermittent browser timing issue is recorded, not considered conclusively resolved. Control Plane, normal Agent and host-action Agent Compose configurations all validate without a daemon.
+- The old image-pinning regression assertion now checks the temporary private override during execution and its cleanup afterward, rather than expecting a retained file inside the build context. Production private pin-file placement was retained.
+- P10/P18: added authorized desired/observed runtime state, observation age/offline indicators, and saved/deployed revision information to deployment list/detail pages. Removed stale statements that dispatch/preview/export are unimplemented. Service/container detail and continuous runtime observation remain unfinished.
+- P06/P16: Agent status now includes the Compose service label consumed by move health verification; the previous response shape prevented a real destination status from passing that verifier. Real multi-Agent move verification remains blocked on Docker availability.
+- Packaging blocker: `/var/run/docker.sock` is absent and `docker info` cannot connect. No daemon was started or host privileges changed. Rebuilt images, fresh-stack startup, both Agent profiles, privileged host execution and remaining packaged release flows still need a Docker-enabled environment. P02/P04–P19 are not marked DONE.
+
 #### Pause snapshot — 2026-10-22
 
-- PAUSED at the user's explicit request. All delegated agents have finished and released ownership. No further implementation, builds, tests, image builds, or deployments are being performed after this document update.
+- Historical pause snapshot; execution resumed on 2026-10-23. All previously delegated agents released ownership. The following results describe the paused baseline, not current verification.
 - Existing completed milestones remain P01, P03, and P20. The other 17 tasks remain IN-PROGRESS because the expanded implementation has not passed a final integrated verification run. Nothing new is moved to DONE based solely on an independent module report.
 - The most recent completed full-solution run reported **1,477 passed, 9 failed, 8 skipped; 1,494 total**. Subsequent production fixes and additional tests were made, but **there has been no final full-solution build/test after those changes**. Do not describe the current source tree as fully verified or release-ready.
 - That full run's failures covered cross-project lifecycle/log scope checks, the generated pinned-image override path, automatic image-update branch/SHA metadata, and the test expecting concurrent commands on one Agent. Scope validation, pin-file placement, and authored-source metadata handling were subsequently changed; their final combined result remains unverified. The same-Agent concurrency test still needs reconciliation with intentional per-Agent serialization; cross-Agent parallelism must remain tested.
@@ -117,9 +138,9 @@ All remaining feature areas have implementation work recorded under IN-PROGRESS.
 - Implemented recovery: encrypted complete-instance archives using AES-256-GCM/PBKDF2, raw mapped database rows including password hashes, persisted encryption keys, strict schema/value/key validation, fresh-instance-only transactional restore, and additive key rollback protection. Workload data and Agent private keys are excluded.
 - Coordinator integration adds recovery audit records, execution maintenance gating, browser-session stamp invalidation, restart-required HTTP blocking, and a one-time CSRF-protected restart action. Latest restart-ticket and maintenance integrations still require final verification.
 - Focused recovery verification reported 58 tests including a real PostgreSQL 18 round trip. Subsequent session-invalidation and maintenance changes were separately tested in configuration/HTTP suites, but not every final change was rerun together.
-- Release remains blocked on the failed/unverified integration items in the pause snapshot, opt-in Docker/PostgreSQL cases, rebuilt-image/browser deployment smoke tests, host-action prerequisites, lifecycle/recovery/failure scenarios, and final security review. CI currently runs the original status-client JavaScript command; the additional editor, branch, and logs client suites must be included in CI coverage when work resumes.
+- Release remains blocked on the unverified runtime items, opt-in Docker/PostgreSQL cases, rebuilt-image/browser deployment smoke tests, host-action prerequisites, lifecycle/recovery/failure scenarios, and final security review. P22 updates CI to discover all status/editor/branch/log client suites. Real Docker/PostgreSQL release gates remain separate unfinished work.
 
-Implementation pass is paused. All subagents released ownership; no background implementation is active. Coordinator integration added substantial functionality, but focused module reports are not proof that the final combined application is complete.
+The earlier implementation pass was paused; work resumed on 2026-10-23 as recorded above. All previous subagents released ownership. Module reports alone are not proof that the final combined application is complete.
 
 ### P02 — Container packaging and first-run setup
 
@@ -216,6 +237,7 @@ Implementation pass is paused. All subagents released ownership; no background i
 - Added in this pass: encrypted durable requests/results, immutable revision/environment/source capture, queue claims and leases, per-deployment/per-Agent serialization, cross-Agent scheduling, cancellation, uncertain-outcome handling, fresh-status reconciliation, applied runtime metadata, source/permission rechecks, and audit records.
 - Added live operation pages and progress frames for validation/preparation/build/pull/apply/check stages. Existing-container controls do not depend on changed draft files or revoked registry credentials. A positively unaccepted agent_busy result is deferred rather than treated as completed execution; uncertain sends are never blindly retried.
 - Remaining: rerun final combined regressions, reconcile the old same-Agent parallelism test with deliberate Agent serialization, verify real queue-to-runtime recovery/cancellation/progress, and review freshness/observation semantics. No transactional workload rollback is promised.
+- 2026-10-23: integrated regressions now pass and the concurrency case uses distinct Agents. Authorized list/detail runtime observations now distinguish desired state, last observed state, offline connectivity and stale observations. Live service/container observations and real-runtime recovery/cancellation/progress remain incomplete.
 
 ### P15 — Live status, logs, and container terminals
 
@@ -247,10 +269,20 @@ Previously verified baseline before the current implementation pass (2026-10-22)
 - `node --test tests/Stanza.Tests/Live/status.test.cjs`: 9 passed, zero failed/skipped.
 - Both application projects publish successfully in Release configuration with the same local SDK workaround. Publish outputs used `/tmp/opencode/stanza-publish/`, not committed deployment artifacts.
 - Both Docker image builds and fresh Control Plane/PostgreSQL startup were verified under P20. Full Agent workload dispatch, container lifecycle, automation, and recovery verification belong to the current implementation pass and are not covered by that earlier smoke test.
-- Run the Control Plane stack on a Docker-enabled host with `docker compose up --build -d`, then visit `http://localhost:8080/setup`. The supplied default listener binds only to loopback. Configure trusted HTTPS termination and the public origin before remote access or Agent registration; retain all named volumes and encryption keys.
+- Set STANZA_VERSION to the same published UTC date tag used by all Agents, then run the Control Plane stack on a Docker-enabled host with `docker compose -f compose.control.yaml up -d` and visit `http://localhost:8080/setup`. The supplied default listener binds only to loopback. Configure trusted HTTPS termination and the public origin before remote access or Agent registration; retain all named volumes and encryption keys. Local source builds remain available through the Dockerfiles, not the deployment manifests.
 - This baseline predates the expanded feature code above. It must not be cited as proof that the expanded implementation passes. The pause snapshot is the authoritative latest integration/test status.
 
 ## DONE
+
+### P22 — Explicit Compose entrypoints and publishing workflow review
+
+- Supply exactly three root manifests: compose.control.yaml for Control Plane/PostgreSQL, compose.agent.yaml for the ordinary Agent, and compose.agent.privileged.yaml as the explicit high-privilege Agent override. Preserve existing opt-in security boundaries. Both application services pull from ghcr.io/sas41/stanzaodm with component-specific suffixes and require the same explicit STANZA_VERSION; no deployment-time source build.
+- Update startup commands, manifest references and CI validation for the renamed files; validate the ordinary and combined privileged Agent configurations.
+- Use UTC date versions in YYYY-MM-DD-HHMMSS format (for example 2026-10-23-115011), chosen once per workflow run and shared by Agent/Control Plane image tags and OCI version labels. Validate real calendar/time values. Date-tag releases use their exact Git tag; do not generate semantic versions.
+- Ensure the workflow verifies the solution and every client suite before building both images. Publish/login only on default-branch pushes and valid date-version tag pushes; retain lowercase repository-derived image names, pinned actions, scoped token permissions and separate build caches.
+- Tests: manifest naming/service/security contracts, actual Compose configuration rendering, all client-suite discovery, executable publish-policy cases including malformed versions and nonpublishing events, workflow lint and integrated solution regressions. Record local Docker/GitHub execution limitations without claiming a registry push occurred.
+- Verified 2026-10-23: 87 repository/build-policy cases pass, including daemon-free rendering of all three deployment configurations, valid/leap/invalid date versions, matching component versions and nonpublishing PR/manual/feature-branch policies. actionlint 1.7.7 passes; all 33 client cases pass; integrated Release solution: 1,542 passed, zero failed, 8 runtime cases skipped.
+- External boundary: no GitHub workflow was dispatched and no image was pushed. This host still has no Docker daemon socket, so new image builds/startup were not exercised locally. GitHub-hosted build/push and GHCR package visibility/access must be confirmed on the first repository workflow run; these limits do not imply that P19 release verification is complete.
 
 ### P01 — Solution structure and runtime boundaries
 
@@ -274,7 +306,7 @@ Previously verified baseline before the current implementation pass (2026-10-22)
 - Verified: 621 .NET tests in Debug/Release and 9 JavaScript tests pass, including real browser flows, new three-project dependency checks, executable publishing-policy cases, and Git ignore behavior in isolated temporary repositories. GitHub workflow passes actionlint, which is also included in CI.
 - Verified: both Docker images build with the official .NET SDK; published dependency manifests contain only the application and Core as internal projects, Agent contains no EF/Npgsql dependencies, and both images run as non-root UID 1654. Packaged Compose and Buildx clients execute successfully.
 - Verified: a uniquely named temporary Compose stack initializes real PostgreSQL, creates expected tables, and serves `/health/live`, `/health/ready`, and `/setup` successfully; all of its containers, network, and volumes were removed afterward.
-- Workflow: `.github/workflows/docker-images.yml` and tested `.github/scripts/image-metadata.sh`; images are `ghcr.io/<owner>/<repository>-control-plane` and `ghcr.io/<owner>/<repository>-agent` in lowercase, initially Linux amd64. Default-branch pushes publish `latest` and SHA tags; version-tag pushes publish applicable semantic-version and SHA tags. Pull requests, other branches, and manual runs build/test without publishing. Uses GITHUB_TOKEN; no extra registry secret is required.
+- Workflow: `.github/workflows/docker-images.yml` and tested `.github/scripts/image-metadata.sh`; images are `ghcr.io/<owner>/<repository>-control-plane` and `ghcr.io/<owner>/<repository>-agent` in lowercase, initially Linux amd64. P22 replaces the original semantic-version policy with one shared UTC date version for both images. Default-branch pushes publish date, latest and SHA tags; valid date-tag pushes publish that exact date and SHA tags. Pull requests, other branches, and manual runs build/test without publishing. Uses GITHUB_TOKEN; no extra registry secret is required.
 - External boundary: no user repository was initialized, no commit was made, and no image was pushed. Actual GHCR publishing can only be exercised after the user creates/pushes the GitHub repository and its Actions/package policy permits the workflow.
 
 ### P03 — Local authentication and session security

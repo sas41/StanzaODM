@@ -102,6 +102,8 @@ public sealed class RuntimeFinalizationTests
             var observed = Assert.Single(output.RootElement.EnumerateArray());
             Assert.Equal("running", observed.GetProperty("State").GetString());
             Assert.Equal("healthy", observed.GetProperty("Health").GetString());
+            Assert.Equal("app", observed.GetProperty("Service").GetString());
+            Assert.True(Stanza.ControlPlane.Portability.PortableMoveHealthVerifier.RuntimeStatusHealthy(result.Output));
         }
     }
 
@@ -255,7 +257,7 @@ public sealed class RuntimeFinalizationTests
     private static string ContainerInspection(string id, Guid deployment, string status, string health) => JsonSerializer.Serialize(new[]
     {
         new { Id = id, Image = "sha256:" + new string('e', 64), Config = new { Labels = new Dictionary<string, string>
-            { ["com.docker.compose.project"] = "stanza-" + deployment.ToString("N") } },
+            { ["com.docker.compose.project"] = "stanza-" + deployment.ToString("N"), ["com.docker.compose.service"] = "app" } },
             State = new { Status = status, Health = new { Status = health } } }
     });
 

@@ -1,4 +1,6 @@
-# Start: docker compose up --build -d
+# Set STANZA_VERSION to the shared published UTC release tag, for example 2026-10-23-115011.
+# Use the SAME STANZA_VERSION for Control Plane and all Agents.
+# Start: docker compose -f compose.control.yaml up -d
 # Open http://localhost:8080/setup and create the first System Admin.
 # Database credentials are generated once; no default application credentials exist.
 # Use HTTPS at a trusted reverse proxy before exposing this application to a network.
@@ -44,9 +46,8 @@ services:
     restart: unless-stopped
 
   control-plane:
-    build:
-      context: .
-      dockerfile: src/Stanza.ControlPlane/Dockerfile
+    image: ghcr.io/sas41/stanzaodm-control-plane:${STANZA_VERSION:?Set STANZA_VERSION to the shared UTC image version (YYYY-MM-DD-HHMMSS)}
+    pull_policy: always
     ports:
       - "${STANZA_BIND_ADDRESS:-127.0.0.1}:${STANZA_HTTP_PORT:-8080}:8080"
     environment:

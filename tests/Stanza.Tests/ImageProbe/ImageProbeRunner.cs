@@ -27,6 +27,7 @@ internal sealed class ImageProbeRunner : IProcessRunner
     public string? DescriptorOverride { get; set; }
     public string? RawOverride { get; set; }
     public bool CredentialSeen { get; private set; }
+    public string? PinnedConfiguration { get; private set; }
     public List<ProcessRequest> Requests { get; } = [];
     public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
     {
@@ -37,6 +38,7 @@ internal sealed class ImageProbeRunner : IProcessRunner
             CredentialSeen |= document.RootElement.GetProperty("auths").TryGetProperty("registry.example", out _);
         }
         var a = request.Arguments; string output;
+        if (a.Contains("up")) PinnedConfiguration = File.ReadAllText(Path.Combine(request.Environment["DOCKER_CONFIG"], "pinned-images.json"));
         if (a.Contains("config")) output = ConfigJson;
         else if (a[0] == "version") output = RuntimePlatform;
         else if (a.Contains("imagetools"))

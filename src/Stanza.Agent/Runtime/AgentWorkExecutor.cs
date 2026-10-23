@@ -563,7 +563,9 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
                 var container = inspect.RootElement[0];
                 if (!container.GetProperty("Config").GetProperty("Labels").TryGetProperty("com.docker.compose.project", out var label) || label.GetString() != project) throw new WorkFailure("container_scope_mismatch");
                 var state = container.GetProperty("State");
-                observations.Add(new { ID = id, State = state.GetProperty("Status").GetString(), Health = state.TryGetProperty("Health", out var health) ? health.GetProperty("Status").GetString() : "", Image = container.GetProperty("Image").GetString() });
+                var labels = container.GetProperty("Config").GetProperty("Labels");
+                observations.Add(new { ID = id, Service = labels.TryGetProperty("com.docker.compose.service", out var service) ? service.GetString() : "",
+                    State = state.GetProperty("Status").GetString(), Health = state.TryGetProperty("Health", out var health) ? health.GetProperty("Status").GetString() : "", Image = container.GetProperty("Image").GetString() });
             }
             return JsonSerializer.Serialize(observations);
         }

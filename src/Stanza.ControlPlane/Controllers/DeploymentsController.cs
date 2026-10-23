@@ -16,14 +16,23 @@ namespace Stanza.ControlPlane.Controllers;
 [Authorize, Route("deployments"), ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 [RequestSizeLimit(8 * 1024 * 1024)]
 [RequestFormLimits(ValueLengthLimit = 2 * 1024 * 1024, MultipartBodyLengthLimit = 6 * 1024 * 1024)]
-public sealed class DeploymentsController(DeploymentDraftService drafts, IOperationService? operations = null) : Controller
+public sealed class DeploymentsController(DeploymentDraftService drafts, IOperationService? operations = null,
+    DeploymentRuntimeStatusService? runtimeStatus = null) : Controller
 {
     private Guid ActorId => Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : Guid.Empty;
 
     [HttpGet("")]
     public async Task<IActionResult> Index(CancellationToken ct)
     {
-        try { return View(new DeploymentListModel(await drafts.ListAsync(ActorId, ct), await drafts.CanCreateAsync(ActorId, ct))); }
+        try
+        {
+            var available = await drafts.ListAsync(ActorId, ct);
+            var runtime = new Dictionary<Guid, DeploymentRuntimeStatus>();
+            if (runtimeStatus is not null)
+                foreach (var deployment in available)
+                    if (await runtimeStatus.ReadAsync(ActorId, deployment.Id, ct) is { } state) runtime[deployment.Id] = state;
+            return View(new DeploymentListModel(available, await drafts.CanCreateAsync(ActorId, ct)) { Runtime = runtime });
+        }
         catch (DeploymentDraftAccessException) { return Forbid(); }
     }
 
@@ -51,7 +60,12 @@ public sealed class DeploymentsController(DeploymentDraftService drafts, IOperat
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> Details(Guid id, long? revision, CancellationToken ct)
     {
-        try { return View(await drafts.ReadAsync(ActorId, id, revision, ct)); }
+        try
+        {
+            var view = await drafts.ReadAsync(ActorId, id, revision, ct);
+            if (runtimeStatus is not null) view = view with { Runtime = await runtimeStatus.ReadAsync(ActorId, id, ct) };
+            return View(view);
+        }
         catch (DeploymentDraftAccessException) { return Forbid(); }
         catch (DeploymentDraftException error) { TempData["Error"] = error.Message; return RedirectToAction(nameof(Index)); }
     }

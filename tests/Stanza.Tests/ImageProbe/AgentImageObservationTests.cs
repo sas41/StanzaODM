@@ -92,8 +92,11 @@ public sealed class AgentImageObservationTests
         var response = await AgentWorkExecutorTests.Executor(directory.Path, runner).ExecuteAsync(request);
         Assert.True(response.Succeeded, response.Code); Assert.Equal(runner.Current, response.ResolvedImages!["app:config"]); Assert.Equal(runner.Manifest, response.ResolvedImages["app"]);
         var up = Assert.Single(runner.Requests, r => r.Arguments.Contains("up"));
-        Assert.Contains(Path.Combine(up.WorkingDirectory, ".stanza", "pinned-images.json"), up.Arguments);
-        using var pin = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(up.WorkingDirectory, ".stanza", "pinned-images.json")));
+        var pinPath = Path.Combine(up.Environment["DOCKER_CONFIG"], "pinned-images.json");
+        Assert.Contains(pinPath, up.Arguments);
+        Assert.False(pinPath.StartsWith(up.WorkingDirectory + "/", StringComparison.Ordinal));
+        Assert.False(File.Exists(pinPath));
+        using var pin = JsonDocument.Parse(runner.PinnedConfiguration!);
         Assert.Equal(runner.Current, pin.RootElement.GetProperty("services").GetProperty("app").GetProperty("image").GetString());
         Assert.Equal(original, await File.ReadAllBytesAsync(Path.Combine(up.WorkingDirectory, "compose.yaml")));
         Assert.Contains("never", up.Arguments); Assert.DoesNotContain(runner.Requests, r => r.Arguments.Contains("--volumes"));

@@ -27,6 +27,7 @@ public sealed record DeploymentDraftView(DeploymentDraftSummary Draft, long View
 {
     public long? DeployedRevision { get; init; }
     public bool CanValidate { get; init; }
+    public Operations.DeploymentRuntimeStatus? Runtime { get; init; }
     public override string ToString() => $"Draft {Draft.Id}, revision {ViewedRevision} (contents redacted)";
 }
 

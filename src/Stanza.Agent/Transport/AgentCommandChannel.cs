@@ -36,6 +36,8 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
         using var send = new SemaphoreSlim(1, 1);
         Task? work = null;
         var terminalManager = terminals ?? new AgentTerminalManager();
+        // Per-connection state: an interrupted replication always starts again with a full snapshot.
+        var configuration = new AgentConfigurationCache(options);
         async Task SendAsync(AgentWireMessage message)
         {
             var bytes = JsonSerializer.SerializeToUtf8Bytes(message, message.Type.StartsWith("terminal.", StringComparison.Ordinal) ? TerminalJson : JsonSerializerOptions.Web);
@@ -69,7 +71,7 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
             var hello = await ReceiveAsync(socket, lifetime.Token);
             if (hello?.Type != "hello" || hello.Data != AgentWireMessage.Version.ToString())
                 throw new AgentChannelProtocolException();
-            state.Set(state.Snapshot with { Ready = true, CommandChannelAvailable = true, CanExecuteWork = true });
+            state.Set(state.Snapshot with { Ready = false, CommandChannelAvailable = true, CanExecuteWork = false });
             if (runtime is not null)
             {
                 var detected = await runtime.DetectAsync(lifetime.Token);
@@ -94,11 +96,23 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
                     detected.Runtime, detected.DockerAvailable, detected.ComposeAvailable, detected.DockerVersion,
                     detected.ComposeVersion, detected.Architecture, hostOptions?.Value.Enabled == true, terminalAvailable), JsonSerializerOptions.Web)));
             }
+            await SendAsync(new("configuration.request", Guid.Empty));
             while (!lifetime.IsCancellationRequested)
             {
                 var message = await ReceiveAsync(socket, lifetime.Token);
                 if (message is null) break;
                 if (message.Type == "ping") await SendAsync(new("pong", message.Id));
+                else if (message.Type == "configuration.begin" && message.Id == Guid.Empty && message.Configuration is { } config)
+                    configuration.Begin(config);
+                else if (message.Type == "configuration.deployment" && message.Deployment is { } deployment && message.Id == deployment.Id)
+                    await configuration.ApplyAsync(deployment, lifetime.Token);
+                else if (message.Type == "configuration.complete" && message.Id == Guid.Empty && message.Data is { Length: 64 } fingerprint &&
+                    fingerprint.All(c => char.IsAsciiHexDigit(c)))
+                {
+                    await configuration.CompleteAsync(lifetime.Token);
+                    await SendAsync(new("configuration.applied", Guid.Empty, Data: fingerprint));
+                    state.Set(state.Snapshot with { Ready = true, CanExecuteWork = configuration.ExecutionEnabled });
+                }
                 else if (message.Type == "work.request" && message.Request is { } request && request.Id == message.Id)
                 {
                     // No unbounded buffering and no concurrent mutating commands on this Agent.

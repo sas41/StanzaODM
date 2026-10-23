@@ -11,7 +11,7 @@
     @if (!Model.CanRevealEnvironment) { <label><input asp-for="ReplaceEnvironment" /> Replace the hidden environment with the text above (existing secret values are not revealed).</label> }
     }
     <p class="field-help">Raw text is preserved. The hierarchy is Global → Agent → Deployment, with more specific values overriding defaults. Each queued operation captures all three raw files; Docker Compose performs interpolation. Saving does not restart workloads.</p>
-    <div class="notice warning">These values may contain secrets. Future configuration exports will be fully plaintext and require explicit acknowledgement.</div>
+    <div class="notice warning">These values may contain secrets. Configuration exports are fully plaintext and require explicit acknowledgement.</div>
     @if (Model.CanWriteSettings || Model.CanWriteEnvironment) { <button class="button primary" type="submit">Save settings</button> }
 </form></section>
 <section class="panel"><h2>Operational policy</h2><p>Manage session, execution, upload, retention, and live-connection limits.</p><a href="/policy">Open operational policy →</a></section>

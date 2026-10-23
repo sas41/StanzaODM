@@ -12,4 +12,5 @@
 }
 @if (User.IsInRole("Admin") || User.IsInRole("SystemAdmin")) { <button class="button primary" type="submit">Save policy</button> }
 </section></form>
+<p class="field-help">StatusIntervalSeconds also controls how often connected Agents check for saved configuration changes. Startup and reconnect always perform a full synchronization. Unchanged configuration is not transferred.</p>
 <div class="notice warning">For HTTPS termination at a reverse proxy, configure only that proxy's actual IP or narrowly scoped network above and preserve the original Host header. Unconfigured forwarded headers are ignored; trust-all networks are rejected. The public URL in Settings must match the browser origin.</div>

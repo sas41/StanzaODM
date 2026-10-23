@@ -1,8 +1,8 @@
 @model DeploymentListModel
-@{ ViewData["Title"] = "Deployment drafts"; }
-<span class="eyebrow">MANAGED CONFIGURATION</span><h1>Deployment drafts</h1>
+@{ ViewData["Title"] = "Deployments"; }
+<span class="eyebrow">MANAGED CONFIGURATION AND WORKLOADS</span><h1>Deployments</h1>
 <p class="muted">Encrypted configuration drafts with immutable revision history. Saving a draft never starts or changes workloads.</p>
-<div class="notice warning">Runtime validation and deployment dispatch are not implemented yet. No deployed status is reported.</div>
+<p class="field-help">Configuration synchronizes to the assigned Agent. Use explicit operations to validate, deploy, or inspect workloads. Last observed state is not a continuous health guarantee.</p>
 @if (Model.CanCreate) { <p><a class="button primary" asp-action="Create">Create deployment draft</a></p> }
 <section class="panel">
 @if (Model.Drafts.Count == 0)
@@ -11,10 +11,14 @@
 }
 else
 {
-    <table><thead><tr><th>Name</th><th>State</th><th>Agent reference</th><th>Saved revision</th></tr></thead><tbody>
+    <table><thead><tr><th>Name</th><th>Runtime state</th><th>Agent reference</th><th>Saved / deployed revision</th></tr></thead><tbody>
     @foreach (var draft in Model.Drafts)
     {
-        <tr><td><a asp-action="Details" asp-route-id="@draft.Id">@draft.Name</a></td><td>Draft only</td><td>@(draft.TargetAgentId?.ToString() ?? "Unassigned")</td><td>@draft.Revision</td></tr>
+        var runtime = Model.Runtime.GetValueOrDefault(draft.Id);
+        <tr><td><a asp-action="Details" asp-route-id="@draft.Id">@draft.Name</a></td><td>
+        @if (runtime is null) { <span>Not yet observed</span> }
+        else { <span>Desired: @runtime.DesiredState · Last observed: @runtime.ObservedState</span><br /><span class="muted">@runtime.Availability</span> }
+        </td><td>@(draft.TargetAgentId?.ToString() ?? "Unassigned")</td><td>@draft.Revision / @(runtime is { Revision: > 0 } ? runtime.Revision.ToString() : "None / unknown")</td></tr>
     }
     </tbody></table>
 }

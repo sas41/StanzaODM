@@ -5,8 +5,11 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Stanza.ControlPlane.Agents;
+using Stanza.ControlPlane.Configuration;
 using Stanza.ControlPlane.Persistence;
+using Stanza.ControlPlane.Security;
 using Stanza.Core.Contracts;
 
 namespace Stanza.ControlPlane.Transport;
@@ -17,6 +20,11 @@ public static class AgentTransportExtensions
     {
         services.AddSingleton<AgentCommandBroker>();
         services.AddSingleton<IAgentCommandDispatcher>(sp => sp.GetRequiredService<AgentCommandBroker>());
+        services.TryAddScoped<InstanceSettingsService>();
+        services.TryAddScoped<AccessService>();
+        services.TryAddScoped<OperationalPolicyService>();
+        services.TryAddScoped<AgentPolicyService>();
+        services.AddScoped<AgentConfigurationSync>();
         return services;
     }
 
@@ -64,7 +72,25 @@ public static class AgentTransportExtensions
                         await store.Set<AgentEntity>().Where(x => x.Id == agent.Id).ExecuteUpdateAsync(
                             update => update.SetProperty(x => x.LastSeenAt, clock.GetUtcNow().ToUnixTimeSeconds()), token);
                     return valid;
-                }, context.RequestAborted);
+                }, context.RequestAborted, async (send, expecting, ct) =>
+                {
+                    var transfer = new AgentConfigurationTransfer();
+                    var scopes = context.RequestServices.GetRequiredService<IServiceScopeFactory>();
+                    while (!ct.IsCancellationRequested)
+                    {
+                        await using var scope = scopes.CreateAsyncScope();
+                        if (scope.ServiceProvider.GetService<InstanceMaintenance>()?.Paused == true)
+                        { await Task.Delay(TimeSpan.FromSeconds(1), ct); continue; }
+                        var snapshot = await scope.ServiceProvider.GetRequiredService<AgentConfigurationSync>().ReadAsync(agent.Id, ct);
+                        await transfer.SendAsync(snapshot, send, expecting, ct);
+                        using (var acknowledgement = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                        {
+                            acknowledgement.CancelAfter(TimeSpan.FromMinutes(2));
+                            while (session.ConfigurationPending) await Task.Delay(TimeSpan.FromMilliseconds(100), acknowledgement.Token);
+                        }
+                        await Task.Delay(TimeSpan.FromSeconds(snapshot.CheckIntervalSeconds), ct);
+                    }
+                });
             }
             finally { broker.Release(agent.Id, session); }
         }
@@ -84,6 +110,8 @@ public sealed class AgentCommandBroker : IAgentCommandDispatcher, IAgentWorkProg
     public IReadOnlyList<Guid> ConnectedAgentIds => sessions.Where(pair => pair.Value.Connected).Select(pair => pair.Key).ToArray();
     public bool IsConnected(Guid agentId) => sessions.TryGetValue(agentId, out var session) && session.Connected;
     public AgentCapabilities? Capabilities(Guid agentId) => sessions.TryGetValue(agentId, out var session) && session.Connected ? session.Capabilities : null;
+    public DateTimeOffset? ConfigurationSyncedAt(Guid agentId) => sessions.TryGetValue(agentId, out var session) && session.Connected ? session.ConfigurationSyncedAt : null;
+    public bool ConfigurationPending(Guid agentId) => sessions.TryGetValue(agentId, out var session) && session.Connected && session.ConfigurationPending;
     public Task<Stanza.ControlPlane.Terminals.IAgentTerminalSession> OpenTerminalAsync(Guid agentId, Guid deploymentId,
         AgentExecution execution, AgentRuntimePolicy policy, CancellationToken token = default) =>
         sessions.TryGetValue(agentId, out var session) && session.Connected
@@ -118,6 +146,18 @@ public sealed class AgentCommandSession : IDisposable
     private readonly ConcurrentDictionary<Guid, BrokerTerminalSession> terminals = new();
     private readonly SemaphoreSlim terminalCapacity = new(16, 16);
     public AgentCapabilities? Capabilities { get; private set; }
+    private string? expectedConfiguration;
+    private string? appliedConfiguration;
+    private long configurationSyncedAt;
+    public DateTimeOffset? ConfigurationSyncedAt
+    {
+        get
+        {
+            var value = Interlocked.Read(ref configurationSyncedAt);
+            return value > 0 ? DateTimeOffset.FromUnixTimeMilliseconds(value) : null;
+        }
+    }
+    public bool ConfigurationPending => expectedConfiguration != appliedConfiguration;
     private WebSocket? socket;
     private int ready;
     public bool Connected => Volatile.Read(ref ready) == 1 && socket?.State == WebSocketState.Open && !lifetime.IsCancellationRequested;
@@ -171,11 +211,13 @@ public sealed class AgentCommandSession : IDisposable
         finally { pending.TryRemove(request.Id, out _); progressCount.TryRemove(request.Id, out _); execution.Release(); }
     }
 
-    public async Task RunAsync(WebSocket connectedSocket, Func<CancellationToken, Task<bool>> validate, CancellationToken token)
+    public async Task RunAsync(WebSocket connectedSocket, Func<CancellationToken, Task<bool>> validate, CancellationToken token,
+        Func<Func<AgentWireMessage, CancellationToken, Task>, Action<string>, CancellationToken, Task>? synchronize = null)
     {
         socket = connectedSocket;
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
         var monitor = MonitorAsync(validate, linked.Token);
+        Task? synchronization = null;
         try
         {
             await SendAsync(new("hello", Guid.Empty, Data: AgentWireMessage.Version.ToString()), linked.Token);
@@ -184,7 +226,20 @@ public sealed class AgentCommandSession : IDisposable
             {
                 var message = await AgentSocketFrames.ReceiveAsync(socket, linked.Token);
                 if (message is null) break;
-                if (message.Type == "work.response" && message.Response is { } response && response.Id == message.Id)
+                if (message.Type == "configuration.request")
+                {
+                    if (synchronize is null || synchronization is not null || message.Id != Guid.Empty || message.Data is not null)
+                        throw new IOException("Invalid configuration request.");
+                    synchronization = SynchronizeAsync();
+                }
+                else if (message.Type == "configuration.applied")
+                {
+                    if (message.Id != Guid.Empty || expectedConfiguration is null || message.Data != expectedConfiguration)
+                        throw new IOException("Invalid configuration acknowledgement.");
+                    appliedConfiguration = message.Data;
+                    Interlocked.Exchange(ref configurationSyncedAt, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                }
+                else if (message.Type == "work.response" && message.Response is { } response && response.Id == message.Id)
                 {
                     if (response.Output?.Length > 1048576 || response.Code is not { Length: > 0 and <= 100 } ||
                         !response.Code.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-' or '.') ||
@@ -228,6 +283,17 @@ public sealed class AgentCommandSession : IDisposable
             linked.Cancel();
             Dispose();
             try { await monitor; } catch (OperationCanceledException) { }
+            if (synchronization is not null) await synchronization;
+        }
+        async Task SynchronizeAsync()
+        {
+            try { await synchronize!(SendAsync, hash => expectedConfiguration = hash, linked.Token); }
+            catch (OperationCanceledException) when (linked.IsCancellationRequested) { }
+            catch (Exception)
+            {
+                // Close on failed replication. Reconnect retries a full snapshot, never a partial delta.
+                Dispose();
+            }
         }
     }
 

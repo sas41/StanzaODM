@@ -52,6 +52,7 @@ public sealed class ControlPlaneEntryPoint
         builder.Services.AddScoped<IDeploymentWorkspaceReservations>(provider => provider.GetRequiredService<DeploymentEditorAdapters>());
         builder.Services.AddScoped<IDeploymentRevisionStatusProvider>(provider => provider.GetRequiredService<DeploymentEditorAdapters>());
         builder.Services.AddScoped<OperationService>();
+        builder.Services.AddScoped<DeploymentRuntimeStatusService>();
         builder.Services.AddScoped<IOperationService>(provider => provider.GetRequiredService<OperationService>());
         builder.Services.AddStanzaAgentTransport();
         builder.Services.AddHostedService<OperationWorker>();

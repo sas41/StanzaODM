@@ -34,6 +34,21 @@ public sealed partial class DeploymentDraftService(StanzaDbContext db, IDataProt
         var current = await RequiredDraftAsync(id, ct);
         var number = revision ?? current.Revision;
         var payload = await LoadAsync(id, number, ct);
+        return ExecutionSnapshot(id, number, payload);
+    }
+
+    // Only the authenticated Agent synchronization service uses this application-internal decoder.
+    internal static DeploymentExecutionSnapshot DecodeForSynchronization(IDataProtectionProvider protection,
+        Guid id, long number, byte[] content)
+    {
+        var payload = JsonSerializer.Deserialize<DraftPayload>(protection.CreateProtector("Stanza.DeploymentDraft.v1",
+            id.ToString("N"), number.ToString(CultureInfo.InvariantCulture)).Unprotect(content))
+            ?? throw new DeploymentDraftException("Stored deployment configuration could not be read.");
+        return ExecutionSnapshot(id, number, payload);
+    }
+
+    private static DeploymentExecutionSnapshot ExecutionSnapshot(Guid id, long number, DraftPayload payload)
+    {
         var files = new List<AgentFile> { new(ComposePath, Utf8.GetBytes(payload.ComposeText)) };
         files.AddRange(payload.Files.Select(file => new AgentFile(file.Path, file.Content.ToArray(), file.Kind == ManagedEntryKind.Directory)));
         return new(id, payload.Name, payload.TargetAgentId, number, files, payload.EnvironmentText);

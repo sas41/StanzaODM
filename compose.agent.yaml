@@ -2,9 +2,11 @@
 # 1. Set STANZA_CONTROL_PLANE_URL to the HTTPS Control Plane origin.
 # 2. Generate an enrollment token in /agents and set STANZA_ENROLLMENT_TOKEN.
 # 3. Set STANZA_DOCKER_GID to: stat -c %g /var/run/docker.sock
-# 4. Run: docker compose -f compose.agent.yaml up --build -d
+# 4. Set STANZA_VERSION to the SAME published UTC release tag as the Control Plane.
+# 5. Run: docker compose -f compose.agent.yaml up -d
 # The Agent opens only outbound management connections; no host ports are published.
-# Docker socket access is effectively privileged host access. Host actions require the separate opt-in override.
+# Docker socket access is effectively privileged host access. Host actions require the separate opt-in
+# compose.agent.privileged.yaml override; the ordinary Agent remains non-root without host namespaces.
 # Data root must be a dedicated absolute host path. It is mounted at the SAME path inside the
 # Agent so relative Compose bind mounts resolve correctly on the host Docker daemon.
 name: stanza-agent
@@ -28,7 +30,7 @@ services:
         chmod 0700 /agent-data
         if [ -L /agent-data/identity.pk8 ]; then exit 1; fi
         if [ -f /agent-data/identity.pk8 ]; then chown 1654:1654 /agent-data/identity.pk8; fi
-        for store in request-ledger credentials runtime-home; do
+        for store in request-ledger credentials runtime-home configuration-cache; do
           if [ -L "/agent-data/$$store" ]; then exit 1; fi
           mkdir -p "/agent-data/$$store"
           chown -hR 1654:1654 "/agent-data/$$store"
@@ -41,9 +43,8 @@ services:
     restart: "no"
 
   agent:
-    build:
-      context: .
-      dockerfile: src/Stanza.Agent/Dockerfile
+    image: ghcr.io/sas41/stanzaodm-agent:${STANZA_VERSION:?Set STANZA_VERSION to the shared UTC image version (YYYY-MM-DD-HHMMSS)}
+    pull_policy: always
     environment:
       Agent__ControlPlaneUrl: ${STANZA_CONTROL_PLANE_URL:?Set STANZA_CONTROL_PLANE_URL to your HTTPS Control Plane origin}
       Agent__EnrollmentToken: ${STANZA_ENROLLMENT_TOKEN:?Generate an enrollment token in the Control Plane UI}

@@ -6,6 +6,13 @@
 <p>Saved revision: <strong>@Model.Draft.Revision</strong> · Successfully deployed revision: <strong>@(Model.DeployedRevision?.ToString() ?? "None / unknown")</strong>
 @if (Model.DeployedRevision.HasValue && Model.DeployedRevision != Model.Draft.Revision) { <span class="notice warning">Saved changes are not deployed.</span> }</p>
 <p class="field-help">Saving configuration never changes running workloads. Validation uses Docker Compose through the durable operation queue and does not rewrite files.</p>
+@if (Model.Runtime is { } runtime)
+{
+    <section class="panel"><h2>Runtime observation</h2><p>Desired: <strong>@runtime.DesiredState</strong> · Last observed: <strong>@runtime.ObservedState</strong></p>
+    <p>@runtime.Availability · Observed at: @(runtime.ObservedAt?.UtcDateTime.ToString("u") ?? "Never") · Runtime Agent: @runtime.AgentId</p>
+    @if (runtime.DesiredState != runtime.ObservedState) { <p class="notice warning">Last observed state differs from desired state. Inspect current status before acting; containers may have changed outside Stanza.</p> }
+    <p class="field-help">This is the last operation result, not a continuous health guarantee. Queue “Inspect current status” to refresh it. Configuration synchronization alone does not deploy or restart workloads.</p></section>
+}
 <form method="post" action="/operations/queue">@Html.AntiForgeryToken()<input type="hidden" name="deploymentId" value="@Model.Draft.Id" /><input type="hidden" name="kind" value="environment-preview" /><button class="button" type="submit">Preview resolved environment on Agent</button><span class="field-help">Requires separate reveal permission at Global, Agent, and Deployment scopes. Docker Compose resolves quoting, interpolation, multiline values, defaults, and empty values; no approximate parser is used.</span></form>
 @if (isCurrent) {
 <section class="panel"><h2>Runtime operations</h2><form method="post" action="/operations/queue">@Html.AntiForgeryToken()<input name="deploymentId" type="hidden" value="@Model.Draft.Id" /><label for="operation-kind">Action</label><select id="operation-kind" name="kind"><option value="deploy">Deploy / redeploy (build mixed sources and verify health)</option><option value="build">Build images</option><option value="pull">Pull registry images</option><option value="start">Start</option><option value="stop">Stop</option><option value="restart">Restart</option><option value="status">Inspect current status</option><option value="logs">Read recent logs</option><option value="remove">Remove containers (preserve volumes)</option></select><button class="button primary" type="submit">Queue authorized operation</button></form>
@@ -31,7 +38,7 @@ else { <p class="muted">File content requires files.read permission.</p> }
     <pre class="code-editor" data-language="env">@Model.EnvironmentText</pre>
 }
 else { <p class="muted">Environment values require the separate environment.reveal permission. They are not revealed by deployment.read or files.read.</p> }
-<p class="field-help">Raw Compose .env syntax is preserved. No interpolation preview or automatic workload changes are performed.</p>
+<p class="field-help">Raw Compose .env syntax is preserved. Use the resolved-environment operation above for authoritative interpolation preview. Saving never automatically changes workloads.</p>
 </section>
 <section class="panel"><h2>Supporting managed files</h2>
 @if (Model.Permissions.CanReadFiles)

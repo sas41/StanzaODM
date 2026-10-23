@@ -41,8 +41,9 @@ public sealed record AgentWorkResponse(Guid Id, bool Succeeded, string Code, str
     public override string ToString() => $"AgentWorkResponse {{ Id = {Id}, Succeeded = {Succeeded}, Code = {Code}, Output = [REDACTED] }}";
 }
 public sealed record AgentWireMessage(string Type, Guid Id, AgentWorkRequest? Request = null,
-    AgentWorkResponse? Response = null, string? Data = null)
+    AgentWorkResponse? Response = null, string? Data = null,
+    AgentConfiguration? Configuration = null, AgentDeploymentConfiguration? Deployment = null)
 {
-    public const int Version = 1;
+    public const int Version = 2;
     public override string ToString() => $"AgentWireMessage {{ Type = {Type}, Id = {Id}, Contents = [REDACTED] }}";
 }

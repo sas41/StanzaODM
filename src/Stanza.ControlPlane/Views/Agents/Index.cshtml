@@ -11,7 +11,11 @@
 @foreach (var agent in Model.Agents)
 {
     <tr><td><strong>@agent.Hostname</strong><br /><code>@agent.Id</code><details><summary>Identity fingerprint</summary><code>@agent.Identity</code></details>
-    <p>@(Connections.IsConnected(agent.Id) ? "Connected" : "Offline")</p>@if (Connections.Capabilities(agent.Id) is { } capability) { <p class="field-help">@capability.Runtime @capability.DockerVersion · Compose @capability.ComposeVersion · @capability.Architecture · Terminal: @capability.TerminalAvailable · Host actions: @capability.HostExecutionAvailable</p> }
+    <p>@(Connections.IsConnected(agent.Id) ? "Connected" : "Offline")</p>
+    @if (Connections.ConfigurationPending(agent.Id)) { <p>Configuration synchronization pending</p> }
+    else if (Connections.ConfigurationSyncedAt(agent.Id) is { } synced) { <p>Configuration synchronized: @synced.UtcDateTime.ToString("u")</p> }
+    else { <p class="muted">Configuration not yet acknowledged on this connection</p> }
+    @if (Connections.Capabilities(agent.Id) is { } capability) { <p class="field-help">@capability.Runtime @capability.DockerVersion · Compose @capability.ComposeVersion · @capability.Architecture · Terminal: @capability.TerminalAvailable · Host actions: @capability.HostExecutionAvailable</p> }
     </td><td><span class="badge">@agent.Status</span></td><td>@DateTimeOffset.FromUnixTimeSeconds(agent.LastSeenAt).ToString("u")</td><td>
     @if (agent.Status == "pending")
     {
@@ -27,3 +31,4 @@
 @if (Model.Agents.Count == 0) { <tr><td colspan="4" class="muted">No registration requests yet. Start an Agent with an enrollment token to begin.</td></tr> }
 </tbody></table></section>
 <div class="notice warning">Approval enables the authenticated command channel. Last signed contact is not a workload health check. Execution can be disabled in Agent runtime policy; host actions additionally require explicit host namespace configuration.</div>
+<p class="field-help">Every startup/reconnect synchronizes the full assigned configuration. Saved changes synchronize at the operational policy status interval; unchanged contents are not resent. Files are cached privately on the Agent, separate from running workload files. Synchronizing does not restart workloads; explicitly deploy to apply changes. Source credentials are supplied only to authorized operations.</p>

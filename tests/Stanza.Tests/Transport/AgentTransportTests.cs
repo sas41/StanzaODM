@@ -10,6 +10,9 @@ using Stanza.Agent.Enrollment;
 using Stanza.Agent.Runtime;
 using Stanza.Agent.Transport;
 using Stanza.ControlPlane.Agents;
+using Stanza.ControlPlane.Configuration;
+using Stanza.ControlPlane.Deployments;
+using Stanza.ControlPlane.Security;
 using Stanza.ControlPlane.Transport;
 using Stanza.Core.Contracts;
 using Stanza.Tests.Agent;
@@ -19,6 +22,54 @@ namespace Stanza.Tests.Transport;
 
 public sealed class AgentTransportTests
 {
+    [Fact]
+    public async Task Authenticated_channel_syncs_at_boot_on_change_and_in_full_after_reconnect_without_executing_work()
+    {
+        await using var fixture = await ServerFixture.CreateAsync();
+        using var root = new AgentTestDirectory(); using var identity = AgentIdentity.LoadOrCreate(root.Path);
+        var agent = await fixture.RegisterAsync(identity, true);
+        Guid deployment;
+        await using (var db = fixture.Store.CreateContext())
+        {
+            var access = new AccessService(db, fixture.Store.Clock);
+            await new OperationalPolicyService(db, access).SaveAsync(fixture.Store.OwnerId, new(new() { StatusIntervalSeconds = 1 }, 0));
+            var drafts = new DeploymentDraftService(db, fixture.Store.Protection, new AccountService(db, fixture.Store.Clock), access, fixture.Store.Clock);
+            deployment = (await drafts.CreateAsync(fixture.Store.OwnerId, "Synced app", agent, "services: {}\n", "LOCAL=initial\n")).Id;
+        }
+        var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = fixture.Origin,
+            EnrollmentToken = fixture.Credential, AllowLoopbackHttp = true });
+        var executor = new RecordingExecutor(); var state = new AgentState();
+        using var first = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var running = new AgentCommandChannel(options, state, executor, fixture.Store.Clock).RunAsync(identity, first.Token);
+        await AgentTestWait.UntilAsync(() => state.Snapshot.Ready && fixture.Broker.ConfigurationSyncedAt(agent) is not null);
+        var cache = Path.Combine(root.Path, "configuration-cache");
+        var compose = Path.Combine(cache, "deployments", deployment.ToString("N"), "files", "compose.yaml");
+        Assert.Equal("services: {}\n", await File.ReadAllTextAsync(compose));
+        await using (var db = fixture.Store.CreateContext())
+        {
+            await new InstanceSettingsService(db, fixture.Store.Protection).SaveAsync(fixture.Store.OwnerId, new("", "UPDATED=global\n", 0));
+            await fixture.Store.Service(db).SaveEnvironmentAsync(fixture.Store.OwnerId, agent, new("UPDATED=agent\n", 1));
+            var access = new AccessService(db, fixture.Store.Clock);
+            await new AgentPolicyService(db, access, new OperationalPolicyService(db, access)).SaveAsync(fixture.Store.OwnerId, new(agent, new(false, 99), 0));
+            await new DeploymentDraftService(db, fixture.Store.Protection, new AccountService(db, fixture.Store.Clock), access, fixture.Store.Clock)
+                .SaveAsync(fixture.Store.OwnerId, deployment, new("Synced app", agent, 1, "# changed\nservices: {}\n", "LOCAL=changed\n"));
+        }
+        await AgentTestWait.UntilAsync(() => File.Exists(compose) && File.ReadAllText(compose).StartsWith("# changed", StringComparison.Ordinal)
+            && File.ReadAllText(Path.Combine(cache, "agent.env")) == "UPDATED=agent\n");
+        await AgentTestWait.UntilAsync(() => !fixture.Broker.ConfigurationPending(agent));
+        var saved = JsonSerializer.Deserialize<AgentConfiguration>(await File.ReadAllTextAsync(Path.Combine(cache, "agent.json")), JsonSerializerOptions.Web)!;
+        Assert.Equal("UPDATED=global\n", saved.GlobalEnvironment); Assert.False(saved.Policy.ExecutionEnabled); Assert.Equal(99, saved.Policy.TimeoutSeconds);
+        first.Cancel(); await IgnoreConnectionCloseAsync(running);
+        await AgentTestWait.UntilAsync(() => !fixture.Broker.IsConnected(agent));
+        await File.WriteAllTextAsync(compose, "local corruption");
+        var reconnected = new AgentState(); using var second = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        running = new AgentCommandChannel(options, reconnected, executor, fixture.Store.Clock).RunAsync(identity, second.Token);
+        await AgentTestWait.UntilAsync(() => reconnected.Snapshot.Ready && fixture.Broker.ConfigurationSyncedAt(agent) is not null);
+        Assert.Equal("# changed\nservices: {}\n", await File.ReadAllTextAsync(compose));
+        Assert.Empty(executor.Requests);
+        second.Cancel(); await IgnoreConnectionCloseAsync(running);
+    }
+
     [Fact]
     public void BrokerReservesOneSessionPerPersistentIdentityAndReleasesOnlyItsOwner()
     {
@@ -48,7 +99,7 @@ public sealed class AgentTransportTests
             ControlPlaneUrl = fixture.Origin, EnrollmentToken = fixture.Credential, AllowLoopbackHttp = true }), state, executor, fixture.Store.Clock);
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         var running = channel.RunAsync(identity, cancellation.Token);
-        await AgentTestWait.UntilAsync(() => state.Snapshot.CommandChannelAvailable && fixture.Broker.IsConnected(agentId));
+        await AgentTestWait.UntilAsync(() => state.Snapshot.Ready && fixture.Broker.ConfigurationSyncedAt(agentId) is not null);
         Assert.True(state.Snapshot.Ready); Assert.True(state.Snapshot.CanExecuteWork);
         var request = AgentWorkExecutorTests.Request();
         var result = await fixture.Broker.DispatchAsync(agentId, request, cancellation.Token);

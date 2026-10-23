@@ -30,7 +30,7 @@ secrets/
 *.key
 **/keys/key-*.xml
 
-# Per-host Compose overrides; keep compose.yaml and compose.agent.yaml
+# Per-host overrides; keep compose.control.yaml, compose.agent.yaml and compose.agent.privileged.yaml
 compose.override.yml
 compose.override.yaml
 compose.*.override.yml

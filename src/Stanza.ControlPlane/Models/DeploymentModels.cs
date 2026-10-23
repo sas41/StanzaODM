@@ -3,7 +3,10 @@ using Stanza.ControlPlane.Deployments;
 
 namespace Stanza.ControlPlane.Models;
 
-public sealed record DeploymentListModel(IReadOnlyList<DeploymentDraftSummary> Drafts, bool CanCreate);
+public sealed record DeploymentListModel(IReadOnlyList<DeploymentDraftSummary> Drafts, bool CanCreate)
+{
+    public IReadOnlyDictionary<Guid, Operations.DeploymentRuntimeStatus> Runtime { get; init; } = new Dictionary<Guid, Operations.DeploymentRuntimeStatus>();
+}
 
 public sealed class CreateDeploymentModel
 {
