@@ -151,7 +151,7 @@ public sealed class PublicSettingsParticipant(InstanceSettingsService settings, 
     {
         await support.Require(c.ActorId, "settings.write", "instance", null, ct);
         var section = ParticipantSupport.Read<PortablePublicSettings>(content);
-        InstanceSettingsService.Validate(new(section.PublicUrl, "", 0));
+        settings.ValidateConfiguration(new(section.PublicUrl, "", 0));
         return [];
     }
     public async Task ApplyAsync(JsonElement content, PortableParticipantImportContext c, CancellationToken ct)

@@ -12,12 +12,18 @@ namespace Stanza.Tests.Web;
 public sealed class BrowserAuthenticationTests
 {
     [BrowserFact]
-    public async Task ProductionFirstRunLoginAndLiveDashboardWorkOnLoopback()
+    public Task ProductionFirstRunLoginAndLiveDashboardWorkOnLoopback() => FirstRunLoginAsync(false);
+
+    [BrowserFact]
+    public Task ExplicitHttpModeAllowsProductionLoginAndLiveDashboardOnNonLoopbackOrigin() => FirstRunLoginAsync(true);
+
+    private static async Task FirstRunLoginAsync(bool allowInsecureHttp)
     {
-        await using var factory = new StanzaFactory(environment: "Production");
+        await using var factory = new StanzaFactory(environment: "Production", allowInsecureHttp: allowInsecureHttp);
         factory.UseKestrel(0);
         factory.StartServer();
         var address = Assert.Single(factory.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses);
+        if (allowInsecureHttp) address = new UriBuilder(address) { Host = "stanza-http.test" }.Uri.ToString();
         var root = Directory.Exists("/tmp/opencode") ? "/tmp/opencode" : Path.GetTempPath();
         var directory = Path.Combine(root, $"stanza-browser-auth-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
@@ -30,6 +36,11 @@ public sealed class BrowserAuthenticationTests
             {
                 UseShellExecute = false, RedirectStandardError = true, RedirectStandardOutput = true
             };
+            if (allowInsecureHttp)
+            {
+                start.ArgumentList.Add("--host-resolver-rules=MAP stanza-http.test 127.0.0.1");
+                start.ArgumentList.Add("--no-proxy-server");
+            }
             foreach (var argument in new[]
             {
                 "--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--disable-background-networking",
@@ -64,6 +75,10 @@ public sealed class BrowserAuthenticationTests
             await chrome.WaitForAsync("location.pathname === '/account/login' && !!document.querySelector('#Password')");
             await chrome.EvaluateAsync("document.querySelector('#Username').value='owner'; document.querySelector('#Password').value='a-secure-password-123'; setTimeout(() => document.querySelector('form').requestSubmit(), 0); true");
             await chrome.WaitForAsync("location.pathname === '/' && document.querySelector('[data-database-status]')?.textContent === 'Connected' && document.querySelector('[data-agent-count]')?.textContent === '0'");
+            if (allowInsecureHttp)
+            {
+                Assert.Equal(JsonValueKind.True, (await chrome.EvaluateAsync("location.hostname === 'stanza-http.test' && !window.isSecureContext && !!document.querySelector('[data-insecure-http-warning]')")).ValueKind);
+            }
             var live = await chrome.EvaluateAsync("new Promise(resolve => { const socket = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/live/status'); const timer = setTimeout(() => { socket.close(); resolve(false); }, 5000); socket.onmessage = event => { clearTimeout(timer); const value = JSON.parse(event.data); socket.close(); resolve(value.databaseReady === true && value.agentCount === 0); }; socket.onerror = () => { clearTimeout(timer); socket.close(); resolve(false); }; })");
             Assert.Equal(JsonValueKind.True, live.ValueKind);
             var screenshot = await chrome.CommandAsync("Page.captureScreenshot", new { format = "png" });

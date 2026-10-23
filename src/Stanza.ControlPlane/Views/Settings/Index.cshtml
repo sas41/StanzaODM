@@ -5,7 +5,7 @@
     <div asp-validation-summary="All" class="validation" role="alert"></div>
     <input asp-for="Version" type="hidden" />
     <label asp-for="PublicUrl">Public Control Plane URL</label><input asp-for="PublicUrl" type="url" maxlength="2048" placeholder="https://stanza.example.com" readonly="@(!Model.CanWriteSettings)" />
-    <p class="field-help">The externally reachable origin for Agent enrollment and the trusted browser WebSocket origin behind TLS termination. This does not configure your reverse proxy or TLS certificate. Once set, access the dashboard through this origin.</p>
+    <p class="field-help">The externally reachable browser origin and trusted WebSocket origin. HTTP origins require the explicit deployment opt-in. Agent transport remains HTTPS-only. This does not configure your reverse proxy or TLS certificate. Once set, access the dashboard through this origin.</p>
     @if (Model.CanRevealEnvironment || Model.CanWriteEnvironment) {
     <label asp-for="GlobalEnvironment">Global environment defaults (.env)</label><textarea asp-for="GlobalEnvironment" rows="16" spellcheck="false" autocomplete="off" class="code-editor" readonly="@(!Model.CanWriteEnvironment)"></textarea>
     @if (!Model.CanRevealEnvironment) { <label><input asp-for="ReplaceEnvironment" /> Replace the hidden environment with the text above (existing secret values are not revealed).</label> }
@@ -17,3 +17,6 @@
 <section class="panel"><h2>Operational policy</h2><p>Manage session, execution, upload, retention, and live-connection limits.</p><a href="/policy">Open operational policy →</a></section>
 @if (User.IsInRole("SystemAdmin")) { <section class="panel"><h2>Instance recovery</h2><p>Encrypted database and encryption-key backup. Workload volumes are not included.</p><a href="/recovery">Backup and recovery →</a></section> }
 <section class="panel"><h2>Pre-launch and host prerequisites</h2><p class="muted">Database connectivity is configured before launch. Container mounts, host Docker permissions, listening ports, and reverse-proxy TLS are deployment prerequisites, not settings this process can safely modify.</p></section>
+<section class="panel"><h2>Browser HTTP mode</h2>
+<p>Allow insecure HTTP: <strong>@(((Context.RequestServices.GetService(typeof(Stanza.ControlPlane.Configuration.BrowserHttpPolicy)) as Stanza.ControlPlane.Configuration.BrowserHttpPolicy)?.AllowInsecureHttp == true) ? "Enabled" : "Disabled (secure default)")</strong></p>
+<p class="field-help">Controlled before launch by STANZA_ALLOW_INSECURE_HTTP in compose.control.yaml; defaults to false. Set it to true only for a trusted LAN and recreate the Control Plane container to apply. This is read-only here so a browser request or imported configuration cannot downgrade transport security. It does not enable HTTP Agent enrollment or disable TLS checks.</p></section>

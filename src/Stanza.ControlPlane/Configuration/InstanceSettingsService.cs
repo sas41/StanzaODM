@@ -14,7 +14,7 @@ public sealed record InstanceSettings(string PublicUrl, string GlobalEnvironment
 
 public sealed class SettingsOperationException(string message) : Exception(message);
 
-public sealed class InstanceSettingsService(StanzaDbContext store, IDataProtectionProvider protection)
+public sealed class InstanceSettingsService(StanzaDbContext store, IDataProtectionProvider protection, BrowserHttpPolicy? browserHttp = null)
 {
     private const string Key = "instance-settings-v1";
     private readonly IDataProtector protector = protection.CreateProtector("Stanza.InstanceSettings.v1");
@@ -57,7 +57,7 @@ public sealed class InstanceSettingsService(StanzaDbContext store, IDataProtecti
         if (publicUrl is null && environment is null) throw new SettingsOperationException("No editable settings were submitted.");
         var original = await ReadInternalAsync(token);
         var settings = new InstanceSettings(publicUrl ?? original.PublicUrl, environment ?? original.GlobalEnvironment, version);
-        Validate(settings);
+        ValidateConfiguration(settings);
         var row = await store.Settings.SingleOrDefaultAsync(x => x.Key == Key, token);
         var currentVersion = original.Version;
         if (settings.Version != currentVersion)
@@ -69,14 +69,16 @@ public sealed class InstanceSettingsService(StanzaDbContext store, IDataProtecti
         await transaction.CommitAsync(token);
     }
 
-    public static void Validate(InstanceSettings settings)
+    public void ValidateConfiguration(InstanceSettings settings) => Validate(settings, browserHttp?.AllowInsecureHttp == true);
+
+    public static void Validate(InstanceSettings settings, bool allowInsecureHttp = false)
     {
         if (settings.PublicUrl.Length > 2048 || (!string.IsNullOrWhiteSpace(settings.PublicUrl)
             && (!Uri.TryCreate(settings.PublicUrl, UriKind.Absolute, out var uri)
-                || (uri.Scheme != Uri.UriSchemeHttps && !(uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback))
+                || (uri.Scheme != Uri.UriSchemeHttps && !(uri.Scheme == Uri.UriSchemeHttp && (uri.IsLoopback || allowInsecureHttp)))
                 || !string.IsNullOrEmpty(uri.UserInfo) || !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment)
                 || uri.AbsolutePath != "/")))
-            throw new SettingsOperationException("Use an HTTPS origin without a path, credentials, query, or fragment; HTTP is allowed only for loopback development.");
+            throw new SettingsOperationException("Use an HTTPS origin without a path, credentials, query, or fragment. Non-loopback HTTP requires the pre-launch STANZA_ALLOW_INSECURE_HTTP opt-in.");
         if (settings.Version < 0 || Encoding.UTF8.GetByteCount(settings.GlobalEnvironment) > 1024 * 1024 || settings.GlobalEnvironment.Contains('\0'))
             throw new SettingsOperationException("Environment text must be valid text no larger than 1 MiB.");
     }

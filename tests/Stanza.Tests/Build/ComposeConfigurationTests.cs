@@ -26,6 +26,17 @@ public sealed class DockerComposeFactAttribute : FactAttribute
 public sealed class ComposeConfigurationTests
 {
     [DockerComposeFact]
+    public async Task Insecure_browser_HTTP_is_default_off_and_requires_explicit_opt_in()
+    {
+        foreach (var value in new string?[] { null, "", "false", "true" })
+        {
+            using var rendered = await RenderSettingsAsync(null, value, "compose.control.yaml");
+            var policy = rendered.RootElement.GetProperty("services").GetProperty("control-plane").GetProperty("environment").GetProperty("Stanza__AllowInsecureHttp").GetString();
+            Assert.Equal(value == "true", bool.Parse(policy!));
+        }
+    }
+
+    [DockerComposeFact]
     public async Task Unset_and_blank_versions_default_both_applications_to_latest()
     {
         foreach (var version in new string?[] { null, "" })
@@ -95,7 +106,9 @@ public sealed class ComposeConfigurationTests
 
     private static Task<JsonDocument> RenderAsync(params string[] manifests) => RenderVersionAsync("2026-10-23-115011", manifests);
 
-    private static async Task<JsonDocument> RenderVersionAsync(string? version, params string[] manifests)
+    private static Task<JsonDocument> RenderVersionAsync(string? version, params string[] manifests) => RenderSettingsAsync(version, null, manifests);
+
+    private static async Task<JsonDocument> RenderSettingsAsync(string? version, string? allowHttp, params string[] manifests)
     {
         var start = new ProcessStartInfo("docker") { WorkingDirectory = ArchitectureTests.RepositoryRoot(),
             UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
@@ -110,6 +123,8 @@ public sealed class ComposeConfigurationTests
         start.Environment["STANZA_HTTP_PORT"] = "8080";
         if (version is null) start.Environment.Remove("STANZA_VERSION");
         else start.Environment["STANZA_VERSION"] = version;
+        if (allowHttp is null) start.Environment.Remove("STANZA_ALLOW_INSECURE_HTTP");
+        else start.Environment["STANZA_ALLOW_INSECURE_HTTP"] = allowHttp;
         using var process = Process.Start(start)!;
         var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));

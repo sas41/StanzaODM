@@ -5,6 +5,8 @@
 # Open http://localhost:8080/setup and create the first System Admin.
 # Database credentials are generated once; no default application credentials exist.
 # Use HTTPS at a trusted reverse proxy before exposing this application to a network.
+# Trusted-LAN browser HTTP only: explicitly set STANZA_ALLOW_INSECURE_HTTP=true.
+# WARNING: HTTP exposes passwords and sessions to network interception. Default false.
 # Retain ALL named volumes, including database-secrets and control-plane-data, for recovery.
 name: stanza
 services:
@@ -57,6 +59,7 @@ services:
       Database__Username: stanza
       Database__PasswordFile: /run/stanza-secrets/database-password
       Stanza__DataRoot: /var/lib/stanza
+      Stanza__AllowInsecureHttp: ${STANZA_ALLOW_INSECURE_HTTP:-false}
     volumes:
       - control-plane-data:/var/lib/stanza
       - database-secrets:/run/stanza-secrets:ro

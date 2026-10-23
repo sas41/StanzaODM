@@ -150,11 +150,13 @@ public sealed class StanzaFactory : WebApplicationFactory<ControlPlaneEntryPoint
     private readonly string dataRoot = Path.Combine(Path.GetTempPath(), $"stanza-web-test-{Guid.NewGuid():N}");
     private readonly TimeProvider? clock;
     private readonly string environment;
+    private readonly bool allowInsecureHttp;
 
-    public StanzaFactory(TimeProvider? clock = null, string environment = "Testing")
+    public StanzaFactory(TimeProvider? clock = null, string environment = "Testing", bool allowInsecureHttp = false)
     {
         this.clock = clock;
         this.environment = environment;
+        this.allowInsecureHttp = allowInsecureHttp;
         connection.Open();
     }
 
@@ -163,7 +165,8 @@ public sealed class StanzaFactory : WebApplicationFactory<ControlPlaneEntryPoint
         builder.ConfigureHostConfiguration(configuration => configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["ConnectionStrings:Stanza"] = "Host=unused;Database=stanza;Username=test;Password=unused",
-            ["Stanza:DataRoot"] = dataRoot
+            ["Stanza:DataRoot"] = dataRoot,
+            ["Stanza:AllowInsecureHttp"] = allowInsecureHttp.ToString()
         }));
         return base.CreateHost(builder);
     }
@@ -174,7 +177,8 @@ public sealed class StanzaFactory : WebApplicationFactory<ControlPlaneEntryPoint
         builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["ConnectionStrings:Stanza"] = "Host=unused;Database=stanza;Username=test;Password=unused",
-            ["Stanza:DataRoot"] = dataRoot
+            ["Stanza:DataRoot"] = dataRoot,
+            ["Stanza:AllowInsecureHttp"] = allowInsecureHttp.ToString()
         }));
         builder.ConfigureServices(services =>
         {
