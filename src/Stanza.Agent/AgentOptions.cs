@@ -9,6 +9,12 @@ public sealed class AgentOptions
     public string ControlPlaneUrl { get; set; } = "";
     public string EnrollmentToken { get; set; } = "";
     public bool AllowLoopbackHttp { get; set; }
+    public bool AllowInsecureHttp { get; set; }
+
+    public bool AllowsControlPlaneOrigin(Uri origin, bool development = false) =>
+        origin.IsAbsoluteUri && origin.UserInfo.Length == 0 && origin.Query.Length == 0 && origin.Fragment.Length == 0 && origin.AbsolutePath == "/" &&
+        (origin.Scheme == Uri.UriSchemeHttps || origin.Scheme == Uri.UriSchemeHttp &&
+            (AllowInsecureHttp || development && AllowLoopbackHttp && origin.IsLoopback));
 }
 
 public sealed class AgentOptionsValidator(IHostEnvironment environment) : IValidateOptions<AgentOptions>
@@ -21,13 +27,9 @@ public sealed class AgentOptionsValidator(IHostEnvironment environment) : IValid
             failures.Add("Agent:PersistentDataRoot must be an absolute, dedicated persistent directory, not a filesystem root.");
         }
 
-        if (!Uri.TryCreate(options.ControlPlaneUrl, UriKind.Absolute, out var uri) ||
-            !string.IsNullOrEmpty(uri.UserInfo) || !string.IsNullOrEmpty(uri.Query) ||
-            !string.IsNullOrEmpty(uri.Fragment) || uri.AbsolutePath != "/" ||
-            (uri.Scheme != Uri.UriSchemeHttps && !(uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback &&
-                options.AllowLoopbackHttp && environment.IsDevelopment())))
+        if (!Uri.TryCreate(options.ControlPlaneUrl, UriKind.Absolute, out var uri) || !options.AllowsControlPlaneOrigin(uri, environment.IsDevelopment()))
         {
-            failures.Add("Agent:ControlPlaneUrl must be an HTTPS origin; explicit loopback HTTP is permitted only in Development.");
+            failures.Add("Agent:ControlPlaneUrl must be an HTTPS origin without credentials, path, query or fragment. HTTP requires Agent:AllowInsecureHttp (STANZA_ALLOW_INSECURE_HTTP in Compose); a Development-only loopback exception remains available.");
         }
 
         if (string.IsNullOrWhiteSpace(options.EnrollmentToken) || options.EnrollmentToken.Length is < 32 or > 4096 ||

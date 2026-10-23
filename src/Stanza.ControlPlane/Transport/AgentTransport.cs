@@ -24,6 +24,7 @@ public static class AgentTransportExtensions
         services.TryAddScoped<AccessService>();
         services.TryAddScoped<OperationalPolicyService>();
         services.TryAddScoped<AgentPolicyService>();
+        services.TryAddSingleton(new HttpTransportPolicy());
         services.AddScoped<AgentConfigurationSync>();
         return services;
     }
@@ -32,9 +33,9 @@ public static class AgentTransportExtensions
         endpoints.MapGet("/api/agent-channel", HandleAsync);
 
     private static async Task HandleAsync(HttpContext context, AgentCommandBroker broker,
-        AgentAdministrationService administration, StanzaDbContext store, IHostEnvironment environment, TimeProvider clock)
+        AgentAdministrationService administration, StanzaDbContext store, IHostEnvironment environment, TimeProvider clock, HttpTransportPolicy httpTransport)
     {
-        if (!context.Request.IsHttps && !(environment.IsDevelopment() && context.Connection.RemoteIpAddress is { } address && IPAddress.IsLoopback(address)))
+        if (!httpTransport.AllowsAgentRequest(context, environment))
         { context.Response.StatusCode = 400; return; }
         if (!context.WebSockets.IsWebSocketRequest) { context.Response.StatusCode = 400; return; }
         var header = context.Request.Headers["X-Stanza-Proof"];

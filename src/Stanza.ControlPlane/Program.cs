@@ -29,8 +29,8 @@ public sealed class ControlPlaneEntryPoint
     public static async Task Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
-        var browserHttp = new BrowserHttpPolicy(builder.Configuration.GetValue<bool>("Stanza:AllowInsecureHttp"));
-        builder.Services.AddSingleton(browserHttp);
+        var httpTransport = new HttpTransportPolicy(builder.Configuration.GetValue<bool>("Stanza:AllowInsecureHttp"));
+        builder.Services.AddSingleton(httpTransport);
         builder.Services.AddStanzaSecurity(provider => DatabaseConfiguration.GetConnectionString(provider.GetRequiredService<IConfiguration>()));
         builder.Services.AddScoped<InstanceSettingsService>();
         builder.Services.AddScoped<AgentAdministrationService>();
@@ -81,7 +81,7 @@ public sealed class ControlPlaneEntryPoint
                 // Secure by default even behind HTTP proxy backends. An explicit bootstrap opt-in
                 // allows LAN HTTP; SameAsRequest still protects cookies on recognized HTTPS requests.
                 // TestServer's existing logical-HTTP exception is isolated to the Testing environment.
-                options.Cookie.SecurePolicy = browserHttp.AllowInsecureHttp || builder.Environment.IsEnvironment("Testing")
+                options.Cookie.SecurePolicy = httpTransport.AllowInsecureHttp || builder.Environment.IsEnvironment("Testing")
                     ? CookieSecurePolicy.SameAsRequest : CookieSecurePolicy.Always;
                 options.LoginPath = "/account/login";
                 options.AccessDeniedPath = "/account/denied";

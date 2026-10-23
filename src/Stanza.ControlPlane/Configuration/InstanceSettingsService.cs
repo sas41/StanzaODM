@@ -14,7 +14,7 @@ public sealed record InstanceSettings(string PublicUrl, string GlobalEnvironment
 
 public sealed class SettingsOperationException(string message) : Exception(message);
 
-public sealed class InstanceSettingsService(StanzaDbContext store, IDataProtectionProvider protection, BrowserHttpPolicy? browserHttp = null)
+public sealed class InstanceSettingsService(StanzaDbContext store, IDataProtectionProvider protection, HttpTransportPolicy? httpTransport = null)
 {
     private const string Key = "instance-settings-v1";
     private readonly IDataProtector protector = protection.CreateProtector("Stanza.InstanceSettings.v1");
@@ -69,7 +69,7 @@ public sealed class InstanceSettingsService(StanzaDbContext store, IDataProtecti
         await transaction.CommitAsync(token);
     }
 
-    public void ValidateConfiguration(InstanceSettings settings) => Validate(settings, browserHttp?.AllowInsecureHttp == true);
+    public void ValidateConfiguration(InstanceSettings settings) => Validate(settings, httpTransport?.AllowInsecureHttp == true);
 
     public static void Validate(InstanceSettings settings, bool allowInsecureHttp = false)
     {

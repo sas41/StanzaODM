@@ -77,7 +77,7 @@ public sealed class HttpModeTests
         }
         var downgrade = JsonSerializer.SerializeToElement(new { publicUrl = "http://192.0.2.10:8888", allowInsecureHttp = true });
         await Assert.ThrowsAsync<PortabilityException>(() => participant.ValidateAsync(downgrade, context, default));
-        Assert.Equal(enabled, scope.ServiceProvider.GetRequiredService<BrowserHttpPolicy>().AllowInsecureHttp);
+        Assert.Equal(enabled, scope.ServiceProvider.GetRequiredService<HttpTransportPolicy>().AllowInsecureHttp);
     }
 
     [Theory]

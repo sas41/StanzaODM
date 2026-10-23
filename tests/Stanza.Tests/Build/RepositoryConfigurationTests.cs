@@ -173,6 +173,10 @@ public sealed class RepositoryConfigurationTests
         Assert.Contains("image: ghcr.io/sas41/stanzaodm-agent:${STANZA_VERSION:-latest}", ordinary);
         Assert.DoesNotContain("build:", control); Assert.DoesNotContain("build:", ordinary);
         Assert.Contains("pull_policy: always", control); Assert.Contains("pull_policy: always", ordinary);
+        Assert.DoesNotContain("${STANZA_AGENT_DATA_ROOT", ordinary);
+        Assert.Contains("- /var/lib/stanza-agent:/agent-data", ordinary);
+        Assert.Contains("- /var/lib/stanza-agent:/var/lib/stanza-agent", ordinary);
+        Assert.Contains("Agent__PersistentDataRoot: /var/lib/stanza-agent", ordinary);
         Assert.DoesNotContain("pid: host", ordinary); Assert.DoesNotContain("SYS_ADMIN", ordinary);
         Assert.DoesNotContain("Agent__HostExecution__Enabled", ordinary);
         Assert.Contains("pid: host", privileged); Assert.Contains("SYS_ADMIN", privileged);

@@ -37,7 +37,7 @@ public sealed class AgentLogChannelIntegrationTests
         builder.Services.AddStanzaAgentTransport();
         await using var app = builder.Build(); app.UseWebSockets(); app.MapStanzaAgentTransport(); await app.StartAsync();
         var broker = app.Services.GetRequiredService<AgentCommandBroker>();
-        var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = app.Urls.Single(), EnrollmentToken = credential, AllowLoopbackHttp = true });
+        var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = app.Urls.Single(), EnrollmentToken = credential, AllowInsecureHttp = true });
         var dockerOptions = Options.Create(new DockerRuntimeOptions());
         var runner = new ProcessRunner(TimeProvider.System);
         var runtime = new DockerCliRuntime(runner, options, dockerOptions);

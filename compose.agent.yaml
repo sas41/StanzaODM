@@ -1,5 +1,5 @@
 # On each target host:
-# 1. Set STANZA_CONTROL_PLANE_URL to the HTTPS Control Plane origin.
+# 1. Set STANZA_CONTROL_PLANE_URL to the Control Plane origin (HTTPS by default).
 # 2. Generate an enrollment token in /agents and set STANZA_ENROLLMENT_TOKEN.
 # 3. Set STANZA_DOCKER_GID to: stat -c %g /var/run/docker.sock
 # 4. Images default to latest. Optionally pin STANZA_VERSION to the SAME UTC release tag as the Control Plane.
@@ -7,8 +7,11 @@
 # The Agent opens only outbound management connections; no host ports are published.
 # Docker socket access is effectively privileged host access. Host actions require the separate opt-in
 # compose.agent.privileged.yaml override; the ordinary Agent remains non-root without host namespaces.
-# Data root must be a dedicated absolute host path. It is mounted at the SAME path inside the
-# Agent so relative Compose bind mounts resolve correctly on the host Docker daemon.
+# All Agent state uses the fixed dedicated host directory /var/lib/stanza-agent, mounted at
+# the SAME path inside the Agent so workload bind mounts resolve on the host Docker daemon.
+# Do not run multiple Agents against this directory, or delete/move an existing identity.
+# Trusted-LAN HTTP requires STANZA_ALLOW_INSECURE_HTTP=true on BOTH CP and Agent deployments.
+# WARNING: HTTP exposes enrollment credentials, deployment secrets and Docker commands to interception.
 name: stanza-agent
 services:
   initialize-agent:
@@ -58,21 +61,22 @@ services:
         mkdir -p /agent-data/operation-workspaces
         chown 1654:1654 /agent-data/operation-workspaces
     volumes:
-      - ${STANZA_AGENT_DATA_ROOT:-/var/lib/stanza-agent}:/agent-data
+      - /var/lib/stanza-agent:/agent-data
     restart: "no"
 
   agent:
     image: ghcr.io/sas41/stanzaodm-agent:${STANZA_VERSION:-latest}
     pull_policy: always
     environment:
-      Agent__ControlPlaneUrl: ${STANZA_CONTROL_PLANE_URL:?Set STANZA_CONTROL_PLANE_URL to your HTTPS Control Plane origin}
+      Agent__ControlPlaneUrl: ${STANZA_CONTROL_PLANE_URL:?Set STANZA_CONTROL_PLANE_URL to your Control Plane origin}
       Agent__EnrollmentToken: ${STANZA_ENROLLMENT_TOKEN:?Generate an enrollment token in the Control Plane UI}
-      Agent__PersistentDataRoot: ${STANZA_AGENT_DATA_ROOT:-/var/lib/stanza-agent}
+      Agent__PersistentDataRoot: /var/lib/stanza-agent
+      Agent__AllowInsecureHttp: ${STANZA_ALLOW_INSECURE_HTTP:-false}
       Agent__Docker__EnableExecution: "true"
     group_add:
       - "${STANZA_DOCKER_GID:?Set STANZA_DOCKER_GID to the host Docker socket group ID}"
     volumes:
-      - ${STANZA_AGENT_DATA_ROOT:-/var/lib/stanza-agent}:${STANZA_AGENT_DATA_ROOT:-/var/lib/stanza-agent}
+      - /var/lib/stanza-agent:/var/lib/stanza-agent
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       initialize-agent:

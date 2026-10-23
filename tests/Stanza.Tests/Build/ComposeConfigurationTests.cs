@@ -26,13 +26,16 @@ public sealed class DockerComposeFactAttribute : FactAttribute
 public sealed class ComposeConfigurationTests
 {
     [DockerComposeFact]
-    public async Task Insecure_browser_HTTP_is_default_off_and_requires_explicit_opt_in()
+    public async Task Insecure_HTTP_is_default_off_and_requires_explicit_opt_in_on_each_application()
     {
         foreach (var value in new string?[] { null, "", "false", "true" })
         {
             using var rendered = await RenderSettingsAsync(null, value, "compose.control.yaml");
             var policy = rendered.RootElement.GetProperty("services").GetProperty("control-plane").GetProperty("environment").GetProperty("Stanza__AllowInsecureHttp").GetString();
             Assert.Equal(value == "true", bool.Parse(policy!));
+            using var agent = await RenderSettingsAsync(null, value, "compose.agent.yaml");
+            var agentPolicy = agent.RootElement.GetProperty("services").GetProperty("agent").GetProperty("environment").GetProperty("Agent__AllowInsecureHttp").GetString();
+            Assert.Equal(value == "true", bool.Parse(agentPolicy!));
         }
     }
 
@@ -78,6 +81,7 @@ public sealed class ComposeConfigurationTests
         Assert.False(agent.GetProperty("environment").TryGetProperty("Agent__HostExecution__Enabled", out _));
         Assert.Equal("https://stanza.example.invalid", agent.GetProperty("environment").GetProperty("Agent__ControlPlaneUrl").GetString());
         AssertAgentMounts(agent);
+        AssertFixedInitialization(services);
     }
 
     [DockerComposeFact]
@@ -95,6 +99,7 @@ public sealed class ComposeConfigurationTests
         Assert.Contains(agent.GetProperty("cap_add").EnumerateArray(), x => x.GetString() == "SYS_CHROOT");
         Assert.False(agent.TryGetProperty("ports", out _));
         AssertAgentMounts(agent);
+        AssertFixedInitialization(services);
     }
 
     private static void AssertAgentMounts(JsonElement agent)
@@ -102,7 +107,12 @@ public sealed class ComposeConfigurationTests
         var mounts = agent.GetProperty("volumes").EnumerateArray().ToArray();
         Assert.Contains(mounts, x => x.GetProperty("source").GetString() == "/var/run/docker.sock" && x.GetProperty("target").GetString() == "/var/run/docker.sock");
         Assert.Contains(mounts, x => x.GetProperty("source").GetString() == "/var/lib/stanza-agent" && x.GetProperty("target").GetString() == "/var/lib/stanza-agent");
+        Assert.Equal("/var/lib/stanza-agent", agent.GetProperty("environment").GetProperty("Agent__PersistentDataRoot").GetString());
     }
+
+    private static void AssertFixedInitialization(JsonElement services) =>
+        Assert.Contains(services.GetProperty("initialize-agent").GetProperty("volumes").EnumerateArray(),
+            x => x.GetProperty("source").GetString() == "/var/lib/stanza-agent" && x.GetProperty("target").GetString() == "/agent-data");
 
     private static Task<JsonDocument> RenderAsync(params string[] manifests) => RenderVersionAsync("2026-10-23-115011", manifests);
 
@@ -118,7 +128,8 @@ public sealed class ComposeConfigurationTests
         start.Environment["STANZA_CONTROL_PLANE_URL"] = "https://stanza.example.invalid";
         start.Environment["STANZA_ENROLLMENT_TOKEN"] = "validation-only-token-not-an-enrollment-credential";
         start.Environment["STANZA_DOCKER_GID"] = "999";
-        start.Environment["STANZA_AGENT_DATA_ROOT"] = "/var/lib/stanza-agent";
+        // Storage is deliberately fixed; a stale caller variable must not split initializer/runtime mounts.
+        start.Environment["STANZA_AGENT_DATA_ROOT"] = "/tmp/opencode/must-not-be-used";
         start.Environment["STANZA_BIND_ADDRESS"] = "127.0.0.1";
         start.Environment["STANZA_HTTP_PORT"] = "8080";
         if (version is null) start.Environment.Remove("STANZA_VERSION");

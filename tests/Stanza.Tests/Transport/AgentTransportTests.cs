@@ -37,7 +37,7 @@ public sealed class AgentTransportTests
             deployment = (await drafts.CreateAsync(fixture.Store.OwnerId, "Synced app", agent, "services: {}\n", "LOCAL=initial\n")).Id;
         }
         var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = fixture.Origin,
-            EnrollmentToken = fixture.Credential, AllowLoopbackHttp = true });
+            EnrollmentToken = fixture.Credential, AllowInsecureHttp = true });
         var executor = new RecordingExecutor(); var state = new AgentState();
         using var first = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         var running = new AgentCommandChannel(options, state, executor, fixture.Store.Clock).RunAsync(identity, first.Token);
@@ -96,7 +96,7 @@ public sealed class AgentTransportTests
         var state = new AgentState(); state.Set(new(false, EnrollmentStatus.Approved, identity.AgentId));
         var executor = new RecordingExecutor();
         var channel = new AgentCommandChannel(Options.Create(new AgentOptions { PersistentDataRoot = root.Path,
-            ControlPlaneUrl = fixture.Origin, EnrollmentToken = fixture.Credential, AllowLoopbackHttp = true }), state, executor, fixture.Store.Clock);
+            ControlPlaneUrl = fixture.Origin, EnrollmentToken = fixture.Credential, AllowInsecureHttp = true }), state, executor, fixture.Store.Clock);
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         var running = channel.RunAsync(identity, cancellation.Token);
         await AgentTestWait.UntilAsync(() => state.Snapshot.Ready && fixture.Broker.ConfigurationSyncedAt(agentId) is not null);

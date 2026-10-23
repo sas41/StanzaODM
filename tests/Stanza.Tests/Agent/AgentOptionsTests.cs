@@ -32,6 +32,25 @@ public sealed class AgentOptionsTests
     }
 
     [Theory]
+    [InlineData("http://192.0.2.10:8888", false, false)]
+    [InlineData("http://192.0.2.10:8888", true, true)]
+    [InlineData("http://control.example.test", true, true)]
+    [InlineData("https://control.example.test", false, true)]
+    [InlineData("https://control.example.test", true, true)]
+    [InlineData("http://secret@control.example.test", true, false)]
+    [InlineData("http://control.example.test/path", true, false)]
+    [InlineData("http://control.example.test?token=secret", true, false)]
+    [InlineData("http://control.example.test/#secret", true, false)]
+    [InlineData("file:///secret", true, false)]
+    public void Production_cleartext_transport_requires_explicit_opt_in_and_still_validates_origins(string url, bool enabled, bool succeeds)
+    {
+        var options = ValidOptions(); options.ControlPlaneUrl = url; options.AllowInsecureHttp = enabled;
+        var result = new AgentOptionsValidator(new TestEnvironment("Production")).Validate(null, options);
+        Assert.Equal(succeeds, result.Succeeded);
+        Assert.DoesNotContain("secret", string.Join(";", result.Failures ?? []));
+    }
+
+    [Theory]
     [InlineData("")]
     [InlineData("relative/data")]
     [InlineData("/")]

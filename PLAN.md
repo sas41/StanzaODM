@@ -8,6 +8,14 @@ All remaining original feature areas have implementation work recorded under IN-
 
 ## IN-PROGRESS
 
+### P25 — Opt-in HTTP Agent transport and fixed Agent storage
+
+- Extend STANZA_ALLOW_INSECURE_HTTP (default false) to Agent enrollment and the authenticated outbound WebSocket command channel. The Control Plane and Agent must each explicitly opt in; HTTPS certificate validation remains mandatory when HTTPS is selected.
+- Keep identity proofs, token expiry/binding, replay protection, administrative approval, revocation and execution authorization unchanged. Reject cleartext enrollment on the Control Plane before registering anything when the transport policy disallows it.
+- Fix the ordinary and privileged Agent deployment storage to host /var/lib/stanza-agent, mounted at the same location inside the Agent. The initializer must prepare that exact host directory. Remove the data-root Compose variable, keep workload bind paths correct, and do not move/delete existing data or reuse identities from a different mount silently.
+- Explain the unencrypted credential/command risk in Compose and UI guidance; use a single transport policy for browser and Agent traffic without weakening Git/registry TLS or proxy trust.
+- Tests: HTTP default rejection, opt-in on each side, HTTPS acceptance, unsafe URL refusal, actual production-mode HTTP enrollment/pending approval/config sync/command/revocation flow, fixed initializer/runtime mount equality, ignored obsolete mount-variable inputs, and full integrated checks. Record any unavailable image/deployment verification.
+
 ### P24 — Explicit opt-in HTTP browser sessions
 
 - Add STANZA_ALLOW_INSECURE_HTTP to compose.control.yaml, default false, mapped to Stanza:AllowInsecureHttp. Read this pre-launch security prerequisite at startup; changing it requires recreating/restarting the Control Plane.

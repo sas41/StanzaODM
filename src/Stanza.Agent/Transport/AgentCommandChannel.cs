@@ -18,19 +18,21 @@ public sealed class AgentChannelProtocolException() : IOException("Incompatible 
 public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentState state,
     IAgentWorkExecutor executor, TimeProvider clock, AgentTerminalManager? terminals = null,
     IContainerRuntime? runtime = null, IOptions<DockerRuntimeOptions>? dockerOptions = null,
-    IOptions<HostExecutionOptions>? hostOptions = null) : IAgentCommandChannel
+    IOptions<HostExecutionOptions>? hostOptions = null, IHostEnvironment? environment = null) : IAgentCommandChannel
 {
     // Wire JSON is never embedded in HTML. Avoid expanding '+' in bounded base64 terminal payloads.
     private static readonly JsonSerializerOptions TerminalJson = new(JsonSerializerDefaults.Web)
     { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     public async Task RunAsync(AgentIdentity identity, CancellationToken token)
     {
+        var origin = new Uri(options.Value.ControlPlaneUrl);
+        if (!options.Value.AllowsControlPlaneOrigin(origin, environment?.IsDevelopment() == true))
+            throw new IOException("Agent command transport requires HTTPS or the explicit insecure HTTP opt-in.");
         using var socket = new ClientWebSocket();
         socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(15);
         // ClientWebSocket uses the platform certificate chain and hostname verification; no bypass.
         var proof = identity.CreateEnrollmentRequest(options.Value.EnrollmentToken, Environment.MachineName, clock.GetUtcNow());
         socket.Options.SetRequestHeader("X-Stanza-Proof", Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(proof, JsonSerializerOptions.Web)));
-        var origin = new Uri(options.Value.ControlPlaneUrl);
         var uri = new UriBuilder(origin) { Scheme = origin.Scheme == "https" ? "wss" : "ws", Path = "/api/agent-channel" }.Uri;
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
         using var send = new SemaphoreSlim(1, 1);

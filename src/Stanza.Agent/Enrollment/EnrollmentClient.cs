@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using Stanza.Core.Contracts;
 
 namespace Stanza.Agent.Enrollment;
@@ -12,10 +13,14 @@ public interface IEnrollmentClient
     Task<EnrollmentStatus> RegisterAsync(Uri controlPlane, AgentEnrollmentRequest request, CancellationToken cancellationToken);
 }
 
-public sealed class EnrollmentClient(HttpClient httpClient, TimeProvider? timeProvider = null) : IEnrollmentClient
+public sealed class EnrollmentClient(HttpClient httpClient, TimeProvider? timeProvider = null,
+    IOptions<AgentOptions>? options = null, IHostEnvironment? environment = null) : IEnrollmentClient
 {
     public async Task<EnrollmentStatus> RegisterAsync(Uri controlPlane, AgentEnrollmentRequest request, CancellationToken cancellationToken)
     {
+        // Refuse before sending the token/proof, even if called outside the startup validator.
+        if (!(options?.Value ?? new()).AllowsControlPlaneOrigin(controlPlane, environment?.IsDevelopment() == true))
+            return EnrollmentStatus.Unavailable;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30), timeProvider ?? TimeProvider.System);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
         try
