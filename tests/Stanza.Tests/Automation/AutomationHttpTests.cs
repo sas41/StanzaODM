@@ -110,6 +110,83 @@ public sealed class AutomationHttpTests
         Assert.Contains("denied", denied.Headers.Location?.ToString());
     }
 
+    [Fact]
+    public async Task QaInvocationIsScopedCsrfProtectedAndDoesNotRequireGenericExecutionRights()
+    {
+        await using var original = new StanzaFactory(); await using var factory = Configure(original);
+        using var client = factory.CreateClient(new() { AllowAutoRedirect = false }); Guid allowed, denied, qa;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var accounts = scope.ServiceProvider.GetRequiredService<AccountService>();
+            var root = await accounts.BootstrapAsync("owner", "a-secure-password-123");
+            qa = (await accounts.CreateAsync(root.Id, "qa", "a-secure-password-123", AccountRole.User)).Id;
+            var automation = scope.ServiceProvider.GetRequiredService<AutomationService>(); var deployment = Guid.NewGuid();
+            allowed = (await automation.SaveActionAsync(root.Id, null, 0, "Reset DB", true, "queue",
+                new([new("container-exec", deployment, Execution: new("/usr/bin/reset-db", ["--testing"], Service: "app"))],
+                    DeploymentId: deployment, Confirmation: "Reset the testing database?"))).Id;
+            denied = (await automation.SaveActionAsync(root.Id, null, 0, "Destroy", true, "queue", new([new("remove", deployment)]))).Id;
+            await scope.ServiceProvider.GetRequiredService<AccessService>().AddGrantAsync(root.Id, qa, null, "action.execute", "action", allowed);
+        }
+        await Login(client, "qa");
+        var html = await client.GetStringAsync($"/automation/actions/{allowed}/invoke");
+        Assert.Contains("Reset the testing database?", html); Assert.DoesNotContain("/usr/bin/reset-db", html);
+        Assert.Contains("denied", (await client.GetAsync($"/automation/actions/{denied}/invoke")).Headers.Location?.ToString());
+        Assert.Contains("denied", (await client.GetAsync($"/automation/actions/{allowed}/access")).Headers.Location?.ToString());
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsync($"/automation/actions/{allowed}/submit", Form(("confirmed", "true")))).StatusCode);
+        var csrf = await Token(client, $"/automation/actions/{allowed}/invoke");
+        var unconfirmed = await client.PostAsync($"/automation/actions/{allowed}/submit", Form(("__RequestVerificationToken", csrf), ("revision", "1")));
+        Assert.Equal(HttpStatusCode.OK, unconfirmed.StatusCode); Assert.Contains("Confirm this action", await unconfirmed.Content.ReadAsStringAsync());
+        var tampered = await client.PostAsync($"/automation/actions/{allowed}/submit", Form(("__RequestVerificationToken", csrf), ("revision", "1"), ("confirmed", "true"), ("values[command]", "evil")));
+        Assert.Contains("Unknown action parameter", await tampered.Content.ReadAsStringAsync());
+        var accepted = await client.PostAsync($"/automation/actions/{allowed}/submit", Form(("__RequestVerificationToken", csrf), ("revision", "1"), ("confirmed", "true")));
+        Assert.Equal(HttpStatusCode.Redirect, accepted.StatusCode); Assert.StartsWith("/automation/runs/", accepted.Headers.Location?.ToString());
+        using var check = factory.Services.CreateScope();
+        var run = Assert.Single((await check.ServiceProvider.GetRequiredService<AutomationService>().ListAsync(qa)).Runs);
+        Assert.Equal(qa, run.RequestedBy); Assert.Equal(allowed, run.ActionId);
+    }
+
+    [Fact]
+    public async Task ActionEditorSchedulesHostMaintenanceWithoutDeploymentAndExecuteOnlyUsersCannotConfigureIt()
+    {
+        await using var original = new StanzaFactory(); await using var factory = Configure(original);
+        using var owner = factory.CreateClient(new() { AllowAutoRedirect = false }); Guid root, action, qa;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var accounts = scope.ServiceProvider.GetRequiredService<AccountService>();
+            root = (await accounts.BootstrapAsync("owner", "a-secure-password-123")).Id;
+            qa = (await accounts.CreateAsync(root, "qa", "a-secure-password-123", AccountRole.User)).Id;
+            action = (await scope.ServiceProvider.GetRequiredService<AutomationService>().SaveActionAsync(root, null, 0, "Docker maintenance", true, "queue",
+                new([new("host-exec", AgentId: Guid.NewGuid(), Execution: new("/usr/bin/docker", ["system", "prune", "--force"]))]))).Id;
+            await scope.ServiceProvider.GetRequiredService<AccessService>().AddGrantAsync(root, qa, null, "action.execute", "action", action);
+        }
+        await Login(owner, "owner"); var path = $"/automation/actions/{action}/schedules";
+        var editor = $"/automation/actions/edit?id={action}";
+        Assert.Contains("Periodic execution", await owner.GetStringAsync(editor));
+        Assert.Equal(HttpStatusCode.BadRequest, (await owner.PostAsync(path, Form(("Name", "No CSRF")))).StatusCode);
+        var csrf = await Token(owner, editor);
+        Assert.Equal(HttpStatusCode.Redirect, (await owner.PostAsync(path, Form(("__RequestVerificationToken", csrf), ("Name", "Nightly prune"),
+            ("Expression", "0 3 * * *"), ("TimeZone", "Europe/London"), ("Enabled", "true"), ("Overlap", "skip"), ("MissedRun", "skip")))).StatusCode);
+        AutomationSchedule schedule;
+        using (var scope = factory.Services.CreateScope())
+        {
+            schedule = Assert.Single(await scope.ServiceProvider.GetRequiredService<AutomationService>().ActionSchedulesAsync(root, action));
+            Assert.Null(schedule.DeploymentId); Assert.Equal(action, schedule.ActionId); Assert.Equal("Europe/London", schedule.TimeZone); Assert.True(schedule.Enabled);
+        }
+        Assert.Equal(HttpStatusCode.Redirect, (await owner.PostAsync(path, Form(("__RequestVerificationToken", csrf), ("Name", "Nightly prune"),
+            ("Id", schedule.Id.ToString()), ("Revision", schedule.Revision.ToString()), ("Expression", "bad cron"), ("TimeZone", "UTC"),
+            ("Enabled", "true"), ("Overlap", "skip"), ("MissedRun", "skip")))).StatusCode);
+        Assert.Contains("Invalid cron", await owner.GetStringAsync(editor));
+        Assert.Equal(HttpStatusCode.Redirect, (await owner.PostAsync(path, Form(("__RequestVerificationToken", csrf), ("Name", "Nightly prune"),
+            ("Id", schedule.Id.ToString()), ("Revision", schedule.Revision.ToString()), ("Expression", "0 3 * * *"), ("TimeZone", "UTC"),
+            ("Overlap", "skip"), ("MissedRun", "skip")))).StatusCode);
+        using (var scope = factory.Services.CreateScope())
+            Assert.False(Assert.Single(await scope.ServiceProvider.GetRequiredService<AutomationService>().ActionSchedulesAsync(root, action)).Enabled);
+        using var user = factory.CreateClient(new() { AllowAutoRedirect = false }); await Login(user, "qa");
+        var userToken = await Token(user, $"/automation/actions/{action}/invoke");
+        var denied = await user.PostAsync(path, Form(("__RequestVerificationToken", userToken), ("Name", "Unauthorized cron"), ("Expression", "* * * * *"), ("TimeZone", "UTC"), ("Enabled", "true")));
+        Assert.Contains("denied", denied.Headers.Location?.ToString());
+    }
+
     private static async Task Login(HttpClient client, string username)
     {
         var csrf = await Token(client, "/account/login");

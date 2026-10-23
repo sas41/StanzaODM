@@ -22,6 +22,30 @@ namespace Stanza.Tests.Portability;
 public sealed class ParticipantIntegrationTests
 {
     [Fact]
+    public async Task HostOnlyActionSchedulesRoundtripWithoutInventingDeploymentOrExportingSharedRuntimeInputs()
+    {
+        await using var source = await Instance.Create("source-admin"); await using var destination = await Instance.Create("destination-admin");
+        var action = await source.Automation.SaveActionAsync(source.Root, null, 0, "Docker cleanup", true, "queue",
+            new([new("host-exec", AgentId: source.Agent, Execution: new("/usr/bin/docker", ["system", "prune", "--force", "--filter", "${filter}"]))], [new("filter")]));
+        await source.Automation.QueueActionAsync(source.Root, action.Id, new Dictionary<string, string> { ["filter"] = "until=24h" });
+        await source.Automation.SaveActionScheduleAsync(source.Root, action.Id, Guid.Empty, 0, "Nightly cleanup", "0 3 * * *", "UTC", true, "skip", "skip");
+        var export = await source.Portability.ExportAsync(source.Root, new([], ["automation"], true));
+        Assert.DoesNotContain("until=24h", Encoding.UTF8.GetString(export));
+        var bundle = PortableBundleValidator.Parse(export); Assert.Empty(bundle.Deployments);
+        var mapping = new PortableImportMapping(bundle.Agents.ToDictionary(a => a.Id, _ => destination.Agent), new Dictionary<string, string>(),
+            new Dictionary<string, string> { ["account:source-admin"] = "destination-admin" });
+        var preview = await destination.Portability.PreviewAsync(destination.Root, export, mapping);
+        Assert.True(preview.CanApply, string.Join("; ", preview.Conflicts));
+        var result = await destination.Portability.ApplyAsync(destination.Root, preview.Id, preview.Fingerprint, true); Assert.Equal("complete", result.State);
+        var imported = await destination.Automation.ListAsync(destination.Root);
+        var importedAction = Assert.Single(imported.Actions); var schedule = Assert.Single(imported.Schedules);
+        Assert.Equal(importedAction.Id, schedule.ActionId); Assert.Null(schedule.DeploymentId); Assert.False(schedule.Enabled);
+        Assert.Equal("0 3 * * *", schedule.Expression); Assert.Equal("UTC", schedule.TimeZone);
+        var plan = (await destination.Automation.ReadActionAsync(destination.Root, importedAction.Id)).Plan;
+        Assert.Equal(destination.Agent, Assert.Single(plan.Steps).AgentId); Assert.Empty(await destination.Db.Set<ActionInputMemory>().ToListAsync());
+    }
+
+    [Fact]
     public async Task All_configuration_sections_roundtrip_between_instances_with_plaintext_secrets_logical_references_and_inactive_automation()
     {
         await using var source = await Instance.Create("source-admin");
@@ -74,6 +98,10 @@ public sealed class ParticipantIntegrationTests
         Assert.Equal(destination.Root, action.OwnerId);
         Assert.NotEqual(seeded.Action, action.Id);
         Assert.Equal(deployment, Assert.Single((await destination.Automation.ReadActionAsync(destination.Root, action.Id)).Plan.Steps).DeploymentId);
+        var actionPlan = (await destination.Automation.ReadActionAsync(destination.Root, action.Id)).Plan;
+        Assert.Equal(deployment, actionPlan.DeploymentId); Assert.Equal("Deploy Latest", actionPlan.ButtonLabel); Assert.Equal(5, actionPlan.Order);
+        Assert.Equal("Deploy the selected branch?", actionPlan.Confirmation);
+        var actionInput = Assert.Single(actionPlan.Parameters!); Assert.Equal("branch", actionInput.Input); Assert.Equal("checkouts/application", actionInput.Source);
         var schedule = Assert.Single(automation.Schedules);
         Assert.False(schedule.Enabled); Assert.Equal(action.Id, schedule.ActionId); Assert.Equal(destination.Root, schedule.OwnerId);
         var hook = Assert.Single(automation.Webhooks);
@@ -349,7 +377,9 @@ public sealed class ParticipantIntegrationTests
         await x.Settings.SaveAsync(x.Root, new("https://control.example.test/", "GLOBAL=global-secret\r\n", 0));
         await x.Agents.SaveEnvironmentAsync(x.Root, x.Agent, new("AGENT=agent-secret\r\n", 0));
         await x.Policy.SaveAsync(x.Root, new(new() { OperationTimeoutSeconds = 17 }, 0));
-        var action = await x.Automation.SaveActionAsync(x.Root, null, 0, "Reusable action", true, "queue", new([new("deploy", deployment.Id)]));
+        var action = await x.Automation.SaveActionAsync(x.Root, null, 0, "Reusable action", true, "queue",
+            new([new("deploy", deployment.Id)], [new("branch", Default: "main", Input: "branch", Source: "checkouts/application")],
+                deployment.Id, "Deploy Latest", 5, "Deploy the selected branch?"));
         await x.Automation.SaveScheduleAsync(x.Root, new() { DeploymentId = deployment.Id, ActionId = action.Id, Name = "Schedule", Enabled = true }, 0);
         var webhook = await x.Automation.SaveWebhookAsync(x.Root, new() { DeploymentId = deployment.Id, ActionId = action.Id, Name = "Webhook", Enabled = true }, 0);
         await x.Automation.SaveImagePolicyAsync(x.Root, new() { DeploymentId = deployment.Id, Name = "Image policy", Services = "app", Mode = "auto-deploy", Enabled = true }, 0);

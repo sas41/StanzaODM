@@ -52,7 +52,7 @@ public static class PermissionCatalog
         new("credential.reveal", "credential", "Reveal credential values"),
         new("action.read", "action", "View a configured action"),
         new("action.manage", "action", "Manage a configured action"),
-        new("action.execute", "action", "Execute a configured action; all targets require separate authorization"),
+        new("action.execute", "action", "Execute only this fixed action using its owner's approved target capabilities"),
         new("automation.read", "deployment", "View deployment automation"),
         new("automation.manage", "deployment", "Manage deployment automation"),
         new("configuration.export", "instance", "Export instance configuration; included resources require separate authorization"),

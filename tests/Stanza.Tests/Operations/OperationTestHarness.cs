@@ -50,6 +50,7 @@ internal sealed class OperationTestHarness : IAsyncDisposable
         registrations.AddScoped<AgentAdministrationService>(); registrations.AddScoped<AuditService>();
         registrations.AddScoped<AutomationAuthorization>(); registrations.AddScoped<AutomationService>(); registrations.AddScoped<AutomationOperationGuard>();
         registrations.AddScoped<SourceService>();
+        registrations.AddMemoryCache(); registrations.AddScoped<ActionInputService>(); registrations.AddScoped<DeploymentActionOverview>();
         registrations.AddScoped<ISourceSnapshotProvider>(services => services.GetRequiredService<SourceService>());
         registrations.AddScoped<OperationService>();
         harness.Services = registrations.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true, ValidateScopes = true });

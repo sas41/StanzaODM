@@ -30,4 +30,10 @@ public sealed class AutomationAuthorization(AccessService access)
     {
         foreach (var step in plan.Steps) await TargetAsync(actor, step, ct);
     }
+
+    public Task ScheduleAsync(Guid actor, Guid? action, Guid? deployment, CancellationToken ct = default) => action is { } actionId
+        ? RequireAsync(actor, "action.manage", "action", actionId, ct)
+        : deployment is { } deploymentId && deploymentId != Guid.Empty
+            ? RequireAsync(actor, "automation.manage", "deployment", deploymentId, ct)
+            : throw new AutomationException("Select an action or a deployment for this schedule.");
 }

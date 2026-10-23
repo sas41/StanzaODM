@@ -32,7 +32,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     private readonly SemaphoreSlim execution = new(1, 1);
     private sealed record Ledger(string Hash, AgentWorkResponse? Response);
     private sealed class WorkFailure(string code) : Exception { public string Code { get; } = code; }
-    private static readonly HashSet<string> Operations = ["validate", "environment-preview", "build", "pull", "deploy", "start", "stop", "restart", "remove", "status", "logs", "container-exec", "host-exec", "git-branches", "registry-check", "image-digests"];
+    private static readonly HashSet<string> Operations = ["validate", "environment-preview", "build", "pull", "deploy", "start", "stop", "restart", "remove", "status", "logs", "container-exec", "host-exec", "git-branches", "git-action-branches", "registry-tags", "resolve-action-inputs", "registry-check", "image-digests"];
 
     public async Task<AgentWorkResponse> ExecuteAsync(AgentWorkRequest request, CancellationToken token = default)
     {
@@ -118,7 +118,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             return result;
         }
         catch (Exception ex) when (ex is WorkFailure or ArgumentException or IOException or UnauthorizedAccessException or
-            JsonException or OperationCanceledException or PlatformNotSupportedException or KeyNotFoundException or InvalidOperationException)
+            JsonException or OperationCanceledException or PlatformNotSupportedException or KeyNotFoundException or InvalidOperationException or HttpRequestException)
         {
             var code = resultProduced ? "uncertain" : ex switch
             {
@@ -327,7 +327,17 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         foreach (var source in context.Request.Sources ?? [])
         {
             if (!IsSafeGitSource(source, options.Value.AllowLoopbackHttp)) throw new WorkFailure("unsupported_git_source");
-            if (context.Request.Operation == "git-branches") continue;
+            if (context.Request.Operation is "git-branches" or "git-action-branches") continue;
+            if (context.Request.Operation == "resolve-action-inputs")
+            {
+                if (!source.Reference.StartsWith("refs/heads/", StringComparison.Ordinal)) throw new WorkFailure("invalid_git_branch");
+                var remote = await GitAsync(context, source, context.Directory, ["ls-remote", "--heads", "--refs", "--", source.Url, source.Reference]);
+                var lines = remote.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => line.TrimEnd('\r').Split('\t')).ToArray();
+                if (lines.Length != 1 || lines[0].Length != 2 || lines[0][1] != source.Reference || lines[0][0].Length != 40 || !lines[0][0].All(Uri.IsHexDigit))
+                    throw new WorkFailure("git_branch_unavailable");
+                resolved[source.Destination] = lines[0][0];
+                continue;
+            }
             var destination = SnapshotPath(context.Directory, source.Destination);
             if (File.Exists(destination) || Directory.Exists(destination) || destinations.Any(x =>
                     x.Equals(source.Destination, StringComparison.OrdinalIgnoreCase) ||
@@ -413,14 +423,33 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     {
         var request = context.Request;
         if (ControlsExisting(request.Operation)) return await ExistingContainersAsync(context);
-        if (request.Operation == "git-branches")
+        if (request.Operation == "resolve-action-inputs")
+        {
+            foreach (var item in request.ImageOverrides ?? new Dictionary<string, string>())
+            {
+                ValidateImageReference(item.Value);
+                using var descriptor = JsonDocument.Parse(await DockerAsync(context, ["buildx", "imagetools", "inspect", "--format", "{{json .Manifest}}", "--", item.Value]));
+                context.ResolvedImages[item.Key] = Digest(descriptor.RootElement.GetProperty("digest"));
+            }
+            return null;
+        }
+        if (request.Operation == "registry-tags")
+        {
+            using var http = new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false }) { Timeout = TimeSpan.FromSeconds(60) };
+            var tags = await new RegistryTagClient(http).ListAsync(request.ImageRepository ?? "", request.Registries ?? [], context.Token);
+            return JsonSerializer.Serialize(tags);
+        }
+        if (request.Operation is "git-branches" or "git-action-branches")
         {
             if (request.Sources is not { Count: 1 }) throw new WorkFailure("git_source_required");
             var source = request.Sources[0];
-            var output = await GitAsync(context, source, context.Directory, ["ls-remote", "--heads", "--tags", "--refs", "--", source.Url]);
+            var output = await GitAsync(context, source, context.Directory, request.Operation == "git-action-branches"
+                ? ["ls-remote", "--heads", "--refs", "--", source.Url]
+                : ["ls-remote", "--heads", "--tags", "--refs", "--", source.Url]);
             var branches = output.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => line.Split('\t'))
                 .Where(parts => parts.Length == 2 && (parts[1].StartsWith("refs/heads/", StringComparison.Ordinal) || parts[1].StartsWith("refs/tags/", StringComparison.Ordinal)))
-                .Select(parts => (parts[1].StartsWith("refs/heads/", StringComparison.Ordinal) ? parts[1][11..] : parts[1]).TrimEnd('\r')).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Take(10000).ToArray();
+                .Select(parts => (parts[1].StartsWith("refs/heads/", StringComparison.Ordinal) ? parts[1][11..] : parts[1]).TrimEnd('\r')).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Take(10001).ToArray();
+            if (branches.Length > 10000) throw new WorkFailure("git_reference_limit");
             return JsonSerializer.Serialize(branches);
         }
         if (request.Operation == "registry-check")
@@ -433,6 +462,21 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         if (request.Operation == "host-exec") return await HostExecAsync(context);
         if (request.Operation == "container-exec") return await ContainerExecAsync(context);
         var prefix = ComposeArguments(context);
+        if (request.ImageOverrides is { Count: > 0 })
+        {
+            if (request.ImageOverrides.Count > 100) throw new WorkFailure("invalid_image_overrides");
+            using var original = JsonDocument.Parse(await DockerAsync(context, [.. prefix, "config", "--format", "json"]));
+            foreach (var item in request.ImageOverrides)
+            {
+                if (!WorkspacePolicy.IsIdentifier(item.Key) || !original.RootElement.GetProperty("services").TryGetProperty(item.Key, out var service) || service.TryGetProperty("build", out _))
+                    throw new WorkFailure("image_override_service_unavailable");
+                ValidateImageReference(item.Value);
+            }
+            var path = Path.Combine(context.Secrets, "action-images.json");
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new { services = request.ImageOverrides.ToDictionary(p => p.Key, p => new { image = p.Value }) }), context.Token);
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, PrivateStorage.FileMode);
+            prefix.AddRange(["--file", path]);
+        }
         if (request.Operation == "environment-preview") return await DockerAsync(context, [.. prefix, "config", "--environment"]);
         // Compose, not an ad-hoc YAML parser, decides interpolation, services and eligible build/image operations.
         var configOutput = await DockerAsync(context, [.. prefix, "config", "--format", "json"]);
@@ -788,7 +832,10 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         if (container is null)
         {
             if (!WorkspacePolicy.IsIdentifier(command.Service!)) throw new WorkFailure("service_required");
-            var ids = await DockerAsync(context, [.. ComposeArguments(context), "ps", "--quiet", "--", command.Service!]);
+            // Resolve deployed containers by labels, not the current draft Compose (which may
+            // have pending edits, or be absent from an existing-container operation snapshot).
+            var ids = await DockerAsync(context, ["ps", "--all", "--quiet", "--filter", "label=com.docker.compose.project=stanza-" + context.Request.DeploymentId.ToString("N"),
+                "--filter", "label=com.docker.compose.service=" + command.Service!]);
             var candidates = ids.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
             if (candidates.Length != 1) throw new WorkFailure("container_target_ambiguous");
             container = candidates[0];
@@ -800,6 +847,8 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         var root = document.RootElement;
         if (!root.TryGetProperty("Config", out var config) || !config.TryGetProperty("Labels", out var labels) ||
             !labels.TryGetProperty("com.docker.compose.project", out var project) || project.GetString() != "stanza-" + context.Request.DeploymentId.ToString("N"))
+            throw new WorkFailure("container_scope_denied");
+        if (command.Service is not null && (!labels.TryGetProperty("com.docker.compose.service", out var service) || service.GetString() != command.Service))
             throw new WorkFailure("container_scope_denied");
         if (!root.TryGetProperty("State", out var state) || !state.TryGetProperty("Running", out var running) || !running.GetBoolean())
             throw new WorkFailure("container_not_running");

@@ -1,0 +1,24 @@
+@model IReadOnlyList<Stanza.ControlPlane.Automation.AgentDeploymentSection>
+<div data-overview-version="@Stanza.ControlPlane.Automation.AutomationLive.Version(Model)">
+@foreach (var agent in Model)
+{
+    <section class="panel"><h2>@agent.Name Deployments <small class="muted">@(agent.Connected ? "Connected" : "Offline")</small></h2>
+    @foreach (var deployment in agent.Deployments)
+    {
+        <section class="deployment-action-row" data-deployment-id="@deployment.Id">
+            <div><strong>@deployment.Name</strong><p class="muted">@deployment.State · @deployment.Applied</p></div>
+            <div class="action-buttons">
+            @foreach (var action in deployment.Actions)
+            {
+                if (action.NeedsDialog)
+                { <button type="button" hx-get="/automation/actions/@action.Id/invoke" hx-target="#action-dialog-content" hx-swap="innerHTML">@action.Label</button> }
+                else
+                { <form method="post" action="/automation/actions/@action.Id/submit">@Html.AntiForgeryToken()<button>@action.Label</button></form> }
+            }
+            </div>
+            @if (deployment.RunId is { } run) { <a href="/automation/runs/@run">Latest action: @deployment.RunState</a> }
+        </section>
+    }
+    </section>
+}
+</div>

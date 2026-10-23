@@ -31,7 +31,9 @@ public sealed record AgentImageObservation(string Service, string Image, string 
 public sealed record AgentWorkRequest(Guid Id, Guid DeploymentId, string Operation,
     IReadOnlyList<AgentFile> Files, IReadOnlyList<AgentEnvironmentFile> EnvironmentFiles,
     AgentExecution? Execution = null, IReadOnlyList<AgentGitSource>? Sources = null,
-    IReadOnlyList<AgentRegistryCredential>? Registries = null, AgentRuntimePolicy? Policy = null)
+    IReadOnlyList<AgentRegistryCredential>? Registries = null, AgentRuntimePolicy? Policy = null,
+    IReadOnlyDictionary<string, string>? ImageOverrides = null, string? ImageRepository = null,
+    IReadOnlyDictionary<string, string>? SourceOverrides = null)
 {
     public override string ToString() => $"AgentWorkRequest {{ Id = {Id}, DeploymentId = {DeploymentId}, Operation = {Operation}, Contents = [REDACTED] }}";
 }

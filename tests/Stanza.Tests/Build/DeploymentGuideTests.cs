@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using Stanza.Agent.Runtime;
+using Stanza.ControlPlane.Automation;
+using Stanza.Core.Automation;
 using Stanza.Tests.Agent;
 using Stanza.Tests.Web;
 
@@ -116,6 +118,29 @@ public sealed class DeploymentGuideTests
         Assert.Contains("not persistent workload data", readme);
         Assert.Contains("docker compose up -d control-plane", readme);
         Assert.Contains("./agent_data", readme);
+    }
+
+    [Fact]
+    public void Prune_recipe_is_a_valid_fixed_host_action_with_daily_cron_and_explicit_safety_limits()
+    {
+        var readme = File.ReadAllText(Path.Combine(ArchitectureTests.RepositoryRoot(), "README.md"));
+        const string heading = "## Scheduled maintenance: Docker cleanup";
+        Assert.Contains(heading, readme);
+        var recipe = readme[readme.IndexOf(heading, StringComparison.Ordinal)..].Replace("\n   ", "\n", StringComparison.Ordinal);
+        var executable = Regex.Match(recipe, @"\*\*Executable:\*\* `([^`]+)`").Groups[1].Value;
+        var cron = Regex.Match(recipe, @"\*\*Cron:\*\* `([^`]+)`").Groups[1].Value;
+        var arguments = Block(recipe, "text", "system\nprune\n--force").Trim().Split('\n');
+        Assert.Equal("/usr/bin/docker", executable);
+        Assert.Equal(new[] { "system", "prune", "--force" }, arguments);
+        AutomationRules.Validate(new([new("host-exec", AgentId: Guid.NewGuid(), Execution: new(executable, arguments))]));
+        Assert.Equal(DateTimeOffset.Parse("2026-10-23T03:00:00Z"),
+            new CronSchedule(cron).Next(DateTimeOffset.Parse("2026-10-23T00:00:00Z"), TimeZoneInfo.Utc));
+        Assert.Contains("entire Docker daemon, not just one deployment", recipe);
+        Assert.Contains("admin-only", recipe);
+        Assert.Contains("compose.agent.privileged.yaml", recipe);
+        Assert.Contains("Operational policy", recipe);
+        Assert.Contains("deliberately omits `--volumes` and `--all`", recipe);
+        Assert.Contains("Preview the next runs", recipe);
     }
 
     private static string Block(string readme, string language, string content) =>

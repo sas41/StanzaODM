@@ -1,0 +1,20 @@
+@model Stanza.ControlPlane.Models.ActionAccessModel
+@{ ViewData["Title"] = "Action access"; }
+<h1>@Model.Name: action access</h1>
+<p>Admins can run every enabled action. Users and groups below can run only this fixed action, with its configured inputs, using the author's approved capabilities. Generic deployment/command privileges are not granted.</p>
+<section class="panel"><h2>Grant a user</h2>
+<form method="post">@Html.AntiForgeryToken()<label>User<select name="accountId" required>
+@foreach (var s in Model.Subjects.Where(x => !x.IsGroup)) { <option value="@s.Id">@s.Name</option> }
+</select></label><button>Allow this action</button></form></section>
+<section class="panel"><h2>Grant a group</h2>
+<form method="post">@Html.AntiForgeryToken()<label>Group<select name="groupId" required>
+@foreach (var s in Model.Subjects.Where(x => x.IsGroup)) { <option value="@s.Id">@s.Name</option> }
+</select></label><button>Allow this action</button></form></section>
+<section class="panel"><h2>Explicit action grants</h2>
+@foreach (var g in Model.Grants)
+{
+    var subject = Model.Subjects.FirstOrDefault(x => x.Id == (g.AccountId ?? g.GroupId));
+    <form method="post">@Html.AntiForgeryToken()<input type="hidden" name="removeGrantId" value="@g.Id" /><span>@(subject?.Name ?? "Unavailable subject") · @(g.GroupId.HasValue ? "Group" : "User")</span><button>Revoke</button></form>
+}
+<p class="field-help">Grants are additive. Broad grants or other group memberships may still allow execution; review effective access under Users.</p>
+</section><a href="/automation/actions/edit?id=@Model.Id">Back to action</a>

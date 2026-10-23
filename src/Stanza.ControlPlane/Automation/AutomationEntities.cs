@@ -22,11 +22,28 @@ public sealed class ActionDefinition
     [JsonIgnore] public string ProtectedSteps { get; set; } = "";
 }
 
+public sealed class ActionInputMemory
+{
+    public Guid ActionId { get; set; }
+    public Guid DeploymentId { get; set; }
+    public long ActionRevision { get; set; }
+    [JsonIgnore] public string ProtectedValues { get; set; } = "";
+}
+
+public sealed class ActionInputMemoryConfiguration : IEntityTypeConfiguration<ActionInputMemory>
+{
+    public void Configure(EntityTypeBuilder<ActionInputMemory> b)
+    {
+        b.ToTable("AutomationActionInputs").HasKey(x => new { x.ActionId, x.DeploymentId });
+        b.HasOne<ActionDefinition>().WithMany().HasForeignKey(x => x.ActionId).OnDelete(DeleteBehavior.Cascade);
+    }
+}
+
 public sealed class AutomationSchedule
 {
     public Guid Id { get; set; }
     public Guid OwnerId { get; set; }
-    public Guid DeploymentId { get; set; }
+    public Guid? DeploymentId { get; set; }
     public Guid? ActionId { get; set; }
     public string Operation { get; set; } = "deploy";
     public string Name { get; set; } = "";
@@ -101,6 +118,7 @@ public sealed class AutomationRun
     public long? ReconciledAt { get; set; }
     [JsonIgnore] public string ProtectedPlan { get; set; } = "";
     [JsonIgnore] public string ProtectedParameters { get; set; } = "";
+    [JsonIgnore] public string ProtectedBindings { get; set; } = "";
 }
 
 public sealed class AutomationStepRun

@@ -1,16 +1,14 @@
 @model Stanza.ControlPlane.Automation.AutomationOverview
 @{ ViewData["Title"] = "Automation"; }
 <h1>Automation</h1>
-<p>Runs use current owner access, plus separate permission checks for every target. Revoked owners cannot execute queued work.</p>
+<p>Action grants allow only the configured steps and inputs, using the action owner's approved capabilities. They do not grant arbitrary commands or deployment access. Caller and owner access are rechecked before execution.</p>
 <p><a href="/automation/actions/edit">New action</a> · <a href="/automation/schedules/edit">New schedule</a> · <a href="/automation/webhooks/edit">New webhook</a> · <a href="/automation/images/edit">New image policy</a> · <a href="/automation/limits">Limits and retention</a></p>
 <h2>Reusable actions</h2>
 @foreach (var x in Model.Actions)
 {
     <section><h3>@x.Name</h3><p>@x.Id · @(x.Enabled ? "Enabled" : "Disabled") · concurrency: @x.Concurrency · owner: @x.OwnerId</p>
-    <a href="/automation/actions/edit?id=@x.Id">Edit</a>
-    <form method="post" action="/automation/actions/@x.Id/run">@Html.AntiForgeryToken()
-        <label>Parameter values (JSON string dictionary)<textarea name="parametersJson">{}</textarea></label><button type="submit">Run action</button>
-    </form></section>
+    <a href="/automation/actions/edit?id=@x.Id">Edit</a> · <a href="/automation/actions/edit?id=@x.Id#action-schedules">Cron schedules</a>
+    <a href="/automation/actions/@x.Id/invoke">Run action</a></section>
 }
 <h2>Schedules</h2>
 @foreach (var x in Model.Schedules)

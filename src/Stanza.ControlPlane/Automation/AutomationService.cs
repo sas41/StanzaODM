@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Stanza.ControlPlane.Persistence;
 using Stanza.ControlPlane.Audit;
 using Stanza.Core.Automation;
+using Stanza.ControlPlane.Security;
 
 namespace Stanza.ControlPlane.Automation;
 
@@ -15,7 +16,8 @@ public sealed record WebhookSaved(WebhookDefinition Definition, string? Secret)
     public override string ToString() => "WebhookSaved { [REDACTED] }";
 }
 
-public sealed class AutomationService(StanzaDbContext db, AutomationAuthorization authorization, IDataProtectionProvider protection, TimeProvider clock)
+public sealed class AutomationService(StanzaDbContext db, AutomationAuthorization authorization, IDataProtectionProvider protection, TimeProvider clock,
+    ActionInputService? inputs = null)
 {
     private readonly IDataProtector protector = protection.CreateProtector("Stanza.Automation.v1");
     public string Protect<T>(T value) => protector.Protect(JsonSerializer.Serialize(value, AutomationRules.Json));
@@ -30,7 +32,9 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
             if (await Allowed(actor, "action.read", "action", x.Id, ct)) actions.Add(x);
         var schedules = new List<AutomationSchedule>();
         foreach (var x in await db.Set<AutomationSchedule>().AsNoTracking().OrderBy(x => x.Name).ToListAsync(ct))
-            if (await Allowed(actor, "automation.read", "deployment", x.DeploymentId, ct)) schedules.Add(x);
+            if (x.ActionId is { } actionId
+                ? await Allowed(actor, "action.read", "action", actionId, ct) || await Allowed(actor, "action.manage", "action", actionId, ct)
+                : await Allowed(actor, "automation.read", "deployment", x.DeploymentId, ct)) schedules.Add(x);
         var hooks = new List<WebhookDefinition>();
         foreach (var x in await db.Set<WebhookDefinition>().AsNoTracking().OrderBy(x => x.Name).ToListAsync(ct))
             if (await Allowed(actor, "automation.read", "deployment", x.DeploymentId, ct)) hooks.Add(x);
@@ -53,6 +57,8 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
     public async Task<ActionDefinition> SaveActionAsync(Guid actor, Guid? id, long expectedRevision, string name, bool enabled,
         string concurrency, ActionPlan plan, CancellationToken ct = default)
     {
+        await using var transaction = db.Database.CurrentTransaction is null ? await db.Database.BeginTransactionAsync(ct) : null;
+        await SecurityWriteGuard.LockAsync(db, ct);
         AutomationRules.Validate(plan); name = AutomationRules.Name(name);
         if (concurrency is not ("queue" or "reject")) throw new AutomationException("Action concurrency must be queue or reject.");
         await authorization.RequireAsync(actor, "action.manage", "action", id, ct);
@@ -66,16 +72,25 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
         value.ProtectedSteps = Protect(plan); value.Revision++;
         if (id is null) db.Add(value);
         await RecordAuditAsync(actor, "automation.action.saved", value.Id.ToString(), enabled ? "enabled" : "disabled", ct);
-        db.Entry(value).State = EntityState.Detached; return value;
+        db.Entry(value).State = EntityState.Detached;
+        if (transaction is not null) await transaction.CommitAsync(ct);
+        return value;
     }
 
     public async Task<AutomationSchedule> SaveScheduleAsync(Guid actor, AutomationSchedule input, long expectedRevision, CancellationToken ct = default)
     {
+        await using var transaction = db.Database.CurrentTransaction is null ? await db.Database.BeginTransactionAsync(ct) : null;
+        await SecurityWriteGuard.LockAsync(db, ct);
         input.Name = AutomationRules.Name(input.Name);
-        await authorization.RequireAsync(actor, "automation.manage", "deployment", input.DeploymentId, ct);
-        await ValidateTriggerAsync(actor, input.ActionId, input.DeploymentId, input.Operation, ct);
+        await authorization.ScheduleAsync(actor, input.ActionId, input.DeploymentId, ct);
+        if (input.Enabled || input.ActionId is null) await ValidateTriggerAsync(actor, input.ActionId, input.DeploymentId, input.Operation, ct);
         if (input.ActionId is { } scheduleAction)
-            AutomationRules.Parameters(Unprotect<ActionPlan>((await ActionAsync(scheduleAction, ct)).ProtectedSteps), null);
+        {
+            await ActionAsync(scheduleAction, ct);
+            if (input.Enabled) await ScheduledParametersAsync(scheduleAction, ct);
+        }
+        if (string.IsNullOrWhiteSpace(input.Expression) || input.Expression.Length > 256 || string.IsNullOrWhiteSpace(input.TimeZone) || input.TimeZone.Length > 100)
+            throw new AutomationException("Supply a bounded cron expression and timezone.");
         if (input.Overlap is not ("skip" or "queue") || input.MissedRun is not ("skip" or "run-once"))
             throw new AutomationException("Select skip/queue overlap and skip/run-once missed-run policies.");
         var next = Preview(input.Expression, input.TimeZone, 1)[0].ToUnixTimeSeconds();
@@ -83,11 +98,31 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
             ?? throw new AutomationException("Schedule is unavailable.");
         if (existing is not null)
         {
-            await authorization.RequireAsync(actor, "automation.manage", "deployment", existing.DeploymentId, ct);
+            await authorization.ScheduleAsync(actor, existing.ActionId, existing.DeploymentId, ct);
             if (existing.Revision != expectedRevision) throw new AutomationException("The schedule changed. Reload before saving.");
         }
         input.Id = existing?.Id ?? Guid.NewGuid(); input.OwnerId = actor; input.Revision = (existing?.Revision ?? 0) + 1; input.NextRunAt = next;
-        await SaveReplacement(input, existing, expectedRevision, actor, "automation.schedule.saved", input.Id, ct); return input;
+        await SaveReplacement(input, existing, expectedRevision, actor, "automation.schedule.saved", input.Id, ct);
+        if (transaction is not null) await transaction.CommitAsync(ct);
+        return input;
+    }
+
+    public async Task<IReadOnlyList<AutomationSchedule>> ActionSchedulesAsync(Guid actor, Guid actionId, CancellationToken ct = default)
+    {
+        await authorization.RequireAsync(actor, "action.manage", "action", actionId, ct);
+        return await db.Set<AutomationSchedule>().AsNoTracking().Where(x => x.ActionId == actionId).OrderBy(x => x.Name).ToListAsync(ct);
+    }
+
+    public async Task<AutomationSchedule> SaveActionScheduleAsync(Guid actor, Guid actionId, Guid id, long revision, string name,
+        string expression, string timezone, bool enabled, string overlap, string missedRun, CancellationToken ct = default)
+    {
+        await authorization.RequireAsync(actor, "action.manage", "action", actionId, ct);
+        if (id != Guid.Empty && !await db.Set<AutomationSchedule>().AnyAsync(x => x.Id == id && x.ActionId == actionId, ct))
+            throw new AutomationException("That schedule does not belong to this action.");
+        var action = await ActionAsync(actionId, ct);
+        var plan = Unprotect<ActionPlan>(action.ProtectedSteps);
+        return await SaveScheduleAsync(actor, new() { Id = id, ActionId = actionId, DeploymentId = plan.DeploymentId,
+            Name = name, Expression = expression, TimeZone = timezone, Enabled = enabled, Overlap = overlap, MissedRun = missedRun }, revision, ct);
     }
 
     public IReadOnlyList<DateTimeOffset> Preview(string expression, string timezone, int count = 5)
@@ -99,18 +134,23 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
 
     public async Task SetScheduleEnabledAsync(Guid actor, Guid id, bool enabled, CancellationToken ct = default)
     {
+        await using var transaction = db.Database.CurrentTransaction is null ? await db.Database.BeginTransactionAsync(ct) : null;
+        await SecurityWriteGuard.LockAsync(db, ct);
         var schedule = await db.Set<AutomationSchedule>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)
             ?? throw new AutomationException("Schedule is unavailable.");
-        await authorization.RequireAsync(actor, "automation.manage", "deployment", schedule.DeploymentId, ct);
+        await authorization.ScheduleAsync(actor, schedule.ActionId, schedule.DeploymentId, ct);
         if (enabled)
         {
+            await authorization.ScheduleAsync(schedule.OwnerId, schedule.ActionId, schedule.DeploymentId, ct);
             await ValidateTriggerAsync(actor, schedule.ActionId, schedule.DeploymentId, schedule.Operation, ct);
             await ValidateTriggerAsync(schedule.OwnerId, schedule.ActionId, schedule.DeploymentId, schedule.Operation, ct);
+            if (schedule.ActionId is { } actionId) await ScheduledParametersAsync(actionId, ct);
         }
         var next = Preview(schedule.Expression, schedule.TimeZone, 1)[0].ToUnixTimeSeconds();
         await db.Set<AutomationSchedule>().Where(x => x.Id == id).ExecuteUpdateAsync(u => u.SetProperty(x => x.Enabled, enabled)
             .SetProperty(x => x.NextRunAt, next).SetProperty(x => x.Revision, x => x.Revision + 1), ct);
         await RecordAuditAsync(actor, "automation.schedule.enabled", id.ToString(), enabled ? "enabled" : "paused", ct);
+        if (transaction is not null) await transaction.CommitAsync(ct);
     }
 
     public async Task<WebhookSaved> SaveWebhookAsync(Guid actor, WebhookDefinition input, long expectedRevision, CancellationToken ct = default)
@@ -178,20 +218,75 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
         await SaveReplacement(input, existing, expectedRevision, actor, "automation.image-policy.saved", input.Id, ct); return input;
     }
 
-    public async Task<AutomationRun> QueueActionAsync(Guid actor, Guid id, IReadOnlyDictionary<string, string>? parameters = null, CancellationToken ct = default)
+    public async Task<AutomationRun> QueueActionAsync(Guid actor, Guid id, IReadOnlyDictionary<string, string>? parameters = null, CancellationToken ct = default, long? expectedRevision = null)
     {
         var action = await ActionAsync(id, ct);
         await ValidateTriggerAsync(actor, id, null, "", ct);
-        return await QueueAsync(actor, null, id, id, "manual", "manual:" + Guid.NewGuid(), "", parameters, ct: ct);
+        var plan = Unprotect<ActionPlan>(action.ProtectedSteps);
+        return await QueueAsync(actor, plan.DeploymentId, id, id, "manual", "manual:" + Guid.NewGuid(), "", parameters, ct: ct, expectedRevision: expectedRevision);
+    }
+
+    public async Task<(ActionDefinition Definition, ActionPlan Plan, IReadOnlyDictionary<string, string> Values)> InvocationAsync(Guid actor, Guid id, CancellationToken ct)
+    {
+        await ValidateTriggerAsync(actor, id, null, "", ct);
+        var definition = await ActionAsync(id, ct);
+        var plan = Unprotect<ActionPlan>(definition.ProtectedSteps);
+        return (definition, plan, await RememberedParametersAsync(id, plan, ct));
+    }
+
+    internal async Task<IReadOnlyDictionary<string, string>> ScheduledParametersAsync(Guid actionId, CancellationToken ct)
+    {
+        var action = await ActionAsync(actionId, ct);
+        var plan = Unprotect<ActionPlan>(action.ProtectedSteps);
+        var deployment = plan.DeploymentId ?? Guid.Empty;
+        var memory = await db.Set<ActionInputMemory>().AsNoTracking().SingleOrDefaultAsync(x => x.ActionId == actionId && x.DeploymentId == deployment, ct);
+        var remembered = memory is null ? null : Unprotect<Dictionary<string, string>>(memory.ProtectedValues);
+        // Unlike a modal, an unattended run must not silently replace an incompatible remembered
+        // value with a default after an input definition changes. Require a fresh manual selection.
+        var supplied = remembered?.Where(x => (plan.Parameters ?? []).Any(p => p.Name == x.Key)).ToDictionary(x => x.Key, x => x.Value, StringComparer.Ordinal);
+        return AutomationRules.Parameters(plan, supplied);
+    }
+
+    private async Task<IReadOnlyDictionary<string, string>> RememberedParametersAsync(Guid id, ActionPlan plan, CancellationToken ct)
+    {
+        // Host-only actions have no deployment; reserve the empty scope for their shared inputs.
+        var deployment = plan.DeploymentId ?? Guid.Empty;
+        var memory = await db.Set<ActionInputMemory>().AsNoTracking().SingleOrDefaultAsync(x => x.ActionId == id && x.DeploymentId == deployment, ct);
+        var remembered = memory is not null ? Unprotect<Dictionary<string, string>>(memory.ProtectedValues) : new();
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var p in plan.Parameters ?? [])
+        {
+            if (remembered.TryGetValue(p.Name, out var previous))
+            {
+                try { values[p.Name] = AutomationRules.Parameters(new([], [p]), new Dictionary<string, string> { [p.Name] = previous })[p.Name]; }
+                catch (AutomationException) { /* Changed input definitions do not inherit incompatible values. */ }
+            }
+            if (!values.ContainsKey(p.Name) && p.Default is not null) values[p.Name] = p.Default;
+        }
+        return values;
+    }
+
+    public async Task<ActionChoicePage> ChoicesAsync(Guid actor, Guid id, string name, string? search, int page, bool refresh, CancellationToken ct)
+    {
+        var invocation = await InvocationAsync(actor, id, ct);
+        var p = invocation.Plan.Parameters?.SingleOrDefault(p => p.Name == name) ?? throw new AutomationException("Input unavailable.");
+        if (page is < 0 or > 199 || search?.Length > 256) throw new AutomationException("Invalid choice search.");
+        var all = await (inputs ?? throw new AutomationException("Input discovery unavailable.")).ValuesAsync(invocation.Definition.OwnerId, invocation.Plan, p, refresh, ct);
+        await ValidateTriggerAsync(actor, id, null, "", ct);
+        var filtered = all.Where(x => x.Contains(search ?? "", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var selected = invocation.Values.GetValueOrDefault(name);
+        return new(filtered.Skip(page * 50).Take(50).ToArray(), search ?? "", page, filtered.Length > (page + 1) * 50, selected,
+            selected is not null && all.Contains(selected, StringComparer.Ordinal));
     }
 
     public async Task<AutomationRun> RunScheduleAsync(Guid actor, Guid id, CancellationToken ct = default)
     {
         var s = await db.Set<AutomationSchedule>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct) ?? throw new AutomationException("Schedule is unavailable.");
-        await authorization.RequireAsync(actor, "automation.manage", "deployment", s.DeploymentId, ct);
+        await authorization.ScheduleAsync(actor, s.ActionId, s.DeploymentId, ct);
         await ValidateTriggerAsync(actor, s.ActionId, s.DeploymentId, s.Operation, ct);
         // Manual runs use the initiating identity, never impersonate the schedule owner.
-        return await QueueAsync(actor, s.DeploymentId, s.ActionId, s.Id, "manual-schedule", "manual:" + Guid.NewGuid(), s.Operation, ct: ct);
+        return await QueueAsync(actor, s.DeploymentId, s.ActionId, s.Id, "manual-schedule", "manual:" + Guid.NewGuid(), s.Operation,
+            s.ActionId is { } actionId ? await ScheduledParametersAsync(actionId, ct) : null, ct: ct);
     }
 
     public async Task<AutomationRun> CheckImagesAsync(Guid actor, Guid id, CancellationToken ct = default)
@@ -215,7 +310,7 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
     {
         var run = (await ReadRunAsync(actor, id, ct)).Run;
         if (run.ActionId is { } action) await authorization.RequireAsync(actor, "action.execute", "action", action, ct);
-        if (run.DeploymentId is { } deployment) await authorization.RequireAsync(actor, "operations.cancel", "deployment", deployment, ct);
+        else if (run.DeploymentId is { } deployment) await authorization.RequireAsync(actor, "operations.cancel", "deployment", deployment, ct);
         await db.Set<AutomationRun>().Where(x => x.Id == id && (x.State == "queued" || x.State == "running"))
             .ExecuteUpdateAsync(u => u.SetProperty(x => x.CancelRequested, true), ct);
         await RecordAuditAsync(actor, "automation.cancel", id.ToString(), "requested", ct);
@@ -271,7 +366,8 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
             var plan = Unprotect<ActionPlan>(definition.ProtectedSteps);
             await authorization.RequireAsync(definition.OwnerId, "action.execute", "action", action, ct);
             await authorization.PlanAsync(definition.OwnerId, plan, ct);
-            await authorization.PlanAsync(actor, plan, ct);
+            // Executing a fixed action delegates its owner's approved capabilities, not generic
+            // deployment/command permissions to the caller. Editing still requires every target.
         }
         else
         {
@@ -282,23 +378,43 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
     }
 
     internal async Task<AutomationRun> QueueAsync(Guid owner, Guid? deployment, Guid? action, Guid definition, string source,
-        string key, string operation, IReadOnlyDictionary<string, string>? parameters = null, string state = "queued", string code = "", Guid? requestedBy = null, CancellationToken ct = default)
+        string key, string operation, IReadOnlyDictionary<string, string>? parameters = null, string state = "queued", string code = "", Guid? requestedBy = null, CancellationToken ct = default, long? expectedRevision = null)
     {
-        await using var transaction = db.Database.CurrentTransaction is null ? await db.Database.BeginTransactionAsync(ct) : null;
-        // Serialize admission itself, not just dispatch. This makes the queue limit effective across
-        // concurrent webhook/manual/scheduler writers on both supported relational providers.
-        await db.Set<AutomationQueueGuard>().Where(x => x.Id == 1).ExecuteUpdateAsync(u => u.SetProperty(x => x.Revision, x => x.Revision + 1), ct);
-        var limits = await LimitsAsync(ct);
-        if (await db.Set<AutomationRun>().CountAsync(x => x.State == "queued", ct) >= limits.MaximumQueuedRuns)
-            throw new AutomationException("The automation queue limit has been reached.");
         ActionPlan plan;
+        ActionDefinition? definitionRow = null;
+        ActionExecutionBindings? executionBindings = null;
         if (operation == "image-check" || state != "queued") plan = new([]);
         else if (action is { } a)
         {
-            plan = Unprotect<ActionPlan>((await ActionAsync(a, ct)).ProtectedSteps);
+            definitionRow = await ActionAsync(a, ct);
+            await ValidateTriggerAsync(owner, a, deployment, operation, ct);
+            if (expectedRevision.HasValue && expectedRevision != definitionRow.Revision) throw new AutomationException("The action changed. Reload its inputs before running it.");
+            plan = Unprotect<ActionPlan>(definitionRow.ProtectedSteps);
             parameters = AutomationRules.Parameters(plan, parameters);
+            if ((plan.Parameters ?? []).Any(p => p.Input is "branch" or "version"))
+                executionBindings = await (inputs ?? throw new AutomationException("Input discovery unavailable.")).ResolveAsync(definitionRow.OwnerId, plan, parameters, ct);
         }
         else plan = new([new(operation, deployment)]);
+        // Remote discovery/resolution above must not hold the queue/security write locks.
+        await using var transaction = db.Database.CurrentTransaction is null ? await db.Database.BeginTransactionAsync(ct) : null;
+        await SecurityWriteGuard.LockAsync(db, ct);
+        await db.Set<AutomationQueueGuard>().Where(x => x.Id == 1).ExecuteUpdateAsync(u => u.SetProperty(x => x.Revision, x => x.Revision + 1), ct);
+        var limits = await LimitsAsync(ct);
+        if (state == "queued" && await db.Set<AutomationRun>().CountAsync(x => x.State == "queued", ct) >= limits.MaximumQueuedRuns)
+            throw new AutomationException("The automation queue limit has been reached.");
+        if (definitionRow is not null)
+        {
+            var current = await ActionAsync(definitionRow.Id, ct);
+            if (current.Revision != definitionRow.Revision) throw new AutomationException("The action changed. Reload its inputs before running it.");
+            await ValidateTriggerAsync(owner, definitionRow.Id, deployment, operation, ct);
+            if (source == "manual")
+            {
+                var inputDeployment = plan.DeploymentId ?? Guid.Empty;
+                var memory = await db.Set<ActionInputMemory>().SingleOrDefaultAsync(x => x.ActionId == definitionRow.Id && x.DeploymentId == inputDeployment, ct);
+                if (memory is null) { memory = new() { ActionId = definitionRow.Id, DeploymentId = inputDeployment }; db.Add(memory); }
+                memory.ActionRevision = definitionRow.Revision; memory.ProtectedValues = Protect(parameters);
+            }
+        }
         var protectedPlan = Protect(plan);
         if (operation == "image-check")
         {
@@ -310,9 +426,11 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
             RequestedBy = requestedBy ?? owner,
             ActionOwnerId = action is { } actionId ? (await ActionAsync(actionId, ct)).OwnerId : null,
             DefinitionId = definition, Source = source, OccurrenceKey = key, Operation = operation, State = state, Code = code,
-            CreatedAt = Now, CompletedAt = state == "queued" ? null : Now, ProtectedPlan = protectedPlan, ProtectedParameters = Protect(parameters ?? new Dictionary<string, string>()) };
+            CreatedAt = Now, CompletedAt = state == "queued" ? null : Now, ProtectedPlan = protectedPlan, ProtectedParameters = Protect(parameters ?? new Dictionary<string, string>()),
+            ProtectedBindings = Protect(executionBindings) };
         db.Add(run); await RecordAuditAsync(requestedBy ?? owner, "automation.trigger." + source, run.Id.ToString(), state, ct);
         db.Entry(run).State = EntityState.Detached;
+        foreach (var entry in db.ChangeTracker.Entries<ActionInputMemory>().ToArray()) entry.State = EntityState.Detached;
         if (transaction is not null) await transaction.CommitAsync(ct);
         return run;
     }
@@ -320,13 +438,23 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
     internal async Task<ActionDefinition> ActionAsync(Guid id, CancellationToken ct) =>
         await db.Set<ActionDefinition>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct) ?? throw new AutomationException("Action is unavailable.");
 
+    internal (IReadOnlyDictionary<string, string> Sources, IReadOnlyDictionary<string, string> Images) ExecutionBindings(
+        AutomationRun run, ActionPlan plan, ActionStep step, IReadOnlyDictionary<string, string> values)
+    {
+        var authored = AutomationRules.Bindings(plan, step.DeploymentId, step.Kind, values);
+        if (authored.Sources.Count == 0 && authored.Images.Count == 0) return authored;
+        var pinned = Unprotect<ActionExecutionBindings>(run.ProtectedBindings);
+        return (pinned.Sources, pinned.Images);
+    }
+
     private async Task<bool> Allowed(Guid actor, string permission, string type, Guid? id, CancellationToken ct)
     {
         try { await authorization.RequireAsync(actor, permission, type, id, ct); return true; }
         catch (AutomationAccessException) { return false; }
     }
-    private Task<bool> CanReadRun(Guid actor, AutomationRun run, CancellationToken ct) => run.ActionId is { } a
-        ? Allowed(actor, "action.read", "action", a, ct) : Allowed(actor, "automation.read", "deployment", run.DeploymentId, ct);
+    private async Task<bool> CanReadRun(Guid actor, AutomationRun run, CancellationToken ct) => run.ActionId is { } a
+        ? await Allowed(actor, "action.read", "action", a, ct) || await Allowed(actor, "action.execute", "action", a, ct)
+        : await Allowed(actor, "automation.read", "deployment", run.DeploymentId, ct);
 
     internal async Task RecordAuditAsync(Guid actor, string action, string resource, string result, CancellationToken ct)
     {

@@ -72,6 +72,7 @@ public static class AutomationRegistration
     public static IServiceCollection AddStanzaAutomation(this IServiceCollection services)
     {
         services.TryAddSingleton(TimeProvider.System);
+        services.AddMemoryCache(); services.AddScoped<ActionInputService>(); services.AddScoped<DeploymentActionOverview>();
         services.AddScoped<AutomationAuthorization>(); services.AddScoped<AutomationService>();
         services.AddScoped<WebhookReceiver>(); services.AddScoped<AutomationScheduler>(); services.AddScoped<AutomationExecutor>();
         services.AddScoped<AutomationOperationGuard>();

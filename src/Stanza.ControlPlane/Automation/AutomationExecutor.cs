@@ -70,8 +70,9 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
                 db.Add(result); await db.SaveChangesAsync(ct); db.Entry(result).State = EntityState.Detached;
                 // The durable running step precedes enqueue. A crash in the enqueue/record gap is uncertain,
                 // never permission to repeat a host command or deployment.
-                var operation = await operations.EnqueueAsync(new(run.OwnerId, step.DeploymentId, AutomationRules.OperationKind(step.Kind), "automation:" + run.Id.ToString("N"),
-                    step.AgentId, step.Execution), ct);
+                var bindings = automation.ExecutionBindings(run, plan, step, parameters);
+                var operation = await operations.EnqueueAsync(new(ExecutionActor(run), step.DeploymentId, AutomationRules.OperationKind(step.Kind), "automation:" + run.Id.ToString("N"),
+                    step.AgentId, step.Execution, bindings.Sources, bindings.Images), ct);
                 run.OperationId = operation.Id;
                 await db.Set<AutomationRun>().Where(x => x.Id == run.Id && x.LeaseOwner == workerId)
                     .ExecuteUpdateAsync(u => u.SetProperty(x => x.OperationId, operation.Id), ct);
@@ -116,7 +117,7 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
         if (run.ActionId is { } actionId)
         {
             var action = await automation.ActionAsync(actionId, ct);
-            if (!action.Enabled) throw new AutomationAccessException();
+            if (!action.Enabled || action.OwnerId != run.ActionOwnerId) throw new AutomationAccessException();
             await authorization.RequireAsync(run.OwnerId, "action.execute", "action", actionId, ct);
             await authorization.RequireAsync(action.OwnerId, "action.execute", "action", actionId, ct);
             if (run.ActionOwnerId is { } owner) await authorization.RequireAsync(owner, "action.execute", "action", actionId, ct);
@@ -124,7 +125,9 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
         if (run.Source == "schedule")
         {
             var definition = await db.Set<AutomationSchedule>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == run.DefinitionId, ct);
-            if (definition is null || !definition.Enabled || definition.OwnerId != run.OwnerId) throw new AutomationAccessException();
+            if (definition is null || !definition.Enabled || definition.OwnerId != run.OwnerId || definition.ActionId != run.ActionId || definition.DeploymentId != run.DeploymentId)
+                throw new AutomationAccessException();
+            await authorization.ScheduleAsync(run.OwnerId, definition.ActionId, definition.DeploymentId, ct);
         }
         if (run.Source == "webhook")
         {
@@ -142,19 +145,22 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
             if (definition.Mode == "auto-deploy") await authorization.RequireAsync(run.RequestedBy, "deployment.deploy", "deployment", definition.DeploymentId, ct);
             if (definition.Mode == "auto-deploy") await authorization.RequireAsync(run.OwnerId, "deployment.deploy", "deployment", definition.DeploymentId, ct);
         }
-        if (run.Source is "schedule" or "webhook" or "image-policy" or "manual-image-policy")
+        if (run.Source is "webhook" or "image-policy" or "manual-image-policy")
             await authorization.RequireAsync(run.OwnerId, "automation.manage", "deployment", run.DeploymentId, ct);
     }
 
     private async Task AuthorizeStepAsync(AutomationRun run, ActionStep step, CancellationToken ct)
     {
-        await authorization.TargetAsync(run.OwnerId, step, ct);
+        await authorization.TargetAsync(ExecutionActor(run), step, ct);
         if (run.ActionId is { } id)
         {
             await authorization.TargetAsync((await automation.ActionAsync(id, ct)).OwnerId, step, ct);
             if (run.ActionOwnerId is { } owner) await authorization.TargetAsync(owner, step, ct);
         }
     }
+
+    private static Guid ExecutionActor(AutomationRun run) => run.ActionId.HasValue
+        ? run.ActionOwnerId ?? throw new AutomationAccessException() : run.OwnerId;
 
     private async Task<OperationSummary> WaitAsync(AutomationRun run, Guid operationId, int seconds, CancellationToken ct)
     {
@@ -164,7 +170,7 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
         var waitService = scope?.ServiceProvider.GetRequiredService<IOperationService>() ?? operations;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(seconds), clock);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
-        var wait = waitService.WaitAsync(run.OwnerId, operationId, linked.Token);
+        var wait = waitService.WaitAsync(ExecutionActor(run), operationId, linked.Token);
         try
         {
             while (!wait.IsCompleted)
@@ -183,7 +189,7 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
         catch
         {
             linked.Cancel();
-            try { await operations.CancelAsync(run.OwnerId, operationId, CancellationToken.None); } catch { /* Revoked identity is not elevated for cancellation. */ }
+            try { await operations.CancelAsync(ExecutionActor(run), operationId, CancellationToken.None); } catch { /* Revoked identity is not elevated for cancellation. */ }
             try { await wait; } catch { /* Observe the cancelled wait. */ }
             if (timeout.IsCancellationRequested && !ct.IsCancellationRequested) throw new AutomationTimeoutException();
             throw;

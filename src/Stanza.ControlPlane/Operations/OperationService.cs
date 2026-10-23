@@ -39,12 +39,21 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         if (maintenance?.Paused == true) throw new OperationException("Recovery requires a Control Plane restart before execution can resume.");
         await using var transaction = await db.Database.BeginTransactionAsync(token);
         await SecurityWriteGuard.LockAsync(db, token);
+        if (automationGuard is not null)
+        {
+            try { await automationGuard.ValidateSubmissionAsync(submission, token); }
+            catch (AutomationAccessException) { throw new OperationException("The automation submission is not authorized."); }
+        }
+        else if (submission.SourceOverrides?.Count > 0 || submission.ImageOverrides?.Count > 0)
+            throw new OperationException("Action input authorization is unavailable.");
         if (submission.Kind == "host-exec" && !(await policies.GetAsync(token)).Policy.AllowHostActions)
             throw new OperationException("Host actions are disabled in operational policy. Host namespace prerequisites are also required on the Agent.");
         var id = Guid.NewGuid();
         var files = new List<AgentFile>();
         var environments = new List<AgentEnvironmentFile>();
         var sourceSnapshot = new DeploymentSourcesSnapshot([], []);
+        var imageOverrides = submission.ImageOverrides;
+        var actionSelections = automationGuard is not null ? await automationGuard.AuthoredBindingsAsync(submission.Trigger, submission.DeploymentId, submission.Kind, token) : null;
         Guid? parentAppliedOperationId = null;
         long revision = 0;
         Guid? target = submission.AgentId;
@@ -94,10 +103,15 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
             var baseline = await ImageBaselineAsync(submission.ActorId, submission.DeploymentId!.Value, target.Value, sourceSnapshot, null, null, token);
             parentAppliedOperationId = baseline.Operation.Id;
             sourceSnapshot = baseline.Sources;
+            imageOverrides = baseline.Request.ImageOverrides;
+            actionSelections = ReadActionSelections(baseline.Operation);
         }
+        sourceSnapshot = ApplySourceOverrides(sourceSnapshot, submission.SourceOverrides);
         var request = new AgentWorkRequest(id, submission.DeploymentId ?? Guid.Empty, submission.Kind, files, environments,
-            submission.Execution, sourceSnapshot.Git, sourceSnapshot.Registries, await agentPolicies.RuntimeAsync(target.Value, token));
+            submission.Execution, sourceSnapshot.Git, sourceSnapshot.Registries, await agentPolicies.RuntimeAsync(target.Value, token),
+            ImageOverrides: imageOverrides, SourceOverrides: submission.SourceOverrides);
         var serialized = JsonSerializer.SerializeToNode(request)!;
+        if (actionSelections is not null) serialized["_stanzaActionSelections"] = JsonSerializer.SerializeToNode(actionSelections);
         if (submission.DeploymentId is { } sourceDeployment && !ControlsExistingContainers(submission.Kind) && submission.Kind != "environment-preview")
             serialized["_stanzaSourceDefinitions"] = JsonSerializer.SerializeToNode(await SourceDefinitionsAsync(sourceDeployment, token));
         var requestText = serialized.ToJsonString();
@@ -182,6 +196,9 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
             var current = ControlsExistingContainers(row.Kind) || row.Kind == "environment-preview"
                 ? new DeploymentSourcesSnapshot([], []) : await sources.PrepareAsync(row.ActorId, deployment, ct);
             var captured = Request(row);
+            if (automationGuard is not null) await automationGuard.ValidateSubmissionAsync(new(row.ActorId, row.DeploymentId, row.Kind, row.Trigger,
+                row.RequiresMovePermission || row.Kind == "host-exec" ? row.AgentId : null, captured.Execution, captured.SourceOverrides, captured.ImageOverrides), ct);
+            current = ApplySourceOverrides(current, captured.SourceOverrides);
             var imagePolicy = await IsImagePolicyAsync(row.ActorId, row.Trigger, row.Kind, deployment, ct);
             if (imagePolicy != row.ParentAppliedOperationId.HasValue) throw new OperationException("The image-policy baseline is invalid.");
             if (imagePolicy)
@@ -189,7 +206,8 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
                 if (automationGuard is null) throw new OperationException("Image-policy execution authorization is unavailable.");
                 var baseline = await ImageBaselineAsync(row.ActorId, deployment, row.AgentId, current, row.ParentAppliedOperationId, row.Id, ct);
                 if (row.Revision != baseline.Operation.Revision || !SameFiles(captured.Files, baseline.Request.Files) ||
-                    !SameEnvironment(captured.EnvironmentFiles, baseline.Request.EnvironmentFiles))
+                    !SameEnvironment(captured.EnvironmentFiles, baseline.Request.EnvironmentFiles) ||
+                    JsonSerializer.Serialize(captured.ImageOverrides) != JsonSerializer.Serialize(baseline.Request.ImageOverrides))
                     throw new OperationException("The applied image-policy configuration changed; create a new operation snapshot.");
                 current = baseline.Sources;
             }
@@ -241,12 +259,25 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         if (!Guid.TryParseExact(trigger[11..], "N", out var runId)) throw new OperationException("Invalid automation execution identity.");
         var run = await db.Set<AutomationRun>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == runId, ct)
             ?? throw new OperationException("The automation execution no longer exists.");
-        if (run.OwnerId != actor || run.State != "running" || run.CancelRequested || run.LeaseUntil < clock.GetUtcNow().ToUnixTimeSeconds())
+        if ((run.ActionId.HasValue ? run.ActionOwnerId : run.OwnerId) != actor || run.State != "running" || run.CancelRequested || run.LeaseUntil < clock.GetUtcNow().ToUnixTimeSeconds())
             throw new OperationException("The automation execution is no longer authorized.");
         if (run.Source is not ("image-policy" or "manual-image-policy")) return false;
         if (kind != "deploy" || deployment is null || run.DeploymentId != deployment || run.Operation != "image-check" || run.ActionId is not null)
             throw new OperationException("An image policy may only redeploy its own applied deployment.");
         return true;
+    }
+
+    private static DeploymentSourcesSnapshot ApplySourceOverrides(DeploymentSourcesSnapshot sources, IReadOnlyDictionary<string, string>? overrides)
+    {
+        if (overrides is null || overrides.Count == 0) return sources;
+        if (overrides.Keys.Any(key => sources.Git.All(g => g.Destination != key))) throw new OperationException("The bound Git source was removed.");
+        return sources with { Git = sources.Git.Select(g => overrides.TryGetValue(g.Destination, out var reference) ? g with { Reference = reference } : g).ToArray() };
+    }
+
+    private ActionExecutionBindings? ReadActionSelections(OperationEntity row)
+    {
+        using var document = JsonDocument.Parse(Protector(row.Id).Unprotect(row.ProtectedRequest));
+        return document.RootElement.TryGetProperty("_stanzaActionSelections", out var selections) ? selections.Deserialize<ActionExecutionBindings>() : null;
     }
 
     private sealed record ImageBaseline(OperationEntity Operation, AgentWorkRequest Request, DeploymentSourcesSnapshot Sources);

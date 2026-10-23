@@ -10,18 +10,18 @@ public sealed class ActionEditorModel
     [Required, StringLength(100)] public string Name { get; set; } = "";
     public bool Enabled { get; set; }
     [Required] public string Concurrency { get; set; } = "queue";
-    [Required, StringLength(131072)] public string PlanJson { get; set; } = "{\"steps\":[{\"kind\":\"validate\",\"deploymentId\":\"REPLACE_WITH_DEPLOYMENT_ID\",\"timeoutSeconds\":300,\"failure\":\"stop\"}],\"parameters\":[]}";
+    [Required, StringLength(131072)] public string PlanJson { get; set; } = "{\"steps\":[{\"kind\":\"deploy\",\"deploymentId\":null,\"timeoutSeconds\":300,\"failure\":\"stop\"}],\"parameters\":[]}";
 }
 public sealed class ScheduleEditorModel
 {
     public Guid Id { get; set; }
     public long Revision { get; set; }
     [Required, StringLength(100)] public string Name { get; set; } = "";
-    public Guid DeploymentId { get; set; }
+    public Guid? DeploymentId { get; set; }
     public Guid? ActionId { get; set; }
     public string Operation { get; set; } = "deploy";
-    public string Expression { get; set; } = "0 * * * *";
-    public string TimeZone { get; set; } = "UTC";
+    [Required, StringLength(256)] public string Expression { get; set; } = "0 * * * *";
+    [Required, StringLength(100)] public string TimeZone { get; set; } = "UTC";
     public bool Enabled { get; set; }
     public string Overlap { get; set; } = "skip";
     public string MissedRun { get; set; } = "skip";
@@ -54,3 +54,6 @@ public sealed class ImagePolicyEditorModel
 }
 public sealed record WebhookSecretModel(Guid Id, string Secret);
 public sealed record WebhookHistoryModel(Guid Id, IReadOnlyList<WebhookDelivery> Deliveries);
+public sealed record ActionInvocationModel(Guid Id, long Revision, string Name, ActionPlan Plan, IReadOnlyDictionary<string, string> Values, string? Error = null);
+public sealed record ActionAccessSubject(Guid Id, string Name, bool IsGroup);
+public sealed record ActionAccessModel(Guid Id, string Name, IReadOnlyList<ActionAccessSubject> Subjects, IReadOnlyList<Security.GrantSummary> Grants);

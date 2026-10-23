@@ -14,8 +14,9 @@ public sealed record PortableActionStep(string Kind, string? Deployment, string?
     public override string ToString() => "Portable action step (execution inputs redacted)";
 }
 public sealed record PortableAction(string Id, string Owner, string Name, string Concurrency, bool Enabled,
-    IReadOnlyList<PortableActionStep> Steps, IReadOnlyList<ActionParameter>? Parameters);
-public sealed record PortableSchedule(string Owner, string Deployment, string? Action, string Operation, string Name,
+    IReadOnlyList<PortableActionStep> Steps, IReadOnlyList<ActionParameter>? Parameters,
+    string? Deployment = null, string? ButtonLabel = null, int Order = 0, string? Confirmation = null, bool ShowOnOverview = true);
+public sealed record PortableSchedule(string Owner, string? Deployment, string? Action, string Operation, string Name,
     string Expression, string TimeZone, string Overlap, string MissedRun, bool Enabled);
 public sealed record PortableWebhook(string Owner, string Deployment, string? Action, string Operation, string Name,
     string Provider, string Events, string Refs, string ParameterMapping, string? Secret, bool Enabled)
@@ -39,28 +40,31 @@ public sealed class AutomationParticipant(StanzaDbContext db, AutomationService 
     {
         var all = await automation.ListAsync(c.ActorId, ct);
         bool Included(Guid id) => c.DeploymentIds.Count == 0 || c.DeploymentIds.Contains(id);
-        var schedules = all.Schedules.Where(s => Included(s.DeploymentId)).ToArray();
+        var schedules = all.Schedules.Where(s => c.DeploymentIds.Count == 0 || s.DeploymentId is { } d && Included(d)).ToArray();
         var hooks = all.Webhooks.Where(s => Included(s.DeploymentId)).ToArray();
         var actions = new Dictionary<Guid, ActionDefinition>();
         foreach (var a in all.Actions)
         {
             var read = await automation.ReadActionAsync(c.ActorId, a.Id, ct);
-            if (c.DeploymentIds.Count == 0 || read.Plan.Steps.Any(s => s.DeploymentId is { } id && Included(id))) actions[a.Id] = a;
+            if (c.DeploymentIds.Count == 0 || read.Plan.DeploymentId is { } button && Included(button) || read.Plan.Steps.Any(s => s.DeploymentId is { } id && Included(id))) actions[a.Id] = a;
         }
         foreach (var id in schedules.Select(s => s.ActionId).Concat(hooks.Select(h => h.ActionId)).Where(x => x.HasValue).Select(x => x!.Value))
             actions[id] = (await automation.ReadActionAsync(c.ActorId, id, ct)).Definition;
+        schedules = all.Schedules.Where(s => c.DeploymentIds.Count == 0 || s.DeploymentId is { } d && Included(d) || s.ActionId is { } a && actions.ContainsKey(a)).ToArray();
         return new(actions.Values.ToArray(), schedules, hooks, all.ImagePolicies.Where(s => Included(s.DeploymentId)).ToArray(), []);
     }
     public async Task<IReadOnlyList<PortableResourceCandidate>> CollectReferencesAsync(PortableParticipantContext c, CancellationToken ct)
     {
         var selected = await Selected(c, ct);
         var result = new List<PortableResourceCandidate>();
-        var deployments = new HashSet<Guid>(selected.Schedules.Select(x => x.DeploymentId).Concat(selected.Webhooks.Select(x => x.DeploymentId)).Concat(selected.ImagePolicies.Select(x => x.DeploymentId)));
+        var deployments = new HashSet<Guid>(selected.Schedules.Where(x => x.DeploymentId.HasValue).Select(x => x.DeploymentId!.Value)
+            .Concat(selected.Webhooks.Select(x => x.DeploymentId)).Concat(selected.ImagePolicies.Select(x => x.DeploymentId)));
         var agents = new HashSet<Guid>();
         foreach (var action in selected.Actions)
         {
             var read = await automation.ReadActionAsync(c.ActorId, action.Id, ct);
             result.Add(new(action.Id, "action", action.Name));
+            if (read.Plan.DeploymentId is { } buttonDeployment) deployments.Add(buttonDeployment);
             foreach (var s in read.Plan.Steps)
             { if (s.DeploymentId is { } d) deployments.Add(d); if (s.AgentId is { } a) agents.Add(a); }
         }
@@ -85,11 +89,13 @@ public sealed class AutomationParticipant(StanzaDbContext db, AutomationService 
             var read = await automation.ReadActionAsync(c.ActorId, a.Id, ct);
             actions.Add(new(ParticipantSupport.Reference(c, a.Id, "action"), await support.Username(a.OwnerId, ct), a.Name, a.Concurrency, a.Enabled,
                 read.Plan.Steps.Select(s => new PortableActionStep(s.Kind, s.DeploymentId is { } d ? ParticipantSupport.Reference(c, d, "deployment") : null,
-                    s.AgentId is { } agent ? ParticipantSupport.Reference(c, agent, "agent") : null, s.Execution, s.TimeoutSeconds, s.Failure)).ToArray(), read.Plan.Parameters));
+                    s.AgentId is { } agent ? ParticipantSupport.Reference(c, agent, "agent") : null, s.Execution, s.TimeoutSeconds, s.Failure)).ToArray(), read.Plan.Parameters,
+                read.Plan.DeploymentId is { } display ? ParticipantSupport.Reference(c, display, "deployment") : null,
+                read.Plan.ButtonLabel, read.Plan.Order, read.Plan.Confirmation, read.Plan.ShowOnOverview));
         }
         var schedules = new List<PortableSchedule>();
         foreach (var s in selected.Schedules)
-            schedules.Add(new(await support.Username(s.OwnerId, ct), ParticipantSupport.Reference(c, s.DeploymentId, "deployment"),
+            schedules.Add(new(await support.Username(s.OwnerId, ct), s.DeploymentId is { } d ? ParticipantSupport.Reference(c, d, "deployment") : null,
                 s.ActionId is { } a ? ParticipantSupport.Reference(c, a, "action") : null, s.Operation, s.Name, s.Expression, s.TimeZone, s.Overlap, s.MissedRun, s.Enabled));
         var hooks = new List<PortableWebhook>();
         foreach (var h in selected.Webhooks)
@@ -135,8 +141,9 @@ public sealed class AutomationParticipant(StanzaDbContext db, AutomationService 
         {
             AutomationRules.Name(s.Name); automation.Preview(s.Expression, s.TimeZone, 1);
             if (s.Overlap is not ("skip" or "queue") || s.MissedRun is not ("skip" or "run-once")) throw new PortabilityException("Invalid scheduling policies.");
-            await Trigger(c, section, s.Owner, s.Deployment, s.Action, s.Operation, ct);
-            if (s.Action is { } a) AutomationRules.Parameters(await ActionPlan(c, section, a, true, ct), null);
+            await Trigger(c, section, s.Owner, s.Deployment, s.Action, s.Operation, ct, actionSchedule: s.Action is not null);
+            // Imported schedules are paused and have no shared input memory yet. Required inputs
+            // are checked when an operator enables the schedule after a manual run/default setup.
         }
         foreach (var h in section.Webhooks)
         {
@@ -155,34 +162,44 @@ public sealed class AutomationParticipant(StanzaDbContext db, AutomationService 
         }
         return [];
     }
-    private async Task Trigger(PortableParticipantImportContext c, PortableAutomation section, string username, string deploymentKey, string? actionKey, string operation, CancellationToken ct)
+    private async Task Trigger(PortableParticipantImportContext c, PortableAutomation section, string username, string? deploymentKey, string? actionKey, string operation, CancellationToken ct, bool actionSchedule = false)
     {
         var owner = await support.Owner(c, username, ct);
-        var deployment = await support.Resolve(c, deploymentKey, "deployment", ct, true);
-        await support.Require(c.ActorId, "automation.manage", "deployment", deployment, ct);
-        await support.Require(owner, "automation.manage", "deployment", deployment, ct);
+        var deployment = deploymentKey is { } key ? await support.Resolve(c, key, "deployment", ct, true) : null;
+        if (!actionSchedule)
+        {
+            if (deploymentKey is null) throw new PortabilityException("Deployment operations and webhooks require a deployment.");
+            await support.Require(c.ActorId, "automation.manage", "deployment", deployment, ct);
+            await support.Require(owner, "automation.manage", "deployment", deployment, ct);
+        }
         if (actionKey is { } a)
         {
             var id = await support.Resolve(c, a, "action", ct, true);
+            if (actionSchedule)
+            {
+                await support.Require(c.ActorId, "action.manage", "action", id, ct);
+                await support.Require(owner, "action.manage", "action", id, ct);
+            }
             await support.Require(c.ActorId, "action.execute", "action", id, ct); await support.Require(owner, "action.execute", "action", id, ct);
             var definition = section.Actions.SingleOrDefault(x => x.Id == a);
             if (definition is not null)
             {
                 var actionOwner = await support.Owner(c, definition.Owner, ct);
                 await support.Require(actionOwner, "action.execute", "action", id, ct);
-                // Both trigger owner and importing editor need each action target, not just action.execute.
+                    // Importing a trigger cannot broaden the importing editor's capabilities.
                 for (var i = 0; i < definition.Steps.Count; i++)
                 {
                     var step = definition.Steps[i];
                     var type = step.Kind == "host-exec" ? "agent" : "deployment";
                     var target = await support.Resolve(c, type == "agent" ? step.Agent! : step.Deployment!, type, ct, true);
-                    await support.Require(owner, Permission(step.Kind), type, target, ct);
+                    if (!actionSchedule) await support.Require(owner, Permission(step.Kind), type, target, ct);
                 }
             }
             else if (id is { } existing)
             {
                 var plan = (await automation.ReadActionAsync(c.ActorId, existing, ct)).Plan;
-                await authorization.PlanAsync(c.ActorId, plan, ct); await authorization.PlanAsync(owner, plan, ct);
+                await authorization.PlanAsync(c.ActorId, plan, ct);
+                if (!actionSchedule) await authorization.PlanAsync(owner, plan, ct);
             }
         }
         else
@@ -201,13 +218,21 @@ public sealed class AutomationParticipant(StanzaDbContext db, AutomationService 
     private async Task<ActionPlan> Plan(PortableAction action, PortableParticipantImportContext c, bool preview, CancellationToken ct)
     {
         var steps = new List<ActionStep>();
+        var deploymentIds = new Dictionary<string, Guid>();
         foreach (var step in action.Steps)
         {
-            Guid? deployment = step.Deployment is { } d ? await support.Resolve(c, d, "deployment", ct, preview) ?? Guid.NewGuid() : null;
+            Guid? deployment = null;
+            if (step.Deployment is { } d)
+            {
+                if (!deploymentIds.TryGetValue(d, out var mapped)) deploymentIds[d] = mapped = await support.Resolve(c, d, "deployment", ct, preview) ?? Guid.NewGuid();
+                deployment = mapped;
+            }
             Guid? agent = step.Agent is { } a ? await support.Resolve(c, a, "agent", ct, preview) ?? Guid.NewGuid() : null;
             steps.Add(new(step.Kind, deployment, agent, step.Execution, step.TimeoutSeconds, step.Failure));
         }
-        return new(steps, action.Parameters);
+        return new(steps, action.Parameters, action.Deployment is { } display ? deploymentIds.GetValueOrDefault(display,
+                await support.Resolve(c, display, "deployment", ct, preview) ?? Guid.NewGuid()) : null,
+            action.ButtonLabel, action.Order, action.Confirmation, action.ShowOnOverview);
     }
     private static string Permission(string kind) => kind switch
     {
@@ -240,7 +265,7 @@ public sealed class AutomationParticipant(StanzaDbContext db, AutomationService 
             foreach (var s in section.Schedules)
             {
                 var owner = await support.Owner(c, s.Owner, ct);
-                await automation.SaveScheduleAsync(owner, new() { DeploymentId = (await support.Resolve(c, s.Deployment, "deployment", ct))!.Value,
+                await automation.SaveScheduleAsync(owner, new() { DeploymentId = s.Deployment is { } d ? await support.Resolve(c, d, "deployment", ct) : null,
                     ActionId = s.Action is { } a ? await support.Resolve(c, a, "action", ct) : null, Name = s.Name, Operation = s.Operation,
                     Expression = s.Expression, TimeZone = s.TimeZone, Overlap = s.Overlap, MissedRun = s.MissedRun, Enabled = false }, 0, ct);
             }

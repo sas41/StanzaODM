@@ -1,18 +1,58 @@
 @model ActionEditorModel
 @{ ViewData["Title"] = "Action editor"; }
 <h1>Action editor</h1>
-<p>Steps execute in order. Every step requires a fixed deployment ID, or an explicit Agent ID for host-exec. Editing changes execution ownership to you. Saved runs retain an immutable plan.</p>
+<p>Steps execute in order. Editing changes execution ownership to you. An action grant delegates only these fixed steps and constrained inputs, never arbitrary commands. Saved runs retain an immutable plan.</p>
 <form method="post" action="/automation/actions/edit">@Html.AntiForgeryToken()
 <div asp-validation-summary="All"></div><input asp-for="Id" type="hidden" /><input asp-for="Revision" type="hidden" />
 <label asp-for="Name"></label><input asp-for="Name" />
 <label><input asp-for="Enabled" /> Enabled</label>
 <label asp-for="Concurrency"></label><select asp-for="Concurrency"><option value="queue">Queue conflicting action runs</option><option value="reject">Reject overlapping runs</option></select>
-<label asp-for="PlanJson">Action plan JSON</label><textarea asp-for="PlanJson" rows="25" spellcheck="false"></textarea>
-<button type="submit">Save action</button></form>
+<section data-action-editor hidden>
+    <h2>Deployment button</h2>
+    <label>Deployment<select data-plan-deployment><option value="">No overview button</option>
+    @foreach (var d in ViewData["ActionDeployments"] as IReadOnlyList<Stanza.ControlPlane.Sources.DeploymentSourceSummary> ?? []) { <option value="@d.DeploymentId">@d.Name</option> }
+    </select></label>
+    <label>Button label<input data-plan-label maxlength="100" placeholder="Uses action name if empty" /></label>
+    <label>Button order<input data-plan-order type="number" min="0" max="10000" value="0" /></label>
+    <label><input data-plan-visible type="checkbox" checked /> Show on overview</label>
+    <label>Confirmation message (optional)<input data-plan-confirmation maxlength="1000" placeholder="For example: Reset this environment's database?" /></label>
+    <h2>Inputs</h2><div data-editor-inputs></div><button type="button" data-add-input>Add input</button>
+    <h2>Steps</h2><div data-editor-steps></div><button type="button" data-add-step>Add step</button>
+    <p data-editor-error role="alert"></p>
+</section>
+<details data-advanced-plan><summary>Advanced action plan JSON / no-JavaScript editor</summary>
+<label asp-for="PlanJson">Action plan JSON</label><textarea asp-for="PlanJson" rows="25" spellcheck="false"></textarea></details>
+<button type="submit">Save action</button><button type="submit" name="configureSchedule" value="true">Save and configure schedule</button></form>
+<section class="panel" id="action-schedules"><h2>Periodic execution</h2>
+<p>Scheduled runs snapshot the <strong>shared last-used inputs</strong> at each occurrence. Defaults are used until an action has been run manually. Missing required inputs or unavailable branches/tags prevent execution; scheduled runs never overwrite the remembered values.</p>
+@if (Model.Id is { } scheduledAction)
+{
+    foreach (var schedule in ViewData["ActionSchedules"] as IReadOnlyList<Stanza.ControlPlane.Automation.AutomationSchedule> ?? [])
+    { @await Html.PartialAsync("_ActionSchedule", schedule) }
+    <h3>Add a schedule</h3>
+    @await Html.PartialAsync("_ActionSchedule", new Stanza.ControlPlane.Automation.AutomationSchedule { ActionId = scheduledAction, Name = (Model.Name.Length > 91 ? Model.Name[..91] : Model.Name) + " schedule" })
+}
+else
+{ <p>Save the action first using “Save and configure schedule”, then add one or more cron schedules here.</p> }
+<p class="field-help">Example: <code>0 3 * * *</code> runs daily at 03:00 in the selected timezone. Host maintenance such as Docker pruning can use a fixed host-exec step: executable <code>/usr/bin/docker</code>, arguments <code>system</code>, <code>prune</code>, <code>--force</code> (one per line). This affects the entire Docker daemon, not just one deployment. It requires enabled host actions and a host-capable Agent; keep maintenance actions admin-only. Volume cleanup is not included.</p>
+</section>
+<template id="action-deployment-options"><option value="">Select deployment</option>
+@foreach (var d in ViewData["ActionDeployments"] as IReadOnlyList<Stanza.ControlPlane.Sources.DeploymentSourceSummary> ?? []) { <option value="@d.DeploymentId">@d.Name</option> }
+</template>
+<template id="action-agent-options"><option value="">Select Agent</option>
+@foreach (var a in ViewData["ActionAgents"] as IReadOnlyList<Stanza.ControlPlane.Sources.SourceAgentSummary> ?? []) { <option value="@a.Id">@a.Name</option> }
+</template>
+<template id="action-source-options"><option value="">Select Git source destination</option>
+@foreach (var d in ViewData["ActionDeployments"] as IReadOnlyList<Stanza.ControlPlane.Sources.DeploymentSourceSummary> ?? [])
+{ foreach (var g in d.Git) { <option value="@g.Destination" data-deployment="@d.DeploymentId">@d.Name / @g.Destination</option> } }
+</template>
+<script src="~/js/action-editor.js" defer asp-append-version="true"></script>
+@if (Model.Id is { } actionId)
+{ <p>Grant QA access to this fixed action: <code>action.execute / action / @actionId</code>. Configure users or groups below; no generic command permission is needed. <a href="/automation/actions/@actionId/access">Manage action access →</a></p> }
 <h2>Plan format and safety</h2>
 <p>Supported kinds: git-refresh, validate, build, pull, deploy, start, stop, restart, remove, status, logs, container-exec, host-exec. Git refresh resolves and checks out configured sources into an isolated operation snapshot, then validates Compose; it requires both sources.manage and deployment.validate. It does not edit managed files or create a shared mutable checkout. Build/deploy also resolve their own immutable source snapshots. Each step supports timeoutSeconds (1–3600) and failure (stop/continue). Cancel stops remaining steps and requests cancellation of the active operation; side effects are not rolled back.</p>
 <pre>{"steps":[{"kind":"container-exec","deploymentId":"DEPLOYMENT_ID","timeoutSeconds":60,"failure":"stop","execution":{"executable":"/usr/bin/printf","arguments":["%s","${message}"],"service":"app","container":null,"user":"1000","workingDirectory":"/app","environment":{"MODE":"safe"}}}],"parameters":[{"name":"message","type":"string","required":true,"default":null}]}</pre>
-<p>Parameters support string, integer and boolean types. Optional integer/boolean parameters require a typed default. A parameter can replace only one entire argument, never an executable, target, environment value, or part of an argument. No shell is inserted. Interpreter steps may contain deliberately authored fixed scripts, but cannot accept external parameter substitutions.</p>
+<p>Inputs support text, fixed dropdowns, image tags and Git branches. Branches bind to a configured Git checkout destination; versions bind to an image repository and Compose services. Bound selections apply to execution snapshots, not managed files. Other parameters replace only whole structured arguments, never executables or shell fragments. No shell is inserted.</p>
 <p><strong>Host prerequisites:</strong> host-exec needs a separate host.execute grant and an approved Agent with explicitly enabled host execution and an isolated host execution adapter. An Agent-container command is never host execution. The operation fails if this capability is not available; Stanza never enables host privileges automatically.</p>
 <p>Container steps select exactly one service or container. Missing or stopped targets fail; they are never automatically started by exec.</p>
 <a href="/automation">Back</a>

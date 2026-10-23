@@ -11,7 +11,12 @@ namespace Stanza.ControlPlane.Controllers;
 public sealed class HomeController : Controller
 {
     [HttpGet("/")]
-    public IActionResult Index() => View();
+    public async Task<IActionResult> Index([FromServices] Automation.DeploymentActionOverview overview, CancellationToken ct) =>
+        View(await overview.ReadAsync(Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value), ct));
+
+    [HttpGet("/overview/deployments")]
+    public async Task<IActionResult> Deployments([FromServices] Automation.DeploymentActionOverview overview, CancellationToken ct) =>
+        PartialView("_Deployments", await overview.ReadAsync(Guid.Parse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value), ct));
 
     [HttpGet("/status")]
     public async Task<IActionResult> Status([FromServices] StanzaDbContext store, [FromServices] AgentAdministrationService agents, CancellationToken token)

@@ -1,16 +1,20 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Stanza.Core.Contracts;
+using Stanza.Core.Automation;
 
 namespace Stanza.ControlPlane.Automation;
 
 public sealed class AutomationException(string message) : Exception(message);
 public sealed class AutomationAccessException() : Exception("Current access does not permit this automation or one of its targets.");
 
-public sealed record ActionParameter(string Name, string Type = "string", bool Required = true, string? Default = null);
+public sealed record ActionParameter(string Name, string Type = "string", bool Required = true, string? Default = null,
+    string Input = "text", string? Label = null, IReadOnlyList<string>? Options = null,
+    string? Source = null, string? Repository = null, IReadOnlyList<string>? Services = null);
 public sealed record ActionStep(string Kind, Guid? DeploymentId = null, Guid? AgentId = null,
     AgentExecution? Execution = null, int TimeoutSeconds = 300, string Failure = "stop");
-public sealed record ActionPlan(IReadOnlyList<ActionStep> Steps, IReadOnlyList<ActionParameter>? Parameters = null)
+public sealed record ActionPlan(IReadOnlyList<ActionStep> Steps, IReadOnlyList<ActionParameter>? Parameters = null,
+    Guid? DeploymentId = null, string? ButtonLabel = null, int Order = 0, string? Confirmation = null, bool ShowOnOverview = true)
 {
     public override string ToString() => "ActionPlan { [REDACTED] }";
 }
@@ -56,10 +60,35 @@ public static partial class AutomationRules
             throw new AutomationException("Duplicate parameter names.");
         foreach (var p in parameters)
         {
+            if (p.Input is not ("text" or "dropdown" or "version" or "branch") || p.Label?.Length > 100 ||
+                p.Input != "text" && p.Type != "string") throw new AutomationException("Select a supported input control; selectors require string values.");
+            if (p.Input == "dropdown" && (p.Options is not { Count: > 0 and <= 200 } ||
+                p.Options.Any(x => string.IsNullOrWhiteSpace(x) || x.Length > 4096) || p.Options.Distinct(StringComparer.Ordinal).Count() != p.Options.Count))
+                throw new AutomationException("Dropdowns require 1–200 distinct non-empty options.");
+            if (p.Input is "branch" or "version")
+            {
+                if (plan.DeploymentId is null || !plan.Steps.Any(s => s is not null && s.DeploymentId == plan.DeploymentId && s.Kind is "validate" or "git-refresh" or "build" or "pull" or "deploy"))
+                    throw new AutomationException("Bound inputs require a deployment button and a validate/build/pull/deploy step for that deployment.");
+                if (!p.Required) throw new AutomationException("Branch and version inputs must be required.");
+                if (p.Input == "branch" && (string.IsNullOrWhiteSpace(p.Source) || p.Source.Length > 256))
+                    throw new AutomationException("Bind branches to a Git source checkout destination.");
+                if (p.Input == "version")
+                {
+                    try { ActionInputRules.Repository(p.Repository!); }
+                    catch (ArgumentException e) { throw new AutomationException(e.Message); }
+                    if (p.Services is not { Count: > 0 and <= 100 } || p.Services.Any(x => string.IsNullOrWhiteSpace(x) || x.Length > 100 || !x.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-' or '.')))
+                        throw new AutomationException("Select target Compose services for image versions.");
+                }
+            }
             if (!p.Required && p.Type != "string" && p.Default is null)
                 throw new AutomationException("Optional integer/boolean parameters require a typed default.");
             if (p.Default is not null) ValidateValue(p, p.Default);
         }
+        if (plan.DeploymentId == Guid.Empty || plan.ButtonLabel?.Length > 100 || plan.Confirmation?.Length > 1000 || plan.Order is < 0 or > 10000)
+            throw new AutomationException("Invalid deployment button settings.");
+        if (parameters.Where(p => p.Input == "branch").Select(p => p.Source).Distinct().Count() != parameters.Count(p => p.Input == "branch") ||
+            parameters.Where(p => p.Input == "version").SelectMany(p => p.Services!).GroupBy(x => x).Any(g => g.Count() > 1))
+            throw new AutomationException("Each source or service can have only one input binding.");
         foreach (var step in plan.Steps)
         {
             if (step is null || step.TimeoutSeconds is < 1 or > 3600 || step.Failure is not ("stop" or "continue"))
@@ -123,8 +152,26 @@ public static partial class AutomationRules
             a.StartsWith("${", StringComparison.Ordinal) && a.EndsWith('}') ? values[a[2..^1]] : a).ToArray() }
     };
 
+    public static (IReadOnlyDictionary<string, string> Sources, IReadOnlyDictionary<string, string> Images) Bindings(
+        ActionPlan plan, Guid? deployment, string kind, IReadOnlyDictionary<string, string> values)
+    {
+        var sources = new Dictionary<string, string>(StringComparer.Ordinal);
+        var images = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (deployment != plan.DeploymentId || kind is not ("validate" or "git-refresh" or "build" or "pull" or "deploy")) return (sources, images);
+        foreach (var p in plan.Parameters ?? [])
+        {
+            if (p.Input == "branch") sources.Add(p.Source!, "refs/heads/" + values[p.Name]);
+            if (p.Input == "version")
+                foreach (var service in p.Services!) images.Add(service, p.Repository + ":" + values[p.Name]);
+        }
+        return (sources, images);
+    }
+
     private static void ValidateValue(ActionParameter p, string value)
     {
+        if (p.Required && string.IsNullOrWhiteSpace(value) || p.Input == "dropdown" && !(p.Options?.Contains(value, StringComparer.Ordinal) ?? false) ||
+            p.Input == "branch" && !ActionInputRules.IsBranch(value) || p.Input == "version" && !ActionInputRules.IsTag(value))
+            throw new AutomationException("Select a valid value for " + p.Name + ".");
         if (value.Length > 4096 || value.Contains('\0') || (p.Type == "integer" && !long.TryParse(value, System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out _))
             || (p.Type == "boolean" && value is not ("true" or "false"))) throw new AutomationException("An action parameter has an invalid type or size.");
     }

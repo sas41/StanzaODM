@@ -30,18 +30,21 @@ public sealed class ActionTests
     }
 
     [Fact]
-    public async Task ActionGrantDoesNotAuthorizeCrossDeploymentOrHostTargets()
+    public async Task ActionGrantDelegatesOnlyItsFixedCrossDeploymentAndHostSteps()
     {
         await using var s = await AutomationTestStore.Create();
         var action = await s.Action(new([new("deploy", s.Deployment), new("deploy", s.OtherDeployment)]));
-        await s.Grant("action.execute", "action", action.Id); await s.Grant("deployment.deploy", "deployment", s.Deployment);
-        await Assert.ThrowsAsync<AutomationAccessException>(() => s.Service.QueueActionAsync(s.User, action.Id));
-        await s.Grant("deployment.deploy", "deployment", s.OtherDeployment);
+        await s.Grant("action.execute", "action", action.Id);
         await s.Service.QueueActionAsync(s.User, action.Id);
         await s.Executor().ExecuteNextAsync(); Assert.Equal(2, s.Operations.Submissions.Count);
         var host = await s.Action(new([new("host-exec", AgentId: Guid.NewGuid(), Execution: new("true", []))]));
         await s.Grant("action.execute", "action", host.Id);
-        await Assert.ThrowsAsync<AutomationAccessException>(() => s.Service.QueueActionAsync(s.User, host.Id));
+        await s.Service.QueueActionAsync(s.User, host.Id);
+        await s.Executor().ExecuteNextAsync();
+        Assert.All(s.Operations.Submissions, x => Assert.Equal(s.Root, x.ActorId));
+        Assert.False(await s.Access.IsAllowedAsync(s.User, "host.execute", "agent", host.Id));
+        var other = await s.Action();
+        await Assert.ThrowsAsync<AutomationAccessException>(() => s.Service.QueueActionAsync(s.User, other.Id));
     }
 
     [Fact]
@@ -61,7 +64,7 @@ public sealed class ActionTests
     public async Task RevokedQueuedOwnerDoesNotExecuteAndDisabledActionStopsQueuedWork()
     {
         await using var s = await AutomationTestStore.Create(); var action = await s.Action();
-        await s.Grant("action.execute", "action", action.Id); var grant = await s.Grant("deployment.deploy", "deployment", s.Deployment);
+        var grant = await s.Grant("action.execute", "action", action.Id);
         var run = await s.Service.QueueActionAsync(s.User, action.Id);
         await s.Access.RemoveGrantAsync(s.Root, grant.Id); await s.Executor().ExecuteNextAsync();
         Assert.Empty(s.Operations.Submissions); Assert.Equal("denied", (await s.Service.ReadRunAsync(s.Root, run.Id)).Run.State);
@@ -147,7 +150,8 @@ public sealed class ActionTests
         var execute = await s.Grant("action.execute", "action", action.Id); await s.Grant("deployment.deploy", "deployment", s.Deployment);
         var run = await s.Service.QueueActionAsync(s.User, action.Id); Assert.True(await s.Executor().ClaimAsync(run));
         var guard = new AutomationOperationGuard(s.Db, s.Service, s.Authorization); var trigger = "automation:" + run.Id.ToString("N");
-        await guard.AuthorizeAsync(s.User, trigger, "deploy", s.Deployment, Guid.NewGuid());
+        await guard.AuthorizeAsync(s.Root, trigger, "deploy", s.Deployment, Guid.NewGuid());
+        await Assert.ThrowsAsync<AutomationAccessException>(() => guard.AuthorizeAsync(s.User, trigger, "deploy", s.Deployment, Guid.NewGuid()));
         await s.Access.RemoveGrantAsync(s.Root, execute.Id);
         await Assert.ThrowsAsync<AutomationAccessException>(() => guard.AuthorizeAsync(s.User, trigger, "deploy", s.Deployment, Guid.NewGuid()));
         await Assert.ThrowsAsync<AutomationAccessException>(() => guard.AuthorizeAsync(s.Root, trigger, "deploy", s.Deployment, Guid.NewGuid()));
@@ -174,9 +178,7 @@ public sealed class ActionTests
     public async Task GitRefreshUsesNormalSourcePreparationAndValidationRatherThanAdHocShell()
     {
         await using var s = await AutomationTestStore.Create(); var action = await s.Action(new([new("git-refresh", s.Deployment)]));
-        await s.Grant("action.execute", "action", action.Id); await s.Grant("deployment.validate", "deployment", s.Deployment);
-        await Assert.ThrowsAsync<AutomationAccessException>(() => s.Service.QueueActionAsync(s.User, action.Id));
-        await s.Grant("sources.manage", "deployment", s.Deployment);
+        await s.Grant("action.execute", "action", action.Id);
         var run = await s.Service.QueueActionAsync(s.User, action.Id); await s.Executor().ExecuteNextAsync();
         var operation = Assert.Single(s.Operations.Submissions); Assert.Equal("validate", operation.Kind); Assert.Null(operation.Execution);
         Assert.Equal("git-refresh", Assert.Single((await s.Service.ReadRunAsync(s.Root, run.Id)).Steps).Kind);

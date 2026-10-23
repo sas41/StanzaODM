@@ -1,5 +1,6 @@
 @model Stanza.ControlPlane.Automation.AutomationRunDetails
 @{ ViewData["Title"] = "Automation run"; }
+<div id="action-run-content" data-action-run="@Model.Run.Id" data-version="@Stanza.ControlPlane.Automation.AutomationLive.Version(Model)">
 <h1>Automation run</h1>
 <p>@Model.Run.Id · @Model.Run.Source · @Model.Run.State · @Model.Run.Code</p>
 <p>Execution identity: @Model.Run.OwnerId · requested by: @Model.Run.RequestedBy · requested: @DateTimeOffset.FromUnixTimeSeconds(Model.Run.CreatedAt).ToString("u")</p>
@@ -15,3 +16,5 @@
   <form method="post" action="/automation/runs/@Model.Run.Id/reconcile">@Html.AntiForgeryToken()<label><input type="checkbox" name="confirmedStopped" value="true" required /> I verified externally that the command has stopped and reconciled the target state. I understand this does not undo side effects or retry anything.</label><button>Record reconciliation and release automation lock</button></form> }
 @if (Model.Run.ReconciledBy is { } reconciler) { <p>Externally reconciled by @reconciler. No automatic replay occurred.</p> }
 <p><a href="/automation/runs/@Model.Run.Id">Refresh</a> · <a href="/automation">Back</a></p>
+</div>
+<script src="~/js/action-run.js" defer asp-append-version="true"></script>

@@ -1,0 +1,33 @@
+@model Stanza.ControlPlane.Models.ActionInvocationModel
+<form method="post" action="/automation/actions/@Model.Id/submit" data-action-invocation>
+    @Html.AntiForgeryToken()
+    <input type="hidden" name="revision" value="@Model.Revision" />
+    <h2>@Model.Name</h2>
+    <p class="field-help">Values are shared for this deployment/action. These are the last submitted selections, not necessarily what is currently deployed.</p>
+    @if (Model.Error is not null) { <p class="notice error" role="alert">@Model.Error</p> }
+    @foreach (var p in Model.Plan.Parameters ?? [])
+    {
+        var current = Model.Values.GetValueOrDefault(p.Name) ?? "";
+        <label for="action-input-@p.Name">@(p.Label ?? p.Name)</label>
+        if (p.Input == "dropdown")
+        {
+            <select id="action-input-@p.Name" name="values[@p.Name]" required="@p.Required"><option value="">Select…</option>
+            @foreach (var option in p.Options ?? []) { <option value="@option" selected="@(option == current)">@option</option> }
+            </select>
+        }
+        else if (p.Input is "version" or "branch")
+        {
+            <div data-action-choice data-url="/automation/actions/@Model.Id/choices" data-name="@p.Name" data-selected="@current">
+                <input type="search" aria-label="Search @(p.Label ?? p.Name)" placeholder="Search available @(p.Input == "branch" ? "branches" : "tags")…" data-choice-search autocomplete="off" />
+                <select id="action-input-@p.Name" name="values[@p.Name]" required data-choice-select><option value="">Loading choices…</option></select>
+                <button type="button" data-choice-refresh>Refresh</button><button type="button" data-choice-more hidden>More</button>
+                <p class="field-help" data-choice-message aria-live="polite"></p>
+            </div>
+        }
+        else
+        { <input id="action-input-@p.Name" name="values[@p.Name]" value="@current" required="@p.Required" maxlength="4096" /> }
+    }
+    @if (!string.IsNullOrEmpty(Model.Plan.Confirmation))
+    { <label><input type="checkbox" name="confirmed" value="true" required /> @Model.Plan.Confirmation</label> }
+    <button type="submit">Run @Model.Name</button>
+</form>

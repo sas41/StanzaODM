@@ -170,6 +170,7 @@ public sealed class ControlPlaneEntryPoint
         app.MapStanzaTerminals();
         app.MapStanzaLogs();
         app.MapStanzaOperationLive();
+        app.MapStanzaActionLive();
         await app.RunAsync();
     }
 }

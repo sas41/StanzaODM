@@ -1,6 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using Stanza.ControlPlane.Persistence;
 using Stanza.Core.Automation;
+using Stanza.ControlPlane.Security;
+using Stanza.ControlPlane.Sources;
+using Stanza.ControlPlane.Transport;
 
 namespace Stanza.ControlPlane.Automation;
 
@@ -22,6 +25,7 @@ public sealed class AutomationScheduler(StanzaDbContext db, AutomationService au
     {
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         if (!schedule.Enabled || schedule.NextRunAt > automation.Now) return false;
+        await SecurityWriteGuard.LockAsync(db, ct);
         long next;
         try { next = new CronSchedule(schedule.Expression).Next(clock.GetUtcNow(), TimeZoneInfo.FindSystemTimeZoneById(schedule.TimeZone)).ToUnixTimeSeconds(); }
         catch (Exception e) when (e is ArgumentException or TimeZoneNotFoundException or InvalidTimeZoneException)
@@ -37,24 +41,38 @@ public sealed class AutomationScheduler(StanzaDbContext db, AutomationService au
         if (updated != 1) return false;
         await db.Set<AutomationQueueGuard>().Where(x => x.Id == 1).ExecuteUpdateAsync(u => u.SetProperty(x => x.Revision, x => x.Revision + 1), ct);
         var state = "queued"; var code = "";
+        IReadOnlyDictionary<string, string>? parameters = null;
         if (schedule.MissedRun == "skip" && schedule.NextRunAt < automation.Now - 60) { state = "skipped"; code = "missed-occurrence"; }
         else if (schedule.Overlap == "skip" && await db.Set<AutomationRun>().AnyAsync(x => x.DefinitionId == schedule.Id && (x.State == "queued" || x.State == "running"), ct))
         { state = "skipped"; code = "overlap"; }
         try
         {
-            await authorization.RequireAsync(schedule.OwnerId, "automation.manage", "deployment", schedule.DeploymentId, ct);
+            await authorization.ScheduleAsync(schedule.OwnerId, schedule.ActionId, schedule.DeploymentId, ct);
             await automation.ValidateTriggerAsync(schedule.OwnerId, schedule.ActionId, schedule.DeploymentId, schedule.Operation, ct);
+            if (state == "queued" && schedule.ActionId is { } actionId) parameters = await automation.ScheduledParametersAsync(actionId, ct);
         }
         catch (AutomationAccessException) { state = "denied"; code = "access-revoked"; }
-        catch (AutomationException) { state = "denied"; code = "target-unavailable"; }
-        await automation.QueueAsync(schedule.OwnerId, schedule.DeploymentId, schedule.ActionId, schedule.Id, "schedule",
-            $"schedule:{schedule.Id:N}:{schedule.NextRunAt}", schedule.Operation, state: state, code: code, ct: ct);
+        catch (AutomationException) { state = "denied"; code = "target-or-inputs-unavailable"; }
+        var key = $"schedule:{schedule.Id:N}:{schedule.NextRunAt}";
+        try
+        {
+            await automation.QueueAsync(schedule.OwnerId, schedule.DeploymentId, schedule.ActionId, schedule.Id, "schedule",
+                key, schedule.Operation, parameters, state: state, code: code, ct: ct);
+        }
+        catch (Exception e) when (state == "queued" && e is AutomationException or AutomationAccessException or SourceException or SourceAccessException or AgentUnavailableException)
+        {
+            // A removed branch, denied registry, or full queue must record this occurrence and
+            // advance, rather than retry the same destructive job on every scheduler tick.
+            await automation.QueueAsync(schedule.OwnerId, schedule.DeploymentId, schedule.ActionId, schedule.Id, "schedule",
+                key, schedule.Operation, state: "denied", code: "queue-or-inputs-unavailable", ct: ct);
+        }
         await transaction.CommitAsync(ct); return true;
     }
 
     private async Task ClaimImageCheckAsync(ImageUpdatePolicy policy, CancellationToken ct)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await SecurityWriteGuard.LockAsync(db, ct);
         var next = automation.Now + policy.FrequencyMinutes * 60L;
         if (await db.Set<ImageUpdatePolicy>().Where(x => x.Id == policy.Id && x.Enabled && x.Revision == policy.Revision && x.NextRunAt == policy.NextRunAt)
             .ExecuteUpdateAsync(u => u.SetProperty(x => x.NextRunAt, next).SetProperty(x => x.Revision, x => x.Revision + 1), ct) != 1) return;

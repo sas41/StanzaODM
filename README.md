@@ -185,3 +185,30 @@ Compose is maintained in Stanza; Git supplies isolated application build inputs,
 3. Open **Clone, move & import/export → Move deployment placement**, select the deployment/destination, preview variables/storage warnings, and acknowledge the source-stop/destination-start operation.
 4. Queue the guided move and monitor its operations: destination validation, source stop, destination deploy/health check, then placement update. Previews are warnings, not proof of host-wide conflict freedom.
 5. On success verify the destination application, then explicitly request source-container cleanup if desired. On failure inspect both Agents and the recovery record before repeating commands; do not assume rollback or delete source volumes. Use **Clone** instead to create a separate inactive deployment identity.
+
+## Scheduled maintenance: Docker cleanup
+
+You can schedule `docker system prune` as an admin-only host action. **This affects the entire Docker daemon, not just one deployment**: it removes stopped containers, unused networks, dangling images and unused build cache. Review the impact on every environment sharing that daemon before enabling it.
+
+1. Use an approved Agent with the opt-in `compose.agent.privileged.yaml` profile described above, and enable host actions in the Control Plane's **Operational policy**. Ordinary Agents cannot execute host commands.
+2. Open **Actions & automation → New action**, name it `Docker cleanup`, and enable the action. No deployment or inputs are required.
+3. Configure one step:
+   - **Operation:** `host-exec`
+   - **Agent:** the host to clean up
+   - **Executable:** `/usr/bin/docker` (adjust if Docker is installed elsewhere on that host)
+   - **Arguments:** one per line, without a shell wrapper:
+
+   ```text
+   system
+   prune
+   --force
+   ```
+
+4. Choose **Save and configure schedule**. Under **Periodic execution**, add a schedule with:
+   - **Cron:** `0 3 * * *`
+   - **Timezone:** `UTC` (daily at 03:00 UTC)
+   - **Overlap:** skip this occurrence
+   - **Missed occurrences:** skip
+5. Preview the next runs, enable periodic execution, and save the schedule. Keep the action admin-only: do not grant it to ordinary users or groups. Monitor scheduled results under **Actions & automation**.
+
+The example deliberately omits `--volumes` and `--all`: it does not request volume cleanup or removal of all unused images. Do not add those flags without reviewing their broader impact. `--force` suppresses Docker's interactive confirmation, so review the action before enabling its schedule. Nothing is pruned merely by saving a paused schedule.
