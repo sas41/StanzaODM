@@ -400,7 +400,7 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
         await SecurityWriteGuard.LockAsync(db, ct);
         await db.Set<AutomationQueueGuard>().Where(x => x.Id == 1).ExecuteUpdateAsync(u => u.SetProperty(x => x.Revision, x => x.Revision + 1), ct);
         var limits = await LimitsAsync(ct);
-        if (state == "queued" && await db.Set<AutomationRun>().CountAsync(x => x.State == "queued", ct) >= limits.MaximumQueuedRuns)
+        if (state == "queued" && limits.MaximumQueuedRuns > 0 && await db.Set<AutomationRun>().CountAsync(x => x.State == "queued", ct) >= limits.MaximumQueuedRuns)
             throw new AutomationException("The automation queue limit has been reached.");
         if (definitionRow is not null)
         {

@@ -11,8 +11,8 @@ public sealed class LiveConnectionLeases
 
     public LiveConnectionLeases(int perAccountLimit = 4, int totalLimit = 1024)
     {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(perAccountLimit);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(totalLimit);
+        ArgumentOutOfRangeException.ThrowIfNegative(perAccountLimit);
+        ArgumentOutOfRangeException.ThrowIfNegative(totalLimit);
         this.perAccountLimit = perAccountLimit;
         this.totalLimit = totalLimit;
     }
@@ -22,7 +22,9 @@ public sealed class LiveConnectionLeases
         lock (gate)
         {
             accounts.TryGetValue(accountId, out var count);
-            if (total >= (maximumTotal ?? totalLimit) || count >= (perUser ?? perAccountLimit)) return null;
+            var instance = maximumTotal ?? totalLimit;
+            var user = perUser ?? perAccountLimit;
+            if (instance > 0 && total >= instance || user > 0 && count >= user) return null;
             accounts[accountId] = count + 1;
             total++;
             return new Lease(this, accountId);

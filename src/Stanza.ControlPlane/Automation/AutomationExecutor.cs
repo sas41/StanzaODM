@@ -79,7 +79,8 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
                 await db.Set<AutomationStepRun>().Where(x => x.RunId == run.Id && x.Index == i)
                     .ExecuteUpdateAsync(u => u.SetProperty(x => x.OperationId, operation.Id).SetProperty(x => x.AgentId, operation.AgentId), ct);
                 await automation.RecordAuditAsync(run.OwnerId, "automation.target.resolved", $"{run.Id}:{i}:{operation.AgentId}", step.Kind, ct);
-                var completed = await WaitAsync(run, operation.Id, step.TimeoutSeconds, ct);
+                // The operation worker owns the one global deadline, starting at execution rather than queue time.
+                var completed = await WaitAsync(run, operation.Id, 0, ct);
                 var operationState = completed.State.ToLowerInvariant();
                 var succeeded = operationState == "succeeded";
                 await db.Set<AutomationStepRun>().Where(x => x.RunId == run.Id && x.Index == i)
@@ -168,7 +169,7 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
         // context by the operation waiter and our access/lease/cancellation heartbeat.
         using var scope = scopes?.CreateScope();
         var waitService = scope?.ServiceProvider.GetRequiredService<IOperationService>() ?? operations;
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(seconds), clock);
+        using var timeout = new CancellationTokenSource(Stanza.Core.Contracts.LimitPolicy.Duration(seconds), clock);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
         var wait = waitService.WaitAsync(ExecutionActor(run), operationId, linked.Token);
         try

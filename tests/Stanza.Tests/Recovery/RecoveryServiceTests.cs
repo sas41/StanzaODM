@@ -24,6 +24,30 @@ public sealed class RecoveryServiceTests
     internal const string Password = "the-account-password-123";
 
     [Fact]
+    public async Task PreOutputSchemaBackupRestoresOnAnUpgradedFreshInstanceWithoutLosingExistingData()
+    {
+        await using var source = await RecoveryFixture.CreateAsync();
+        var root = await source.Accounts.BootstrapAsync("root", Password);
+        source.Protector.Protect("generate-key");
+        source.Db.Settings.Add(new() { Key = "saved-custom-value", Value = "preserved" }); await source.Db.SaveChangesAsync();
+        var archive = Decode(await source.Service.BackupAsync(root.Id, Passphrase));
+        var output = Table(archive, "OperationOutput"); archive["Tables"]!.AsArray().Remove(output);
+        var service = typeof(RecoveryService);
+        var ordered = (List<ITable>)service.GetMethod("OrderedTables", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(source.Service, null)!;
+        var previous = ordered.Where(x => x.Name != "OperationOutput").ToList();
+        archive["SchemaFingerprint"] = (string)service.GetMethod("Fingerprint", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(source.Service, [previous])!;
+        await using var target = await RecoveryFixture.CreateAsync();
+        await DatabaseUpgrader.UpgradeAsync(target.Db);
+        await target.Service.RestoreAsync(Encode(archive), Passphrase);
+        Assert.NotNull(await target.Accounts.AuthenticateAsync("root", Password));
+        Assert.Equal("preserved", (await target.Db.Settings.SingleAsync(x => x.Key == "saved-custom-value")).Value);
+        Assert.Empty(await target.Db.Set<Stanza.ControlPlane.Operations.OperationOutputEntity>().ToListAsync());
+        await DatabaseUpgrader.UpgradeAsync(target.Db);
+        var restoredPolicy = JsonSerializer.Deserialize<Stanza.ControlPlane.Configuration.PolicyEditor>((await target.Db.Settings.SingleAsync(x => x.Key == "operational-policy")).Value)!;
+        Assert.Equal(300, restoredPolicy.Policy.OperationTimeoutSeconds);
+    }
+
+    [Fact]
     public async Task SqliteRoundTripPreservesEveryMappedTablePasswordHashesManagedFilesAndRestartedSecrets()
     {
         await using var source = await RecoveryFixture.CreateAsync();

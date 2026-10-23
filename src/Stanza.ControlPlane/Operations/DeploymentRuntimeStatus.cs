@@ -24,8 +24,8 @@ public sealed class DeploymentRuntimeStatusService(StanzaDbContext db, AccessSer
         var runtime = await db.Set<DeploymentRuntimeEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.DeploymentId == deployment, ct);
         if (runtime is null) return null;
         var observed = runtime.ObservedAt > 0 ? DateTimeOffset.FromUnixTimeSeconds(runtime.ObservedAt) : (DateTimeOffset?)null;
-        var interval = (await policies.GetAsync(ct)).Policy.StatusIntervalSeconds;
+        var interval = (await policies.GetAsync(ct)).Policy.StaleStatusSeconds;
         return new(runtime.AgentId, runtime.Revision, runtime.DesiredState, runtime.ObservedState, observed,
-            agents.IsConnected(runtime.AgentId), observed is null || clock.GetUtcNow() - observed > TimeSpan.FromSeconds(interval));
+            agents.IsConnected(runtime.AgentId), observed is null || interval > 0 && clock.GetUtcNow() - observed > TimeSpan.FromSeconds(interval));
     }
 }

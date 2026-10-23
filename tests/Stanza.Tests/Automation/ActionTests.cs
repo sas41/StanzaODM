@@ -121,16 +121,16 @@ public sealed class ActionTests
     }
 
     [Fact]
-    public async Task StepTimeoutRequestsCancellationAndRetainsUncertainLock()
+    public async Task LegacyStepTimeoutDoesNotOverrideTheGlobalOperationDeadline()
     {
         await using var s = await AutomationTestStore.Create();
         var action = await s.Action(new([new("deploy", s.Deployment, TimeoutSeconds: 1)]));
         var run = await s.Service.QueueActionAsync(s.Root, action.Id);
-        s.Operations.OnWait = token => Task.Delay(Timeout.InfiniteTimeSpan, token);
+        s.Operations.OnWait = token => Task.Delay(TimeSpan.FromMilliseconds(1100), token);
         await s.Executor().ExecuteNextAsync();
-        Assert.Single(s.Operations.Cancelled); Assert.Equal("uncertain", (await s.Service.ReadRunAsync(s.Root, run.Id)).Run.State);
-        Assert.Equal("step-timeout-cancellation-requested", (await s.Service.ReadRunAsync(s.Root, run.Id)).Run.Code);
-        Assert.Equal(run.Id, (await s.Db.Set<ActionDefinition>().AsNoTracking().SingleAsync()).ActiveRunId);
+        Assert.Empty(s.Operations.Cancelled);
+        Assert.Equal("succeeded", (await s.Service.ReadRunAsync(s.Root, run.Id)).Run.State);
+        Assert.Null((await s.Db.Set<ActionDefinition>().AsNoTracking().SingleAsync()).ActiveRunId);
     }
 
     [Fact]

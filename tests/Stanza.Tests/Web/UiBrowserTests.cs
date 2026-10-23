@@ -33,6 +33,7 @@ public sealed class UiBrowserTests
         factory.UseKestrel(0); factory.StartServer();
         var address = Assert.Single(factory.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses);
         Guid deployment, agent, action, qa;
+        var operation = Guid.NewGuid();
         using (var scope = factory.Services.CreateScope())
         {
             var services = scope.ServiceProvider; var accounts = services.GetRequiredService<AccountService>();
@@ -61,6 +62,9 @@ public sealed class UiBrowserTests
             await automation.SaveActionAsync(owner, null, 0, "Change Version", true, "queue", new([new("deploy", staging)],
                 [new("version", Default: "v1.0.0", Input: "version", Repository: "ghcr.io/example/app", Services: ["app"])], staging));
             await automation.SaveActionScheduleAsync(owner, reset.Id, Guid.Empty, 0, "Nightly database reset", "0 3 * * *", "UTC", false, "skip", "skip");
+            db.Add(new OperationEntity { Id = operation, ActorId = owner, DeploymentId = deployment, AgentId = agent, Kind = "deploy", State = "Failed", Code = "runtime_failed" });
+            await db.SaveChangesAsync();
+            await services.GetRequiredService<OperationOutputStore>().AppendAsync(operation, new(1, "stderr", "manifest unavailable: deployment failure details\n"));
         }
 
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(180));
@@ -71,13 +75,14 @@ public sealed class UiBrowserTests
         var routes = new[] { "/", "/agents", "/deployments", "/deployments/create", $"/deployments/{deployment}", $"/deployments/{deployment}/edit", $"/deployments/{deployment}/file",
             "/sources", $"/sources/{deployment}", $"/sources/{deployment}/edit", "/credentials", "/credentials/create", "/automation", "/automation/actions/edit",
             $"/automation/actions/edit?id={action}", $"/automation/actions/{action}/access", "/automation/schedules/edit", "/automation/webhooks/edit", "/automation/images/edit", "/automation/limits",
-            "/operations", "/settings", "/policy", $"/agents/{agent}/policy", $"/agents/{agent}/environment", "/users", "/users/create", $"/users/{qa}/access", "/groups", "/audit", "/portability", "/recovery", "/account/password" };
+            "/operations", $"/operations/{operation}", "/settings", $"/agents/{agent}/policy", $"/agents/{agent}/environment", "/users", "/users/create", $"/users/{qa}/access", "/groups", "/audit", "/portability", "/recovery", "/account/password" };
         foreach (var size in new[] { (1920, 1080), (1366, 768), (390, 844) })
         {
             await browser.ResizeAsync(size.Item1, size.Item2);
             foreach (var route in routes)
             {
                 await browser.GoAsync(route);
+                if (route == $"/operations/{operation}") await browser.WaitAsync("document.querySelector('[data-operation-output]')?.textContent.includes('deployment failure details')");
                 if (route == $"/sources/{deployment}") await browser.WaitAsync("!!document.querySelector('[data-branch-choice]')");
                 var metrics = await browser.EvaluateAsync("JSON.stringify({width:innerWidth,overflow:document.documentElement.scrollWidth-innerWidth,padding:parseFloat(getComputedStyle(document.querySelector('.content')).paddingLeft),maxWidth:getComputedStyle(document.querySelector('.content')).maxWidth,active:document.querySelectorAll('.sidebar nav [aria-current=page]').length,unstyledButtons:Array.from(document.querySelectorAll('.content button')).filter(b=>parseFloat(getComputedStyle(b).borderRadius)<4).length,largeChecks:Array.from(document.querySelectorAll('.content input[type=checkbox]')).filter(c=>c.getBoundingClientRect().width>20).length})");
                 using var data = JsonDocument.Parse(metrics.GetString()!); var m = data.RootElement;

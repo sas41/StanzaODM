@@ -19,7 +19,7 @@ public sealed class AgentConfigurationCache(IOptions<AgentOptions> options)
             configuration.DeploymentIds.Count > 10000 || configuration.DeploymentIds.Contains(Guid.Empty) ||
             configuration.DeploymentIds.Distinct().Count() != configuration.DeploymentIds.Count || configuration.Policy is null ||
             !DockerRuntimeOptions.IsValid(new() { Endpoint = configuration.Policy.DockerEndpoint,
-                OperationTimeoutSeconds = configuration.Policy.TimeoutSeconds, MaxOutputCharacters = configuration.Policy.MaximumOutputCharacters }))
+                OperationTimeoutSeconds = configuration.Policy.TimeoutSeconds }))
             throw new IOException("Invalid Agent configuration.");
         ValidateEnvironment(configuration.GlobalEnvironment);
         ValidateEnvironment(configuration.AgentEnvironment);
@@ -32,8 +32,7 @@ public sealed class AgentConfigurationCache(IOptions<AgentOptions> options)
     {
         if (pending is null || !pending.DeploymentIds.Contains(deployment.Id) || deployment.Revision < 1 ||
             string.IsNullOrWhiteSpace(deployment.Name) || deployment.Name.Length > 100 || deployment.Files is null ||
-            deployment.Files.Count > 10000 || deployment.Files.Any(x => x is null || x.Content is null || x.Path is null) ||
-            deployment.Files.Sum(x => (long)x.Content.Length) > 24 * 1024 * 1024 || deployment.Sources is null ||
+            deployment.Files.Any(x => x is null || x.Content is null || x.Path is null) || deployment.Sources is null ||
             deployment.Sources.Count > 32 || deployment.RegistryCredentialIds is null || deployment.RegistryCredentialIds.Count > 32)
             throw new IOException("Invalid deployment configuration.");
         ValidateEnvironment(deployment.Environment);
@@ -136,7 +135,7 @@ public sealed class AgentConfigurationCache(IOptions<AgentOptions> options)
 
     private static void ValidateEnvironment(string? text)
     {
-        if (text is null || text.Contains('\0') || Encoding.UTF8.GetByteCount(text) > 1024 * 1024)
+        if (text is null || text.Contains('\0'))
             throw new IOException("Invalid synchronized environment.");
     }
 

@@ -34,7 +34,7 @@ public sealed class DockerAgentHostPathResolver(IProcessRunner runner, IOptions<
             throw new IOException("Agent container identity is unavailable for host-path resolution.");
         var result = await runner.RunAsync(new(docker.Value.ExecutablePath, dataRoot,
             ["inspect", "--type", "container", "--format", "{{json .Mounts}}", "--", self], environment,
-            TimeSpan.FromSeconds(10), 65536), ct);
+            TimeSpan.FromSeconds(10)), ct);
         if (result.ExitCode != 0 || result.TimedOut || result.OutputLimitExceeded)
             throw new IOException("Agent data mount could not be inspected on the selected Docker daemon.");
         return FromMounts(dataRoot, result.StandardOutput);

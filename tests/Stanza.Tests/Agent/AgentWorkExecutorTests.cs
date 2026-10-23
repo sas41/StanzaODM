@@ -22,10 +22,16 @@ public sealed class AgentWorkExecutorTests
         public List<ProcessRequest> Requests { get; } = [];
         public Func<ProcessRequest, ProcessResult> Result { get; set; } = request => new(0,
             request.Arguments.Contains("config") ? "{\"services\":{\"app\":{\"image\":\"busybox:latest\"}}}" : "", "", false, false);
-        public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+        public async Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
         {
             Requests.Add(request);
-            return Task.FromResult(Result(request));
+            var result = Result(request);
+            if (request.OnOutput is not null)
+            {
+                if (result.StandardOutput.Length > 0) await request.OnOutput("stdout", result.StandardOutput);
+                if (result.StandardError.Length > 0) await request.OnOutput("stderr", result.StandardError);
+            }
+            return request.CaptureOutput ? result : result with { StandardOutput = "", StandardError = "" };
         }
     }
 
@@ -132,7 +138,7 @@ public sealed class AgentWorkExecutorTests
     {
         using var directory = new AgentTestDirectory(); var runner = new FakeRunner(); var executor = Executor(directory.Path, runner);
         Assert.Equal("execution_disabled", (await executor.ExecuteAsync(Request() with { Policy = new(false) })).Code);
-        Assert.Equal("invalid_runtime_policy", (await executor.ExecuteAsync(Request() with { Policy = new(TimeoutSeconds: 0) })).Code);
+        Assert.Equal("invalid_runtime_policy", (await executor.ExecuteAsync(Request() with { Policy = new(TimeoutSeconds: -1) })).Code);
         Assert.Equal("invalid_runtime_policy", (await executor.ExecuteAsync(Request() with { Policy = new(DockerEndpoint: "tcp://unsafe:2375") })).Code);
         Assert.Empty(runner.Requests);
     }
@@ -339,7 +345,7 @@ public sealed class AgentWorkExecutorTests
             using var directory = new AgentTestDirectory();
             var runner = new FakeRunner { Result = _ => new(1, "private-output", "private-error", !timedOut, timedOut) };
             var response = await Executor(directory.Path, runner).ExecuteAsync(Request());
-            Assert.Equal(timedOut ? "uncertain" : "runtime_output_limit", response.Code);
+            Assert.Equal(timedOut ? "uncertain" : "runtime_failed", response.Code);
             Assert.Null(response.Output); Assert.DoesNotContain("private", response.ToString());
         }
     }

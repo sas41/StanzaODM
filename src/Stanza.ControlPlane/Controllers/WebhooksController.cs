@@ -8,14 +8,14 @@ namespace Stanza.ControlPlane.Controllers;
 
 [AllowAnonymous, Route("hooks"), IgnoreAntiforgeryToken]
 [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
-[RequestSizeLimit(1048576)]
+[DisableRequestSizeLimit]
 public sealed class WebhooksController(WebhookReceiver receiver, AutomationService automation, StanzaDbContext db) : ControllerBase
 {
     [HttpPost("{id:guid}")]
     public async Task<IActionResult> Receive(Guid id, CancellationToken ct)
     {
         var limit = (await automation.LimitsAsync(ct)).MaximumWebhookBytes;
-        if (Request.ContentLength > limit) return StatusCode(413, new { code = "payload-too-large" });
+        if (limit > 0 && Request.ContentLength > limit) return StatusCode(413, new { code = "payload-too-large" });
         var hook = await db.Set<WebhookDefinition>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct);
         if (hook is null || !hook.Enabled) return NotFound();
         using var body = new MemoryStream();
@@ -24,7 +24,7 @@ public sealed class WebhooksController(WebhookReceiver receiver, AutomationServi
         {
             var read = await Request.Body.ReadAsync(buffer, ct);
             if (read == 0) break;
-            if (body.Length + read > limit) return StatusCode(413, new { code = "payload-too-large" });
+            if (Stanza.Core.Contracts.LimitPolicy.Exceeded(body.Length + read, limit)) return StatusCode(413, new { code = "payload-too-large" });
             body.Write(buffer, 0, read);
         }
         var github = hook.Provider == "github";

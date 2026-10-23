@@ -45,13 +45,24 @@ public sealed class ParticipantIntegrationTests
         Assert.Equal(destination.Agent, Assert.Single(plan.Steps).AgentId); Assert.Empty(await destination.Db.Set<ActionInputMemory>().ToListAsync());
     }
 
-    [Fact]
-    public async Task All_configuration_sections_roundtrip_between_instances_with_plaintext_secrets_logical_references_and_inactive_automation()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task All_configuration_sections_roundtrip_between_instances_with_plaintext_secrets_logical_references_and_inactive_automation(bool legacyPolicy)
     {
         await using var source = await Instance.Create("source-admin");
         await using var destination = await Instance.Create("destination-admin");
         var seeded = await Seed(source);
         var export = await source.Portability.ExportAsync(source.Root, new([seeded.Deployment], source.Participants.Select(p => p.Kind).ToArray(), true));
+        if (legacyPolicy)
+        {
+            var document = System.Text.Json.Nodes.JsonNode.Parse(export)!;
+            var policy = document["sections"]!.AsArray().Single(x => x!["kind"]!.GetValue<string>() == "operational-agent-policy")!["content"]!["operational"]!.AsObject();
+            policy["maximumOutputCharacters"] = 65536;
+            policy["statusIntervalSeconds"] = 27;
+            policy.Remove("configurationIntervalSeconds"); policy.Remove("staleStatusSeconds");
+            export = Encoding.UTF8.GetBytes(document.ToJsonString());
+        }
         var text = Encoding.UTF8.GetString(export);
         foreach (var secret in new[] { "git-password-secret", "registry-password-secret", "global-secret", "agent-secret", seeded.WebhookSecret }) Assert.Contains(secret, text);
         foreach (var id in new[] { source.Root, source.Agent, seeded.Deployment, seeded.Credential, seeded.Action }) Assert.DoesNotContain(id.ToString(), text);
@@ -92,6 +103,11 @@ public sealed class ParticipantIntegrationTests
         Assert.Equal("https://control.example.test/", (await destination.Settings.ReadAsync(destination.Root)).PublicUrl);
         Assert.Equal("AGENT=agent-secret\r\n", (await destination.Agents.ReadEnvironmentAsync(destination.Root, destination.Agent)).Text);
         Assert.Equal(17, (await destination.Policy.GetAsync()).Policy.OperationTimeoutSeconds);
+        if (legacyPolicy)
+        {
+            Assert.Equal(27, (await destination.Policy.GetAsync()).Policy.ConfigurationIntervalSeconds);
+            Assert.Equal(27, (await destination.Policy.GetAsync()).Policy.StaleStatusSeconds);
+        }
         var automation = await destination.Automation.ListAsync(destination.Root);
         var action = Assert.Single(automation.Actions);
         Assert.False(action.Enabled);

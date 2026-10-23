@@ -44,7 +44,7 @@ public sealed class AgentConfigurationSync(StanzaDbContext db, IDataProtectionPr
         }
         var configuration = new AgentConfiguration(agentId, global.GlobalEnvironment, environment, await policies.RuntimeAsync(agentId, ct),
             assigned.Select(x => x.Id).ToArray());
-        var interval = (await operational.GetAsync(ct)).Policy.StatusIntervalSeconds;
+        var interval = (await operational.GetAsync(ct)).Policy.ConfigurationIntervalSeconds;
         await transaction.CommitAsync(ct);
         return new(configuration, deployments, interval);
     }

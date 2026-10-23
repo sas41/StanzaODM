@@ -65,7 +65,6 @@ public sealed class PortabilityService(StanzaDbContext db, AccessService access,
         var bundle = WithSourceReservations(new PortableBundle(1, deployments, agents, sections) { References = resourceReferences.Values.ToArray() });
         PortableBundleValidator.Validate(bundle);
         var output = JsonSerializer.SerializeToUtf8Bytes(bundle, PortableBundleValidator.JsonOptions);
-        if (output.Length > PortableBundleValidator.MaximumBundleBytes) throw new PortabilityException("The selected export exceeds 32 MiB; select a smaller scope.");
         if (audit is not null)
         {
             foreach (var id in selection.Deployments) await audit.WriteAsync(actor, "configuration.export.deployment", id.ToString(), "plaintext-acknowledged", ct);
@@ -85,7 +84,6 @@ public sealed class PortabilityService(StanzaDbContext db, AccessService access,
         var content = new PreviewContent(bundle, mapping);
         var conflicts = await ValidateImportAsync(actor, content, new Dictionary<string, Guid>(), ct);
         var canonical = JsonSerializer.SerializeToUtf8Bytes(content, PortableBundleValidator.JsonOptions);
-        if (canonical.Length > PortableBundleValidator.MaximumBundleBytes) throw new PortabilityException("The canonical import preview exceeds 32 MiB; select a smaller scope.");
         var hash = Convert.ToHexString(SHA256.HashData(canonical));
         var existing = await db.Set<PortableImportEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.ActorId == actor && x.Fingerprint == hash, ct);
         if (existing is not null) throw new PortabilityException("This exact preview already exists or has been applied; use its existing run instead of submitting duplicates.");

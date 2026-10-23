@@ -32,6 +32,6 @@ public sealed class RevisionDiffTests
     }
 
     [Fact]
-    public void Larger_than_one_MiB_diffs_are_refused() => Assert.Throws<DeploymentDraftException>(() =>
-        RevisionDiff.Compare("", new string('x', DeploymentDraftService.MaximumTextBytes + 1)));
+    public void Accepted_text_has_no_separate_hidden_diff_limit() =>
+        Assert.Equal("added", Assert.Single(RevisionDiff.Compare("", new string('x', DeploymentDraftService.MaximumTextBytes + 1))).Kind);
 }

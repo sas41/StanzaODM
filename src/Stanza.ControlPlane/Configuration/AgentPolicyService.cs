@@ -24,7 +24,8 @@ public sealed class AgentPolicyService(StanzaDbContext db, AccessService access,
     public async Task<AgentRuntimePolicy> RuntimeAsync(Guid id, CancellationToken ct = default)
     {
         var row = await db.Set<AgentPolicyEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.AgentId == id, ct);
-        return row is null ? await operational.RuntimeAsync(ct) : JsonSerializer.Deserialize<AgentRuntimePolicy>(row.Json) ?? throw new SettingsOperationException("Invalid Agent runtime policy.");
+        var global = await operational.RuntimeAsync(ct);
+        return row is null ? global : (JsonSerializer.Deserialize<AgentRuntimePolicy>(row.Json) ?? throw new SettingsOperationException("Invalid Agent runtime policy.")) with { TimeoutSeconds = global.TimeoutSeconds };
     }
     public async Task<AgentPolicyEditor> ReadAsync(Guid actor, Guid id, CancellationToken ct = default)
     {
@@ -35,9 +36,8 @@ public sealed class AgentPolicyService(StanzaDbContext db, AccessService access,
     }
     public async Task SaveAsync(Guid actor, AgentPolicyEditor edit, CancellationToken ct = default)
     {
-        var p = edit.Policy;
-        if (p.TimeoutSeconds is < 1 or > 3600 || p.MaximumOutputCharacters is < 1024 or > 1048576
-            || !Uri.TryCreate(p.DockerEndpoint, UriKind.Absolute, out var endpoint) || endpoint.Scheme != "unix"
+        var p = edit.Policy with { TimeoutSeconds = (await operational.RuntimeAsync(ct)).TimeoutSeconds };
+        if (!Uri.TryCreate(p.DockerEndpoint, UriKind.Absolute, out var endpoint) || endpoint.Scheme != "unix"
             || endpoint.AbsolutePath == "/" || endpoint.UserInfo.Length != 0 || endpoint.Query.Length != 0 || endpoint.Fragment.Length != 0 || p.DockerEndpoint.Any(char.IsControl))
             throw new SettingsOperationException("Use a local unix Docker socket and bounded timeout/output limits.");
         await using var transaction = await db.Database.BeginTransactionAsync(ct);

@@ -12,7 +12,7 @@ public sealed record ActionParameter(string Name, string Type = "string", bool R
     string Input = "text", string? Label = null, IReadOnlyList<string>? Options = null,
     string? Source = null, string? Repository = null, IReadOnlyList<string>? Services = null);
 public sealed record ActionStep(string Kind, Guid? DeploymentId = null, Guid? AgentId = null,
-    AgentExecution? Execution = null, int TimeoutSeconds = 300, string Failure = "stop");
+    AgentExecution? Execution = null, int TimeoutSeconds = 3600, string Failure = "stop");
 public sealed record ActionPlan(IReadOnlyList<ActionStep> Steps, IReadOnlyList<ActionParameter>? Parameters = null,
     Guid? DeploymentId = null, string? ButtonLabel = null, int Order = 0, string? Confirmation = null, bool ShowOnOverview = true)
 {
@@ -91,7 +91,7 @@ public static partial class AutomationRules
             throw new AutomationException("Each source or service can have only one input binding.");
         foreach (var step in plan.Steps)
         {
-            if (step is null || step.TimeoutSeconds is < 1 or > 3600 || step.Failure is not ("stop" or "continue"))
+            if (step is null || step.TimeoutSeconds is < 0 or > 604800 || step.Failure is not ("stop" or "continue"))
                 throw new AutomationException("Each step needs a 1–3600 second timeout and stop/continue failure policy.");
             if (step.Kind == "host-exec")
             {
@@ -178,8 +178,8 @@ public static partial class AutomationRules
 
     public static void ValidateLimits(AutomationLimits limits)
     {
-        if (limits.MaximumWebhookBytes is < 1024 or > 1048576 || limits.DeliveriesPerMinute is < 1 or > 10000
-            || limits.HistoryRetentionDays is < 1 or > 3650 || limits.MaximumQueuedRuns is < 1 or > 100000)
+        if (limits.MaximumWebhookBytes < 0 || limits.DeliveriesPerMinute < 0
+            || limits.HistoryRetentionDays is < 0 or > 3650 || limits.MaximumQueuedRuns < 0)
             throw new AutomationException("Automation limits are outside the supported ranges.");
     }
 }

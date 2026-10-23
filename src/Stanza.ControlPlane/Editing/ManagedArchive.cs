@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Text;
 using Stanza.ControlPlane.Deployments;
 using Stanza.Core.Deployments;
+using Stanza.Core.Contracts;
 
 namespace Stanza.ControlPlane.Editing;
 
@@ -10,13 +11,13 @@ public static class ManagedArchive
 {
     public static IReadOnlyList<ManagedFileSnapshot> ReadZip(byte[] bytes, string destination, DeploymentEditorLimits limits)
     {
-        if (bytes.Length > limits.UploadBytes) throw new DeploymentDraftException("Archive exceeds the configured upload limit.");
+        if (LimitPolicy.Exceeded(bytes.Length, limits.UploadBytes)) throw new DeploymentDraftException("Archive exceeds the configured upload limit.");
         try
         {
             var prefix = string.IsNullOrEmpty(destination) ? "" : DeploymentPath.Parse(destination).Value + "/";
             using var input = new MemoryStream(bytes, writable: false);
             using var zip = new ZipArchive(input, ZipArchiveMode.Read);
-            if (zip.Entries.Count > limits.SupportingEntries) throw new DeploymentDraftException("Archive exceeds the configured entry limit.");
+            if (LimitPolicy.Exceeded(zip.Entries.Count, limits.SupportingEntries)) throw new DeploymentDraftException("Archive exceeds the configured entry limit.");
             var files = new List<ManagedFileSnapshot>();
             long total = 0;
             foreach (var entry in zip.Entries)
@@ -27,7 +28,7 @@ public static class ManagedArchive
                     throw new DeploymentDraftException("Archives may contain only regular files and directories, not links or special entries.");
                 var path = prefix + (directory ? entry.FullName[..^1] : entry.FullName);
                 _ = DeploymentPath.Parse(path);
-                if (entry.Length > limits.UploadBytes || entry.Length > limits.WorkspaceBytes - total || (directory && entry.Length != 0))
+                if (LimitPolicy.Exceeded(entry.Length, limits.UploadBytes) || LimitPolicy.Exceeded(total + entry.Length, limits.WorkspaceBytes) || (directory && entry.Length != 0))
                     throw new DeploymentDraftException("Expanded archive exceeds the configured byte limits.");
                 if (directory) { files.Add(ManagedFileSnapshot.Directory(path)); continue; }
                 using var source = entry.Open();
@@ -36,7 +37,7 @@ public static class ManagedArchive
                 int read;
                 while ((read = source.Read(buffer)) != 0)
                 {
-                    if (content.Length + read > entry.Length || content.Length + read > limits.UploadBytes || total + read > limits.WorkspaceBytes)
+                    if (content.Length + read > entry.Length || LimitPolicy.Exceeded(content.Length + read, limits.UploadBytes) || LimitPolicy.Exceeded(total + read, limits.WorkspaceBytes))
                         throw new DeploymentDraftException("Expanded archive exceeds the configured byte limits.");
                     content.Write(buffer, 0, read);
                     total += read;
@@ -44,7 +45,7 @@ public static class ManagedArchive
                 if (content.Length != entry.Length) throw new DeploymentDraftException("Archive entry length is invalid.");
                 var bytesRead = content.ToArray();
                 var file = ManagedFileSnapshot.Binary(path, bytesRead);
-                if (bytesRead.Length <= limits.TextBytes && !bytesRead.Contains((byte)0))
+                if (!LimitPolicy.Exceeded(bytesRead.Length, limits.TextBytes) && !bytesRead.Contains((byte)0))
                 {
                     try { file = ManagedFileSnapshot.Utf8Text(path, bytesRead); }
                     catch (DecoderFallbackException) { /* Non-UTF-8 assets remain exact binary files. */ }

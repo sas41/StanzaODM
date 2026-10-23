@@ -22,8 +22,12 @@ public sealed record AgentExecution(string Executable, IReadOnlyList<string> Arg
 {
     public override string ToString() => "AgentExecution { [REDACTED] }";
 }
-public sealed record AgentRuntimePolicy(bool ExecutionEnabled = true, int TimeoutSeconds = 300,
-    int MaximumOutputCharacters = 65536, string DockerEndpoint = "unix:///var/run/docker.sock");
+public sealed record AgentRuntimePolicy(bool ExecutionEnabled = true, int TimeoutSeconds = 3600,
+    string DockerEndpoint = "unix:///var/run/docker.sock");
+public sealed record AgentOutputChunk(long Sequence, string Stream, string Text)
+{
+    public override string ToString() => $"AgentOutputChunk {{ Sequence = {Sequence}, Stream = {Stream}, Text = [REDACTED] }}";
+}
 public sealed record AgentCapabilities(string Runtime, bool DockerAvailable, bool ComposeAvailable,
     string? DockerVersion, string? ComposeVersion, string Architecture, bool HostExecutionAvailable, bool TerminalAvailable);
 public sealed record AgentImageObservation(string Service, string Image, string Platform, string? CurrentDigest,
@@ -44,8 +48,9 @@ public sealed record AgentWorkResponse(Guid Id, bool Succeeded, string Code, str
 }
 public sealed record AgentWireMessage(string Type, Guid Id, AgentWorkRequest? Request = null,
     AgentWorkResponse? Response = null, string? Data = null,
-    AgentConfiguration? Configuration = null, AgentDeploymentConfiguration? Deployment = null)
+    AgentConfiguration? Configuration = null, AgentDeploymentConfiguration? Deployment = null,
+    AgentOutputChunk? Output = null)
 {
-    public const int Version = 2;
+    public const int Version = 3;
     public override string ToString() => $"AgentWireMessage {{ Type = {Type}, Id = {Id}, Contents = [REDACTED] }}";
 }

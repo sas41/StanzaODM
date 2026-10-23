@@ -9,7 +9,6 @@ namespace Stanza.ControlPlane.Portability;
 
 public static class PortableBundleValidator
 {
-    public const int MaximumBundleBytes = 32 * 1024 * 1024;
     public static JsonSerializerOptions JsonOptions { get; } = new(JsonSerializerDefaults.Web)
     {
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
@@ -22,7 +21,6 @@ public static class PortableBundleValidator
 
     public static PortableBundle Parse(byte[] bytes)
     {
-        if (bytes.Length > MaximumBundleBytes) throw new PortabilityException("The JSON bundle exceeds 32 MiB.");
         try
         {
             using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 32 });
@@ -64,9 +62,9 @@ public static class PortableBundleValidator
             Text(d.Name, 100);
             if (string.IsNullOrWhiteSpace(d.Name)) throw new PortabilityException("Deployment names cannot be empty.");
             if (d.Agent is not null && !b.Agents.Any(a => a.Id == d.Agent)) throw new PortabilityException("An Agent reference is missing.");
-            Text(d.Compose, DeploymentDraftService.MaximumTextBytes);
-            Text(d.Environment, DeploymentDraftService.MaximumTextBytes);
-            if (d.Files is null || d.Files.Count > DeploymentDraftService.MaximumSupportingFiles) throw new PortabilityException("Too many managed files.");
+            Text(d.Compose, int.MaxValue);
+            Text(d.Environment, int.MaxValue);
+            if (d.Files is null) throw new PortabilityException("Managed files are required.");
             var files = new List<ManagedFileSnapshot>
             {
                 ManagedFileSnapshot.Text("compose.yaml", d.Compose), ManagedFileSnapshot.Text(".env", d.Environment)
@@ -76,17 +74,18 @@ public static class PortableBundleValidator
                 if (f.Path is null || f.Path.Length > 1024) throw new PortabilityException("Invalid file path length.");
                 if (f.Kind == "text" && f.Text is not null && f.Base64 is null)
                 {
-                    Text(f.Text, DeploymentDraftService.MaximumTextBytes);
+                    Text(f.Text, int.MaxValue);
                     files.Add(ManagedFileSnapshot.Text(f.Path, f.Text));
                 }
-                else if (f.Kind == "binary" && f.Text is null && f.Base64 is not null && f.Base64.Length <= 5592408)
+                else if (f.Kind == "binary" && f.Text is null && f.Base64 is not null)
                     files.Add(ManagedFileSnapshot.Binary(f.Path, Convert.FromBase64String(f.Base64)));
                 else if (f.Kind == "directory" && f.Text is null && f.Base64 is null)
                     files.Add(ManagedFileSnapshot.Directory(f.Path));
                 else throw new PortabilityException("Use plaintext text files or bounded base64 binary files, never links.");
             }
             if (d.SourceDestinations is null || d.SourceDestinations.Count > 32) throw new PortabilityException("Too many source workspace reservations.");
-            DeploymentWorkspaceValidator.Validate(files, d.SourceDestinations.Select(path => new GitSourceWorkspace(Guid.NewGuid(), path)).ToArray(), new(102, DeploymentDraftService.MaximumUploadBytes, DeploymentDraftService.MaximumWorkspaceBytes));
+            // Destination application services enforce the current configured file limits, including zero/unlimited.
+            DeploymentWorkspaceValidator.Validate(files, d.SourceDestinations.Select(path => new GitSourceWorkspace(Guid.NewGuid(), path)).ToArray(), new(0, 0, 0));
         }
     }
 

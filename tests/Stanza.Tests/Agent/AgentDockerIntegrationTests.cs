@@ -63,7 +63,7 @@ public sealed class AgentDockerIntegrationTests
             operation is "start" or "stop" or "restart" or "remove" or "status" or "logs" ? [] : files,
             operation is "start" or "stop" or "restart" or "remove" or "status" or "logs" ? [] :
             [new("Global", "STANZA_LAYER=global\nGLOBAL_ONLY=unique-global-secret\n"), new("Agent", "STANZA_LAYER=agent\nAGENT_ONLY=unique-agent-secret\n"), new("Deployment", "STANZA_LAYER=deployment\n")],
-            command, Policy: new(TimeoutSeconds: 120, MaximumOutputCharacters: 1048576));
+            command, Policy: new(TimeoutSeconds: 120));
         var requests = new List<AgentWorkRequest>();
         async Task<AgentWorkResponse> Run(string operation, AgentExecution? command = null)
         {

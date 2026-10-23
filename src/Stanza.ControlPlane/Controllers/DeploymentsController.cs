@@ -14,8 +14,8 @@ using Stanza.ControlPlane.Sources;
 namespace Stanza.ControlPlane.Controllers;
 
 [Authorize, Route("deployments"), ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
-[RequestSizeLimit(8 * 1024 * 1024)]
-[RequestFormLimits(ValueLengthLimit = 2 * 1024 * 1024, MultipartBodyLengthLimit = 6 * 1024 * 1024)]
+[DisableRequestSizeLimit]
+[RequestFormLimits(ValueLengthLimit = int.MaxValue, MultipartBodyLengthLimit = long.MaxValue)]
 public sealed class DeploymentsController(DeploymentDraftService drafts, IOperationService? operations = null,
     DeploymentRuntimeStatusService? runtimeStatus = null) : Controller
 {
@@ -156,7 +156,7 @@ public sealed class DeploymentsController(DeploymentDraftService drafts, IOperat
         try
         {
             await drafts.GetEditorLimitsAsync(ct);
-            if (!ModelState.IsValid || upload is null || upload.Length > drafts.EditorLimits.UploadBytes)
+            if (!ModelState.IsValid || upload is null || Stanza.Core.Contracts.LimitPolicy.Exceeded(upload.Length, drafts.EditorLimits.UploadBytes))
                 throw new DeploymentDraftException("Select a binary asset within the configured upload limit and supply its relative destination path.");
             // Bound the actual read as well as the declared length. Never trust the submitted filename as a path.
             await using var input = upload.OpenReadStream();
@@ -166,7 +166,7 @@ public sealed class DeploymentsController(DeploymentDraftService drafts, IOperat
             {
                 var count = await input.ReadAsync(buffer, ct);
                 if (count == 0) break;
-                if (content.Length + count > drafts.EditorLimits.UploadBytes)
+                if (Stanza.Core.Contracts.LimitPolicy.Exceeded(content.Length + count, drafts.EditorLimits.UploadBytes))
                     throw new DeploymentDraftException("Binary upload exceeds the configured limit.");
                 await content.WriteAsync(buffer.AsMemory(0, count), ct);
             }
@@ -195,7 +195,7 @@ public sealed class DeploymentsController(DeploymentDraftService drafts, IOperat
             await drafts.GetEditorLimitsAsync(ct);
             var current = await drafts.ReadAsync(ActorId, id, ct: ct);
             if (!current.Permissions.CanWriteFiles) return Forbid();
-            if (!ModelState.IsValid || upload is null || upload.Length > drafts.EditorLimits.UploadBytes)
+            if (!ModelState.IsValid || upload is null || Stanza.Core.Contracts.LimitPolicy.Exceeded(upload.Length, drafts.EditorLimits.UploadBytes))
                 throw new DeploymentDraftException("Select a ZIP archive within the configured upload limit.");
             using var content = new MemoryStream();
             await using var input = upload.OpenReadStream();
@@ -203,7 +203,7 @@ public sealed class DeploymentsController(DeploymentDraftService drafts, IOperat
             int count;
             while ((count = await input.ReadAsync(buffer, ct)) != 0)
             {
-                if (content.Length + count > drafts.EditorLimits.UploadBytes) throw new DeploymentDraftException("Archive exceeds the configured upload limit.");
+                if (Stanza.Core.Contracts.LimitPolicy.Exceeded(content.Length + count, drafts.EditorLimits.UploadBytes)) throw new DeploymentDraftException("Archive exceeds the configured upload limit.");
                 await content.WriteAsync(buffer.AsMemory(0, count), ct);
             }
             await drafts.ImportArchiveAsync(ActorId, id, expectedRevision, destination ?? "", content.ToArray(), ct);

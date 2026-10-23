@@ -19,10 +19,10 @@ public sealed partial class DeploymentDraftService(StanzaDbContext db, IDataProt
     IDeploymentEditorLimitsProvider? limitsProvider = null, IDeploymentRevisionStatusProvider? revisionStatus = null,
     IDeploymentWorkspaceReservations? reservations = null)
 {
-    public const int MaximumTextBytes = 1024 * 1024;
-    public const int MaximumUploadBytes = 4 * 1024 * 1024;
-    public const int MaximumWorkspaceBytes = 16 * 1024 * 1024;
-    public const int MaximumSupportingFiles = 100;
+    public const int MaximumTextBytes = 4 * 1024 * 1024;
+    public const int MaximumUploadBytes = 16 * 1024 * 1024;
+    public const int MaximumWorkspaceBytes = 64 * 1024 * 1024;
+    public const int MaximumSupportingFiles = 128;
     public const string ComposePath = "compose.yaml";
     public const string EnvironmentPath = ".env";
 
@@ -174,7 +174,7 @@ public sealed partial class DeploymentDraftService(StanzaDbContext db, IDataProt
         string path, byte[] content, CancellationToken ct = default) =>
         MutateAsync(actorId, id, expectedRevision, payload =>
         {
-            if (content is null || content.Length > EditorLimits.UploadBytes)
+            if (content is null || Stanza.Core.Contracts.LimitPolicy.Exceeded(content.Length, EditorLimits.UploadBytes))
                 throw new DeploymentDraftException("Binary upload exceeds the configured file limit.");
             ReplaceFile(payload, SafeFile(() => ManagedFileSnapshot.Binary(path, content)), create: true);
             return Task.CompletedTask;
@@ -217,7 +217,7 @@ public sealed partial class DeploymentDraftService(StanzaDbContext db, IDataProt
         {
             var existing = RequiredFile(payload, path);
             if (existing.Kind != ManagedEntryKind.Binary) throw new DeploymentDraftException("Only existing binary assets can be replaced here.");
-            if (bytes.Length > EditorLimits.UploadBytes) throw new DeploymentDraftException("Binary upload exceeds the configured limit.");
+            if (Stanza.Core.Contracts.LimitPolicy.Exceeded(bytes.Length, EditorLimits.UploadBytes)) throw new DeploymentDraftException("Binary upload exceeds the configured limit.");
             payload.Files.Remove(existing);
             payload.Files.Add(StoredFile.From(SafeFile(() => ManagedFileSnapshot.Binary(path, bytes))));
             return Task.CompletedTask;
@@ -350,7 +350,7 @@ public sealed partial class DeploymentDraftService(StanzaDbContext db, IDataProt
     {
         try
         {
-            if (text is null || text.Contains('\0') || Utf8.GetByteCount(text) > EditorLimits.TextBytes)
+            if (text is null || text.Contains('\0') || Stanza.Core.Contracts.LimitPolicy.Exceeded(Utf8.GetByteCount(text), EditorLimits.TextBytes))
                 throw new DeploymentDraftException("Editable text must be valid UTF-8 without NUL characters and within the configured text limit.");
         }
         catch (EncoderFallbackException)
@@ -370,7 +370,7 @@ public sealed partial class DeploymentDraftService(StanzaDbContext db, IDataProt
         {
             DeploymentWorkspaceValidator.Validate([ManagedFileSnapshot.Text(ComposePath, payload.ComposeText),
                 ManagedFileSnapshot.Text(EnvironmentPath, payload.EnvironmentText), .. payload.Files.Select(ToSnapshot)], sources ?? [],
-                new(EditorLimits.SupportingEntries + 2, EditorLimits.UploadBytes, EditorLimits.WorkspaceBytes));
+                new(EditorLimits.SupportingEntries == 0 ? 0 : (int)Math.Min(int.MaxValue, (long)EditorLimits.SupportingEntries + 2), EditorLimits.UploadBytes, EditorLimits.WorkspaceBytes));
         }
         catch (ArgumentException)
         { throw new DeploymentDraftException("Managed paths collide or the workspace exceeds its configured entry or byte limits."); }

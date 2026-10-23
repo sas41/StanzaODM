@@ -13,9 +13,9 @@ public sealed class AgentPolicyController(AgentPolicyService policies) : Control
     [HttpGet("")] public async Task<IActionResult> Index(Guid id, CancellationToken ct)
     { try { return View(await policies.ReadAsync(Actor, id, ct)); } catch (SettingsOperationException) { return Forbid(); } }
     [HttpPost(""), ValidateAntiForgeryToken]
-    public async Task<IActionResult> Index(Guid id, bool executionEnabled, int timeoutSeconds, int maximumOutputCharacters, string dockerEndpoint, long version, CancellationToken ct)
+    public async Task<IActionResult> Index(Guid id, bool executionEnabled, string dockerEndpoint, long version, CancellationToken ct)
     {
-        var edit = new AgentPolicyEditor(id, new(executionEnabled, timeoutSeconds, maximumOutputCharacters, dockerEndpoint), version);
+        var edit = new AgentPolicyEditor(id, new(executionEnabled, DockerEndpoint: dockerEndpoint), version);
         if (!ModelState.IsValid) return View(edit);
         try { await policies.SaveAsync(Actor, edit, ct); TempData["Success"] = "Agent runtime policy saved for future commands."; return RedirectToAction(nameof(Index), new { id }); }
         catch (SettingsOperationException error) { ModelState.AddModelError("", error.Message); return View(edit); }

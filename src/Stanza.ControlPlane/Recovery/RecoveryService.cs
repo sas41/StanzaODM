@@ -193,6 +193,8 @@ public sealed class RecoveryService(StanzaDbContext db, IConfiguration configura
         await using var count = Command($"SELECT COUNT(*) FROM {Quote(table)}");
         var actual = Convert.ToInt64(await count.ExecuteScalarAsync(token));
         if (actual == 0) return;
+        if (table.Name == "Settings" && table.Schema is null && actual == 1 &&
+            await db.Settings.AsNoTracking().AnyAsync(x => x.Key == "schema-version" && x.Value == "1", token)) return;
         var store = StoreObjectIdentifier.Table(table.Name, table.Schema);
         var defaults = db.GetService<IDesignTimeModel>().Model.GetEntityTypes()
             .Where(x => x.GetTableName() == table.Name && x.GetSchema() == table.Schema)
@@ -244,9 +246,17 @@ public sealed class RecoveryService(StanzaDbContext db, IConfiguration configura
 
     private void Validate(RecoveryArchive archive, List<ITable> tables)
     {
+        // Version 1 upgrade: old backups have the identical schema except for the additive output table.
+        var previous = tables.Where(x => x.Name != "OperationOutput").ToList();
+        if (archive.Tables is not null && archive.Tables.Count == previous.Count &&
+            archive.SchemaFingerprint == Fingerprint(previous) && archive.Tables.All(x => x.Name != "OperationOutput"))
+        {
+            archive.Tables.Add(Describe(tables.Single(x => x.Name == "OperationOutput")));
+            archive.SchemaFingerprint = Fingerprint(tables);
+        }
         if (archive.FormatVersion != 1 || archive.Application != "Stanza.ControlPlane" || archive.Provider != db.Database.ProviderName
             || archive.SchemaFingerprint != Fingerprint(tables))
-            throw new RecoveryOperationException("The backup format or application database schema is incompatible. Restore using the same application schema and PostgreSQL provider; migrations and legacy imports are not supported.");
+            throw new RecoveryOperationException("The backup format or application database schema is incompatible. Only supported versioned upgrades on the same database provider can be restored.");
         if (archive.Tables is null || archive.Tables.Count != tables.Count || archive.Keys is null || archive.Keys.Count is < 1 or > RecoveryKeys.MaximumKeys)
             throw new RecoveryOperationException("The recovery archive has invalid table or encryption-key counts.");
         int rows = 0, cells = 0;

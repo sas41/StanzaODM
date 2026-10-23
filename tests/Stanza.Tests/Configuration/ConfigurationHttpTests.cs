@@ -23,16 +23,18 @@ public sealed class ConfigurationHttpTests
         await using var factory = new StanzaFactory(); await factory.BootstrapAsync(); using var client = Client(factory);
         using var logs = new ConfigurationDiagnosticLogs(); factory.Services.GetRequiredService<ILoggerFactory>().AddProvider(logs);
         await ConfigurationHttp.LoginAsync(client, "owner");
-        var html = await client.GetStringAsync("/policy");
+        var html = await client.GetStringAsync("/settings");
         foreach (var property in typeof(OperationalPolicy).GetProperties()) Assert.Contains($"name=\"{property.Name}\"", html);
-        Assert.Contains("preserve the original Host", html);
-        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsync("/policy", ConfigurationHttp.Policy(new() { SessionHours = 12 }, 0))).StatusCode);
-        var csrf = await ConfigurationHttp.TokenAsync(client, "/policy");
-        var saved = await client.PostAsync("/policy", ConfigurationHttp.Policy(new() { SessionHours = 12, TrustedProxyAddresses = "127.0.0.1" }, 0, csrf));
+        Assert.Contains("Trusted proxy addresses", html);
+        Assert.DoesNotContain("Maximum output characters", html);
+        Assert.Equal(HttpStatusCode.Redirect, (await client.GetAsync("/policy")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsync("/settings/operations", ConfigurationHttp.Policy(new() { SessionHours = 12 }, 0))).StatusCode);
+        var csrf = await ConfigurationHttp.TokenAsync(client, "/settings");
+        var saved = await client.PostAsync("/settings/operations", ConfigurationHttp.Policy(new() { SessionHours = 12, TrustedProxyAddresses = "127.0.0.1" }, 0, csrf));
         Assert.Equal(HttpStatusCode.Redirect, saved.StatusCode);
         using var scope = factory.Services.CreateScope(); var policy = await scope.ServiceProvider.GetRequiredService<OperationalPolicyService>().GetAsync();
         Assert.Equal(1, policy.Version); Assert.Equal(12, policy.Policy.SessionHours); Assert.Equal("127.0.0.1", policy.Policy.TrustedProxyAddresses);
-        var conflict = await client.PostAsync("/policy", ConfigurationHttp.Policy(new() { SessionHours = 9, TrustedProxyAddresses = "127.0.0.1" }, 0, csrf));
+        var conflict = await client.PostAsync("/settings/operations", ConfigurationHttp.Policy(new() { SessionHours = 9, TrustedProxyAddresses = "127.0.0.1" }, 0, csrf));
         Assert.True(conflict.StatusCode == HttpStatusCode.OK, string.Join("\n", logs.Errors)); Assert.Contains("Reload before saving", await conflict.Content.ReadAsStringAsync());
         Assert.Equal(12, (await scope.ServiceProvider.GetRequiredService<OperationalPolicyService>().GetAsync()).Policy.SessionHours);
     }
@@ -45,8 +47,8 @@ public sealed class ConfigurationHttpTests
         await using var factory = new StanzaFactory(); var owner = await factory.BootstrapAsync(); using var client = Client(factory);
         using var logs = new ConfigurationDiagnosticLogs(); factory.Services.GetRequiredService<ILoggerFactory>().AddProvider(logs);
         if (existing) await ConfigurationHttp.SavePolicyAsync(factory, owner, new() { TrustedProxyAddresses = "127.0.0.1" }, 0);
-        await ConfigurationHttp.LoginAsync(client, "owner"); var csrf = await ConfigurationHttp.TokenAsync(client, "/policy");
-        var response = await client.PostAsync("/policy", ConfigurationHttp.Policy(new(), existing ? 1 : 0, csrf));
+        await ConfigurationHttp.LoginAsync(client, "owner"); var csrf = await ConfigurationHttp.TokenAsync(client, "/settings");
+        var response = await client.PostAsync("/settings/operations", ConfigurationHttp.Policy(new() { TrustedProxyAddresses = "" }, existing ? 1 : 0, csrf));
         Assert.True(response.StatusCode == HttpStatusCode.Redirect, string.Join("\n", logs.Errors));
         using var scope = factory.Services.CreateScope(); var policy = await scope.ServiceProvider.GetRequiredService<OperationalPolicyService>().GetAsync();
         Assert.Equal("", policy.Policy.TrustedProxyAddresses); Assert.Equal(existing ? 2 : 1, policy.Version);
@@ -58,9 +60,9 @@ public sealed class ConfigurationHttpTests
         await using var factory = new StanzaFactory(); var owner = await factory.BootstrapAsync();
         await ConfigurationHttp.ActorAsync(factory, owner, "delegate", "settings.read", "settings.write");
         using var client = Client(factory); await ConfigurationHttp.LoginAsync(client, "delegate");
-        var page = await client.GetStringAsync("/policy"); Assert.DoesNotContain("Save policy", page);
-        var csrf = await ConfigurationHttp.TokenAsync(client, "/policy");
-        ConfigurationHttp.Denied(await client.PostAsync("/policy", ConfigurationHttp.Policy(new(), 0, csrf)));
+        var page = await client.GetStringAsync("/settings"); Assert.DoesNotContain("Save operational settings", page);
+        var csrf = await ConfigurationHttp.TokenAsync(client, "/settings");
+        ConfigurationHttp.Denied(await client.PostAsync("/settings/operations", ConfigurationHttp.Policy(new(), 0, csrf)));
     }
 
     [Theory]

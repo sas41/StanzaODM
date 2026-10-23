@@ -34,7 +34,7 @@
                 <a href="/sources" aria-current="@(Active("/sources") ? "page" : null)">Git sources</a>
                 <a href="/credentials" aria-current="@(Active("/credentials") ? "page" : null)">Credentials &amp; registries</a>
                 <a href="/portability" aria-current="@(Active("/portability") ? "page" : null)" title="Clone, move and import/export configuration">Clone, move &amp; transfer</a>
-                <a href="/settings" aria-current="@(Active("/settings") || Active("/policy") ? "page" : null)">Settings &amp; policy</a>
+                <a href="/settings" aria-current="@(Active("/settings") || Active("/policy") ? "page" : null)">Settings</a>
                 @if (User.IsInRole("Admin") || User.IsInRole("SystemAdmin"))
                 {
                     <div class="nav-label">ADMINISTRATION</div>

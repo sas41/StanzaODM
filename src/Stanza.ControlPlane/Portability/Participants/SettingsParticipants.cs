@@ -164,6 +164,19 @@ public sealed class PublicSettingsParticipant(InstanceSettingsService settings, 
 
 public sealed class PoliciesParticipant(OperationalPolicyService policies, AutomationService automation, ParticipantSupport support) : IPortableConfigurationParticipant
 {
+    private static PortablePolicies ReadPolicies(JsonElement content)
+    {
+        // Explicit v1 data upgrade: recognize only the retired field, retaining strict validation for unknown fields.
+        var document = System.Text.Json.Nodes.JsonNode.Parse(content.GetRawText());
+        if (document is System.Text.Json.Nodes.JsonObject root && root["operational"] is System.Text.Json.Nodes.JsonObject operational)
+        {
+            operational.Remove("maximumOutputCharacters");
+            var interval = operational["statusIntervalSeconds"] is System.Text.Json.Nodes.JsonValue value && value.TryGetValue<int>(out var seconds) ? seconds : 15;
+            operational.TryAdd("configurationIntervalSeconds", System.Text.Json.Nodes.JsonValue.Create(interval));
+            operational.TryAdd("staleStatusSeconds", System.Text.Json.Nodes.JsonValue.Create(interval));
+        }
+        return ParticipantSupport.Read<PortablePolicies>(JsonSerializer.SerializeToElement(document));
+    }
     public string Kind => "operational-agent-policy";
     public bool SecurityPolicy => true;
     public int Priority => 90;
@@ -175,18 +188,16 @@ public sealed class PoliciesParticipant(OperationalPolicyService policies, Autom
     public async Task<IReadOnlyList<string>> ValidateAsync(JsonElement content, PortableParticipantImportContext c, CancellationToken ct)
     {
         await support.SystemAdmin(c.ActorId, ct); await support.Require(c.ActorId, "settings.write", "instance", null, ct);
-        var section = ParticipantSupport.Read<PortablePolicies>(content);
+        var section = ReadPolicies(content);
         var policy = section.Operational;
-        if (!Validator.TryValidateObject(policy, new ValidationContext(policy), [], true)
-            || policy.MaximumTextBytes > policy.MaximumWorkspaceBytes || policy.MaximumUploadBytes > policy.MaximumWorkspaceBytes
-            || policy.MaximumConnectionsPerUser > policy.MaximumConnections) throw new PortabilityException("Invalid operational/Agent policy limits.");
+        if (!Validator.TryValidateObject(policy, new ValidationContext(policy), [], true)) throw new PortabilityException("Invalid operational/Agent policy limits.");
         AutomationRules.ValidateLimits(section.Automation);
         return [];
     }
     public async Task ApplyAsync(JsonElement content, PortableParticipantImportContext c, CancellationToken ct)
     {
         await ValidateAsync(content, c, ct);
-        var section = ParticipantSupport.Read<PortablePolicies>(content);
+        var section = ReadPolicies(content);
         var current = await policies.GetAsync(ct);
         await policies.SaveAsync(c.ActorId, new(section.Operational, current.Version), ct);
         await automation.SaveLimitsAsync(c.ActorId, section.Automation, ct);

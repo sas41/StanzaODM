@@ -46,14 +46,15 @@ public sealed class OperationalPolicyTests
     [InlineData("upload-workspace")]
     [InlineData("text-workspace")]
     [InlineData("connections")]
-    public async Task CrossFieldInconsistenciesAreRejected(string mismatch)
+    public async Task IndependentLimitsCanBeSavedAndTheEffectiveSmallerLimitApplies(string mismatch)
     {
         await using var fixture = await ConfigurationTestStore.CreateAsync(); await using var db = fixture.Context();
         var policy = new OperationalPolicy();
         if (mismatch == "upload-workspace") policy.MaximumWorkspaceBytes = policy.MaximumUploadBytes - 1;
         if (mismatch == "text-workspace") { policy.MaximumUploadBytes = 1; policy.MaximumWorkspaceBytes = policy.MaximumTextBytes - 1; }
         if (mismatch == "connections") { policy.MaximumConnections = 4; policy.MaximumConnectionsPerUser = 5; }
-        await Assert.ThrowsAsync<SettingsOperationException>(() => fixture.Policies(db).SaveAsync(fixture.Owner, new(policy, 0)));
+        await fixture.Policies(db).SaveAsync(fixture.Owner, new(policy, 0));
+        Assert.Equal(policy, (await fixture.Policies(db).GetAsync()).Policy);
     }
 
     [Theory]
@@ -67,7 +68,7 @@ public sealed class OperationalPolicyTests
         var desired = new OperationalPolicy
         {
             SessionHours = 12, LoginAttempts = 7, LoginWindowMinutes = 2, EnrollmentRequestsPerMinute = 11,
-            OperationTimeoutSeconds = 42, MaximumOutputCharacters = 2048, MaximumParallelOperations = 2,
+            OperationTimeoutSeconds = 42, MaximumParallelOperations = 2,
             MaximumTextBytes = 128, MaximumUploadBytes = 256, MaximumWorkspaceBytes = 512, MaximumSupportingFiles = 3,
             StatusIntervalSeconds = 2, MaximumConnectionsPerUser = 2, MaximumConnections = 8,
             LogRetentionDays = 2, AuditRetentionDays = 3, AllowHostActions = true,
@@ -77,7 +78,7 @@ public sealed class OperationalPolicyTests
         await using var restarted = fixture.Context();
         Assert.Equal(new PolicyEditor(desired, 1), await fixture.Policies(restarted).ReadAsync(actor));
         var runtime = await fixture.Policies(restarted).RuntimeAsync();
-        Assert.True(runtime.ExecutionEnabled); Assert.Equal(42, runtime.TimeoutSeconds); Assert.Equal(2048, runtime.MaximumOutputCharacters);
+        Assert.True(runtime.ExecutionEnabled); Assert.Equal(42, runtime.TimeoutSeconds);
         var limits = await new DeploymentEditorAdapters(restarted, fixture.Policies(restarted)).GetLimitsAsync();
         Assert.Equal(128, limits.TextBytes); Assert.Equal(256, limits.UploadBytes);
         Assert.Equal(512, limits.WorkspaceBytes); Assert.Equal(3, limits.SupportingEntries);

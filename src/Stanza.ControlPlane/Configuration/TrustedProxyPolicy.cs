@@ -23,7 +23,7 @@ public static class TrustedProxyPolicy
         var policy = (await context.RequestServices.GetRequiredService<OperationalPolicyService>().GetAsync(context.RequestAborted)).Policy;
         var entries = Parse(policy.TrustedProxyAddresses);
         if (entries.Count == 0) { await next(); return; }
-        var options = new ForwardedHeadersOptions { ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto, ForwardLimit = policy.TrustedProxyForwardLimit };
+        var options = new ForwardedHeadersOptions { ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto, ForwardLimit = policy.TrustedProxyForwardLimit == 0 ? null : policy.TrustedProxyForwardLimit };
         options.KnownProxies.Clear(); options.KnownIPNetworks.Clear();
         foreach (var entry in entries)
             if (IPAddress.TryParse(entry, out var ip)) options.KnownProxies.Add(ip); else options.KnownIPNetworks.Add(System.Net.IPNetwork.Parse(entry));

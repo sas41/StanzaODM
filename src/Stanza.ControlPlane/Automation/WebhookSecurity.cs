@@ -73,7 +73,7 @@ public sealed class WebhookReceiver(StanzaDbContext db, AutomationService automa
     public async Task<WebhookReceipt> ReceiveAsync(Guid id, string signature, string deliveryId, string eventName, byte[] body, CancellationToken ct = default)
     {
         var limits = await automation.LimitsAsync(ct);
-        if (body.Length > limits.MaximumWebhookBytes) return new(413, "payload-too-large");
+        if (Stanza.Core.Contracts.LimitPolicy.Exceeded(body.Length, limits.MaximumWebhookBytes)) return new(413, "payload-too-large");
         if (!WebhookSecurity.Token(deliveryId) || !WebhookSecurity.Token(eventName) || eventName.Length > 100) return new(400, "invalid-delivery-headers");
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         var hook = await db.Set<WebhookDefinition>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct);
@@ -83,7 +83,7 @@ public sealed class WebhookReceiver(StanzaDbContext db, AutomationService automa
         if (prior is not null) return new(200, "duplicate", prior.RunId);
         var window = automation.Now / 60;
         var count = hook.RateWindow == window ? hook.RateCount + 1 : 1;
-        if (count > limits.DeliveriesPerMinute) return new(429, "rate-limited");
+        if (Stanza.Core.Contracts.LimitPolicy.Exceeded(count, limits.DeliveriesPerMinute)) return new(429, "rate-limited");
         // Revision CAS serializes rate-limit, secret rotation/revocation, and deliveries across workers.
         if (await db.Set<WebhookDefinition>().Where(x => x.Id == id && x.Revision == hook.Revision && x.Enabled)
                 .ExecuteUpdateAsync(u => u.SetProperty(x => x.RateWindow, window).SetProperty(x => x.RateCount, count)

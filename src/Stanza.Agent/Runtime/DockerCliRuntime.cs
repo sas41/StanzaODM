@@ -28,7 +28,7 @@ public sealed class DockerCliRuntime(
             ["DOCKER_HOST"] = runtimeOptions.Value.Endpoint,
             ["LANG"] = "C.UTF-8",
             ["LC_ALL"] = "C.UTF-8"
-        }, TimeSpan.FromSeconds(probe ? 15 : runtimeOptions.Value.OperationTimeoutSeconds), runtimeOptions.Value.MaxOutputCharacters);
+        }, Stanza.Core.Contracts.LimitPolicy.Duration(probe ? 15 : runtimeOptions.Value.OperationTimeoutSeconds));
 
     public async Task<RuntimeCapabilities> DetectAsync(CancellationToken cancellationToken = default)
     {

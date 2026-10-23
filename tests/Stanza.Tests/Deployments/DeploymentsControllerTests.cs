@@ -57,7 +57,7 @@ public sealed class DeploymentsControllerTests : IAsyncLifetime
         var mutations = typeof(DeploymentsController).GetMethods().Where(method => method.GetCustomAttribute<HttpPostAttribute>() is not null).ToArray();
         Assert.Equal(9, mutations.Length);
         Assert.All(mutations, method => Assert.NotNull(method.GetCustomAttribute<ValidateAntiForgeryTokenAttribute>()));
-        Assert.NotNull(typeof(DeploymentsController).GetCustomAttribute<RequestSizeLimitAttribute>());
+        Assert.NotNull(typeof(DeploymentsController).GetCustomAttribute<DisableRequestSizeLimitAttribute>());
         Assert.NotNull(typeof(DeploymentsController).GetCustomAttribute<RequestFormLimitsAttribute>());
     }
 

@@ -92,6 +92,7 @@ public sealed class SchedulerTests
         s.Operations.State = "Unknown"; await s.Executor().ExecuteNextAsync(); s.Clock.Advance(TimeSpan.FromDays(2));
         await s.Scheduler().TickAsync(); Assert.Equal("uncertain", (await s.Service.ReadRunAsync(s.Root, run.Id)).Run.State);
         await Assert.ThrowsAsync<AutomationAccessException>(() => s.Service.SaveLimitsAsync(s.User, new()));
-        await Assert.ThrowsAsync<AutomationException>(() => s.Service.SaveLimitsAsync(s.Root, new(MaximumWebhookBytes: 0)));
+        await s.Service.SaveLimitsAsync(s.Root, new(MaximumWebhookBytes: 0));
+        Assert.Equal(0, (await s.Service.LimitsAsync()).MaximumWebhookBytes);
     }
 }

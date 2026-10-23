@@ -120,10 +120,10 @@ public sealed class AgentOptionsTests
     {
         Assert.False(DockerRuntimeOptions.IsValid(new() { ExecutablePath = "docker" }));
         Assert.False(DockerRuntimeOptions.IsValid(new() { ExecutablePath = "/usr/bin/docker\0" }));
-        Assert.False(DockerRuntimeOptions.IsValid(new() { OperationTimeoutSeconds = 0 }));
-        Assert.False(DockerRuntimeOptions.IsValid(new() { OperationTimeoutSeconds = 3601 }));
-        Assert.False(DockerRuntimeOptions.IsValid(new() { MaxOutputCharacters = 1023 }));
-        Assert.False(DockerRuntimeOptions.IsValid(new() { MaxOutputCharacters = 1048577 }));
+        Assert.True(DockerRuntimeOptions.IsValid(new() { OperationTimeoutSeconds = 0 }));
+        Assert.True(DockerRuntimeOptions.IsValid(new() { OperationTimeoutSeconds = 3601 }));
+        Assert.False(DockerRuntimeOptions.IsValid(new() { OperationTimeoutSeconds = -1 }));
+        Assert.False(DockerRuntimeOptions.IsValid(new() { OperationTimeoutSeconds = 604801 }));
     }
 
     internal static AgentOptions ValidOptions() => new()

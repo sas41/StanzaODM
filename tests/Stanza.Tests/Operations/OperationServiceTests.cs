@@ -213,10 +213,10 @@ public sealed class OperationServiceTests
         await h.InScope(async services =>
         {
             await services.GetRequiredService<AgentPolicyService>().SaveAsync(h.Root, new(h.Agent,
-                new(true, 37, 4096, "unix:///run/selected-docker.sock"), 0)); return true;
+                new(true, 37, "unix:///run/selected-docker.sock"), 0)); return true;
         });
         var policy = h.Decode(await h.RowAsync((await h.EnqueueAsync()).Id)).Policy;
-        Assert.Equal(new AgentRuntimePolicy(true, 37, 4096, "unix:///run/selected-docker.sock"), policy);
+        Assert.Equal(new AgentRuntimePolicy(true, 3600, "unix:///run/selected-docker.sock"), policy);
     }
 
     [Fact]

@@ -13,15 +13,15 @@ public sealed class AgentPolicyTests
     {
         await using var fixture = await ConfigurationTestStore.CreateAsync(); var id = await fixture.AgentAsync();
         await using var db = fixture.Context(); var service = fixture.AgentPolicies(db);
-        await fixture.Policies(db).SaveAsync(fixture.Owner, new(new() { OperationTimeoutSeconds = 19, MaximumOutputCharacters = 4096 }, 0));
+        await fixture.Policies(db).SaveAsync(fixture.Owner, new(new() { OperationTimeoutSeconds = 19 }, 0));
         var inherited = await service.ReadAsync(fixture.Owner, id);
-        Assert.Equal(0, inherited.Version); Assert.Equal(19, inherited.Policy.TimeoutSeconds); Assert.Equal(4096, inherited.Policy.MaximumOutputCharacters);
-        var desired = new AgentRuntimePolicy(false, 11, 8192, "unix:///run/custom-docker.sock");
+        Assert.Equal(0, inherited.Version); Assert.Equal(19, inherited.Policy.TimeoutSeconds);
+        var desired = new AgentRuntimePolicy(false, 11, "unix:///run/custom-docker.sock");
         await service.SaveAsync(fixture.Owner, new(id, desired, 0));
         await using var restarted = fixture.Context();
-        Assert.Equal(new AgentPolicyEditor(id, desired, 1), await fixture.AgentPolicies(restarted).ReadAsync(fixture.Owner, id));
+        Assert.Equal(new AgentPolicyEditor(id, desired with { TimeoutSeconds = 19 }, 1), await fixture.AgentPolicies(restarted).ReadAsync(fixture.Owner, id));
         await fixture.Policies(restarted).SaveAsync(fixture.Owner, new(new() { OperationTimeoutSeconds = 30 }, 1));
-        Assert.Equal(desired, await fixture.AgentPolicies(restarted).RuntimeAsync(id));
+        Assert.Equal(desired with { TimeoutSeconds = 30 }, await fixture.AgentPolicies(restarted).RuntimeAsync(id));
     }
 
     [Theory]
@@ -40,14 +40,14 @@ public sealed class AgentPolicyTests
     }
 
     [Theory]
-    [InlineData(0, 1024)]
-    [InlineData(3601, 1024)]
-    [InlineData(1, 1023)]
-    [InlineData(1, 1048577)]
-    public async Task AgentSpecificLimitsRespectHardBounds(int timeout, int output)
+    [InlineData(0)]
+    [InlineData(3601)]
+    [InlineData(-1)]
+    public async Task AgentSpecificTimeoutCannotOverrideGlobalTimeout(int timeout)
     {
         await using var fixture = await ConfigurationTestStore.CreateAsync(); var id = await fixture.AgentAsync(); await using var db = fixture.Context();
-        await Assert.ThrowsAsync<SettingsOperationException>(() => fixture.AgentPolicies(db).SaveAsync(fixture.Owner, new(id, new(true, timeout, output), 0)));
+        await fixture.AgentPolicies(db).SaveAsync(fixture.Owner, new(id, new(true, timeout), 0));
+        Assert.Equal(3600, (await fixture.AgentPolicies(db).RuntimeAsync(id)).TimeoutSeconds);
     }
 
     [Fact]
@@ -86,6 +86,6 @@ public sealed class AgentPolicyTests
         await fixture.AgentPolicies(second).SaveAsync(fixture.Owner, new(id, new(false, 60), 1));
         await Assert.ThrowsAsync<SettingsOperationException>(() => fixture.AgentPolicies(first).SaveAsync(fixture.Owner, stale));
         var latest = await fixture.AgentPolicies(second).ReadAsync(fixture.Owner, id);
-        Assert.Equal(2, latest.Version); Assert.False(latest.Policy.ExecutionEnabled); Assert.Equal(60, latest.Policy.TimeoutSeconds);
+        Assert.Equal(2, latest.Version); Assert.False(latest.Policy.ExecutionEnabled); Assert.Equal(3600, latest.Policy.TimeoutSeconds);
     }
 }

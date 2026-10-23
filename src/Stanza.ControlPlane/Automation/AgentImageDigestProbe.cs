@@ -97,7 +97,7 @@ public sealed class AgentImageDigestProbe(StanzaDbContext db, DeploymentDraftSer
         var latestApplied = await db.Set<OperationEntity>().AsNoTracking().Where(x => x.DeploymentId == deploymentId && x.Kind == "deploy" && x.State == "Succeeded")
             .OrderByDescending(x => x.CompletedAt).ThenByDescending(x => x.CreatedAt).Select(x => x.Id).FirstOrDefaultAsync(ct);
         if (latestApplied != applied.Id) throw new AutomationException("image-probe-applied-state-changed");
-        if (response.Id != request.Id || !response.Succeeded || response.Code == "uncertain" || response.Output is null || response.Output.Length > policy.MaximumOutputCharacters)
+        if (response.Id != request.Id || !response.Succeeded || response.Code == "uncertain" || response.Output is null)
         {
             await audit.WriteAsync(actorId, "image-probe.finished", deploymentId.ToString(), "failed", ct);
             throw new AutomationException("image-probe-agent-failed");

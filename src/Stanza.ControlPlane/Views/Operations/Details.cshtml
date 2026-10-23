@@ -4,6 +4,9 @@
 <p>Agent: @Model.Summary.AgentId · Deployment: @Model.Summary.DeploymentId · Trigger: @Model.Summary.Trigger</p>
 @if (!Stanza.ControlPlane.Operations.OperationService.Terminal(Model.Summary.State)) { <form method="post" asp-action="Cancel" asp-route-id="@Model.Summary.Id"><button class="button" type="submit">Request cancellation</button></form><p class="field-help">Cancellation cannot undo side effects already performed. Persisted state updates arrive over the authenticated live connection.</p> }
 @if (Model.Summary.State == "Unknown") { <div class="notice warning">Execution may have taken place. Inspect current runtime status before explicitly acknowledging this outcome. This operation will never be retried automatically.</div><form method="post" asp-action="Reconcile" asp-route-id="@Model.Summary.Id"><label><input type="checkbox" name="acknowledged" value="true" required /> I inspected a fresh successful status operation and acknowledge the uncertainty.</label><button class="button" type="submit">Acknowledge inspected outcome</button></form> }
-<section class="panel"><h2>Authorized operation output</h2><pre data-operation-output hidden="@(Model.Output is null)">@Model.Output</pre></section>
+<section class="panel"><h2>Operation output</h2>
+<p data-output-notice>@(!Model.OutputAllowed ? "You do not have permission to read this operation's output." : "Connecting to operation output. Output is retained according to Settings; expired or previously discarded output cannot be recovered.")</p>
+@if (Model.OutputAllowed) { <label><input type="checkbox" data-output-follow checked /> Follow output</label><a href="/operations/@Model.Summary.Id/output">Download retained output</a> }
+<pre data-operation-output hidden="@(Model.Output is null)">@Model.Output</pre></section>
 <a href="/operations">← Operations</a>
 </section><script src="~/js/operations.js" defer asp-append-version="true"></script>

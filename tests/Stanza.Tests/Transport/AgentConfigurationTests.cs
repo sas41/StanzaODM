@@ -24,7 +24,7 @@ public sealed class AgentConfigurationTests
         using var directory = new AgentTestDirectory(); var id = Guid.NewGuid();
         Assert.Throws<IOException>(() => Cache(directory.Path).Begin(Configuration(id) with { AgentId = Guid.Empty }));
         Assert.Throws<IOException>(() => Cache(directory.Path).Begin(Configuration(id, id)));
-        Assert.Throws<IOException>(() => Cache(directory.Path).Begin(Configuration(id) with { Policy = new(TimeoutSeconds: 0) }));
+        Assert.Throws<IOException>(() => Cache(directory.Path).Begin(Configuration(id) with { Policy = new(TimeoutSeconds: -1) }));
         Assert.Throws<IOException>(() => Cache(directory.Path).Begin(Configuration(id) with { AgentEnvironment = "bad\0value" }));
         Assert.False(Directory.Exists(Path.Combine(directory.Path, "configuration-cache")));
     }
@@ -42,7 +42,7 @@ public sealed class AgentConfigurationTests
         using var directory = new AgentTestDirectory();
         var untouched = Path.Combine(directory.Path, "operation-workspaces", "running");
         Directory.CreateDirectory(untouched); await File.WriteAllTextAsync(Path.Combine(untouched, "keep"), "running");
-        var deployment = Deployment(); var config = Configuration(deployment.Id) with { Policy = new(false, 42, 2048) };
+        var deployment = Deployment(); var config = Configuration(deployment.Id) with { Policy = new(false, 42) };
         var cache = Cache(directory.Path); cache.Begin(config); await cache.ApplyAsync(deployment, default); await cache.CompleteAsync(default);
         var files = Path.Combine(cache.Root, "deployments", deployment.Id.ToString("N"), "files");
         Assert.Equal(deployment.Files[0].Content, await File.ReadAllBytesAsync(Path.Combine(files, "compose.yaml")));

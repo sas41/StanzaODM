@@ -134,15 +134,20 @@ public static class LiveStatusExtensions
     private static async Task<WebSocketCloseStatus> SendStatusAsync(WebSocket socket, IServiceScopeFactory scopes,
         Guid actorId, string stamp, DateTimeOffset expires, TimeProvider clock, CancellationToken token)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15), clock);
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1), clock);
+        var first = true;
+        var lastSent = clock.GetUtcNow();
         do
         {
             await using var scope = scopes.CreateAsyncScope();
             var services = scope.ServiceProvider;
-            timer.Period = TimeSpan.FromSeconds((await services.GetRequiredService<OperationalPolicyService>().GetAsync(token)).Policy.StatusIntervalSeconds);
+            var interval = (await services.GetRequiredService<OperationalPolicyService>().GetAsync(token)).Policy.StatusIntervalSeconds;
             var account = await services.GetRequiredService<AccountService>().FindAsync(actorId, token);
             if (clock.GetUtcNow() >= expires || account is null || !account.Enabled || account.SecurityStamp != stamp)
                 return WebSocketCloseStatus.PolicyViolation;
+            if (!first && (interval == 0 || clock.GetUtcNow() - lastSent < TimeSpan.FromSeconds(interval))) continue;
+            first = false;
+            lastSent = clock.GetUtcNow();
             var ready = await services.GetRequiredService<StanzaDbContext>().Database.CanConnectAsync(token);
             int? agentCount = null;
             int? pendingAgentCount = null;

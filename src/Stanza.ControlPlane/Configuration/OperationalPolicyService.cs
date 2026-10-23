@@ -10,25 +10,26 @@ namespace Stanza.ControlPlane.Configuration;
 
 public sealed record OperationalPolicy
 {
-    [Range(1, 168)] public int SessionHours { get; set; } = 8;
-    [Range(1, 1000)] public int LoginAttempts { get; set; } = 20;
-    [Range(1, 60)] public int LoginWindowMinutes { get; set; } = 5;
-    [Range(1, 10000)] public int EnrollmentRequestsPerMinute { get; set; } = 120;
-    [Range(1, 3600)] public int OperationTimeoutSeconds { get; set; } = 300;
-    [Range(1024, 1048576)] public int MaximumOutputCharacters { get; set; } = 65536;
-    [Range(1, 32)] public int MaximumParallelOperations { get; set; } = 4;
-    [Range(1, 1048576)] public int MaximumTextBytes { get; set; } = 1048576;
-    [Range(1, 4194304)] public int MaximumUploadBytes { get; set; } = 4194304;
-    [Range(1, 16777216)] public int MaximumWorkspaceBytes { get; set; } = 16777216;
-    [Range(1, 100)] public int MaximumSupportingFiles { get; set; } = 100;
-    [Range(1, 60)] public int StatusIntervalSeconds { get; set; } = 15;
-    [Range(1, 32)] public int MaximumConnectionsPerUser { get; set; } = 4;
-    [Range(4, 10000)] public int MaximumConnections { get; set; } = 1024;
-    [Range(1, 3650)] public int LogRetentionDays { get; set; } = 30;
-    [Range(1, 3650)] public int AuditRetentionDays { get; set; } = 365;
+    [Range(0, 168)] public int SessionHours { get; set; } = 8;
+    [Range(0, int.MaxValue)] public int LoginAttempts { get; set; } = 20;
+    [Range(0, 35791394)] public int LoginWindowMinutes { get; set; } = 5;
+    [Range(0, int.MaxValue)] public int EnrollmentRequestsPerMinute { get; set; } = 120;
+    [Range(0, 604800)] public int OperationTimeoutSeconds { get; set; } = 3600;
+    [Range(0, int.MaxValue)] public int MaximumParallelOperations { get; set; } = 4;
+    [Range(0, int.MaxValue)] public int MaximumTextBytes { get; set; } = 4 * 1024 * 1024;
+    [Range(0, int.MaxValue)] public int MaximumUploadBytes { get; set; } = 16 * 1024 * 1024;
+    [Range(0, int.MaxValue)] public int MaximumWorkspaceBytes { get; set; } = 64 * 1024 * 1024;
+    [Range(0, int.MaxValue)] public int MaximumSupportingFiles { get; set; } = 128;
+    [Range(0, 604800)] public int StatusIntervalSeconds { get; set; } = 15;
+    [Range(0, 604800)] public int ConfigurationIntervalSeconds { get; set; } = 15;
+    [Range(0, 604800)] public int StaleStatusSeconds { get; set; } = 15;
+    [Range(0, int.MaxValue)] public int MaximumConnectionsPerUser { get; set; } = 4;
+    [Range(0, int.MaxValue)] public int MaximumConnections { get; set; } = 1024;
+    [Range(0, 3650)] public int LogRetentionDays { get; set; } = 30;
+    [Range(0, 3650)] public int AuditRetentionDays { get; set; } = 365;
     public bool AllowHostActions { get; set; }
-    [StringLength(4096)] public string TrustedProxyAddresses { get; set; } = "";
-    [Range(1, 10)] public int TrustedProxyForwardLimit { get; set; } = 1;
+    [StringLength(4096)] public string TrustedProxyAddresses { get; set; } = "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1,fc00::/7";
+    [Range(0, int.MaxValue)] public int TrustedProxyForwardLimit { get; set; } = 1;
 }
 
 public sealed record PolicyEditor(OperationalPolicy Policy, long Version);
@@ -55,10 +56,7 @@ public sealed class OperationalPolicyService(StanzaDbContext db, AccessService a
     {
         edit.Policy.TrustedProxyAddresses ??= "";
         var errors = new List<ValidationResult>();
-        if (!Validator.TryValidateObject(edit.Policy, new ValidationContext(edit.Policy), errors, true)
-            || edit.Policy.MaximumUploadBytes > edit.Policy.MaximumWorkspaceBytes
-            || edit.Policy.MaximumTextBytes > edit.Policy.MaximumWorkspaceBytes
-            || edit.Policy.MaximumConnectionsPerUser > edit.Policy.MaximumConnections)
+        if (!Validator.TryValidateObject(edit.Policy, new ValidationContext(edit.Policy), errors, true))
             throw new SettingsOperationException("Operational limits are invalid or inconsistent.");
         TrustedProxyPolicy.Parse(edit.Policy.TrustedProxyAddresses);
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
@@ -77,6 +75,6 @@ public sealed class OperationalPolicyService(StanzaDbContext db, AccessService a
     public async Task<AgentRuntimePolicy> RuntimeAsync(CancellationToken ct = default)
     {
         var policy = (await GetAsync(ct)).Policy;
-        return new(true, policy.OperationTimeoutSeconds, policy.MaximumOutputCharacters);
+        return new(true, policy.OperationTimeoutSeconds);
     }
 }

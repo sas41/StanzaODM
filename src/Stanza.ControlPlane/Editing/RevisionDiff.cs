@@ -12,8 +12,6 @@ public static class RevisionDiff
 {
     public static IReadOnlyList<RevisionDiffLine> Compare(string before, string after)
     {
-        if (Encoding.UTF8.GetByteCount(before) > DeploymentDraftService.MaximumTextBytes || Encoding.UTF8.GetByteCount(after) > DeploymentDraftService.MaximumTextBytes)
-            throw new DeploymentDraftException("Text diffs are limited to 1 MiB per file; download exact files to compare larger content.");
         var a = Lines(before); var b = Lines(after);
         var result = new List<RevisionDiffLine>();
         var start = 0;

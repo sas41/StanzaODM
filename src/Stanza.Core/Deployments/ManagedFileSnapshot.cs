@@ -59,7 +59,7 @@ public sealed record ManagedFileLimits
 {
     public ManagedFileLimits(int maximumEntries, long maximumFileBytes, long maximumTotalBytes)
     {
-        if (maximumEntries <= 0) throw new ArgumentOutOfRangeException(nameof(maximumEntries));
+        if (maximumEntries < 0) throw new ArgumentOutOfRangeException(nameof(maximumEntries));
         if (maximumFileBytes < 0) throw new ArgumentOutOfRangeException(nameof(maximumFileBytes));
         if (maximumTotalBytes < 0) throw new ArgumentOutOfRangeException(nameof(maximumTotalBytes));
         MaximumEntries = maximumEntries;
@@ -94,7 +94,7 @@ public static class DeploymentWorkspaceValidator
         ArgumentNullException.ThrowIfNull(files);
         ArgumentNullException.ThrowIfNull(sources);
         ArgumentNullException.ThrowIfNull(limits);
-        if (files.Count > limits.MaximumEntries)
+        if (limits.MaximumEntries > 0 && files.Count > limits.MaximumEntries)
             throw new ArgumentException("Managed entry count exceeds the configured limit.", nameof(files));
 
         long total = 0;
@@ -104,7 +104,7 @@ public static class DeploymentWorkspaceValidator
         foreach (var file in files)
         {
             ArgumentNullException.ThrowIfNull(file);
-            if (file.Length > limits.MaximumFileBytes || file.Length > limits.MaximumTotalBytes - total)
+            if (limits.MaximumFileBytes > 0 && file.Length > limits.MaximumFileBytes || limits.MaximumTotalBytes > 0 && file.Length > limits.MaximumTotalBytes - total)
                 throw new ArgumentException("Managed file bytes exceed the configured limit.", nameof(files));
             total += file.Length;
             if (!entries.TryAdd(file.Path.Value, file))

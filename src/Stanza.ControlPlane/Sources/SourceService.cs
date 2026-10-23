@@ -14,7 +14,7 @@ using Stanza.Core.Deployments;
 namespace Stanza.ControlPlane.Sources;
 
 public sealed class SourceService(StanzaDbContext db, AccessService access, IDataProtectionProvider protection,
-    IAgentCommandDispatcher dispatcher) : ISourceSnapshotProvider
+    IAgentCommandDispatcher dispatcher, Configuration.AgentPolicyService? policies = null) : ISourceSnapshotProvider
 {
     public async Task<IReadOnlyList<SourceAgentSummary>> ListAgentsAsync(Guid actorId, CancellationToken ct = default)
     {
@@ -269,9 +269,8 @@ public sealed class SourceService(StanzaDbContext db, AccessService access, IDat
     {
         try
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromSeconds(45));
-            var response = await dispatcher.DispatchAsync(agentId, request, timeout.Token);
+            if (policies is not null) request = request with { Policy = await policies.RuntimeAsync(agentId, ct) };
+            var response = await dispatcher.DispatchAsync(agentId, request, ct);
             if (!response.Succeeded) throw new SourceException("The Agent could not complete the connection check. Check its connectivity, endpoint, and credentials.");
             return response;
         }

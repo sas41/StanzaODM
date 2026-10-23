@@ -15,7 +15,7 @@ using Stanza.ControlPlane.Automation;
 namespace Stanza.ControlPlane.Operations;
 
 public sealed class OperationException(string message) : Exception(message);
-public sealed record OperationDetail(OperationSummary Summary, string? Output)
+public sealed record OperationDetail(OperationSummary Summary, string? Output, bool OutputAllowed = true)
 {
     public override string ToString() => $"OperationDetail {{ Id = {Summary.Id}, Output = [REDACTED] }}";
 }
@@ -115,7 +115,6 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         if (submission.DeploymentId is { } sourceDeployment && !ControlsExistingContainers(submission.Kind) && submission.Kind != "environment-preview")
             serialized["_stanzaSourceDefinitions"] = JsonSerializer.SerializeToNode(await SourceDefinitionsAsync(sourceDeployment, token));
         var requestText = serialized.ToJsonString();
-        if (System.Text.Encoding.UTF8.GetByteCount(requestText) > 30 * 1024 * 1024) throw new OperationException("The execution snapshot exceeds the transport limit.");
         var operation = new OperationEntity { Id = id, ActorId = submission.ActorId, DeploymentId = submission.DeploymentId,
             RequiresMovePermission = submission.AgentId.HasValue && submission.DeploymentId.HasValue,
             ParentAppliedOperationId = parentAppliedOperationId,
@@ -150,13 +149,23 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
     {
         var row = await RequiredAsync(id, ct);
         if (!await CanReadAsync(actor, row, ct)) throw new OperationException("Operation read access is denied.");
-        var output = row.ProtectedResponse is not null && (row.Kind == "environment-preview" && row.DeploymentId is { } previewDeployment
+        var allowed = await CanReadOutputAsync(actor, row, ct);
+        var output = row.ProtectedResponse is not null && allowed
+            ? JsonSerializer.Deserialize<AgentWorkResponse>(Protector(id).Unprotect(row.ProtectedResponse))?.Output : null;
+        return new(Summary(row), output, allowed);
+    }
+
+    public async Task<bool> CanReadOutputAsync(Guid actor, Guid id, CancellationToken ct = default)
+    {
+        var row = await RequiredAsync(id, ct);
+        return await CanReadAsync(actor, row, ct) && await CanReadOutputAsync(actor, row, ct);
+    }
+
+    private async Task<bool> CanReadOutputAsync(Guid actor, OperationEntity row, CancellationToken ct) =>
+        row.Kind == "environment-preview" && row.DeploymentId is { } previewDeployment
             ? await CanRevealEnvironmentPreviewAsync(actor, previewDeployment, row.AgentId, ct)
             : row.DeploymentId is { } deployment ? await access.IsAllowedAsync(actor, "logs.read", "deployment", deployment, ct)
-            : await access.IsAllowedAsync(actor, "host.execute", "agent", row.AgentId, ct))
-            ? JsonSerializer.Deserialize<AgentWorkResponse>(Protector(id).Unprotect(row.ProtectedResponse))?.Output : null;
-        return new(Summary(row), output);
-    }
+            : await access.IsAllowedAsync(actor, "host.execute", "agent", row.AgentId, ct);
     public async Task CancelAsync(Guid actorId, Guid operationId, CancellationToken token = default)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(token);

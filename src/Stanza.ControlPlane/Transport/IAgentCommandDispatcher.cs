@@ -15,6 +15,11 @@ public interface IAgentWorkProgressSource
     event Func<Guid, string, Task>? Progress;
 }
 
+public interface IAgentWorkOutputSource
+{
+    event Func<Guid, AgentOutputChunk, Task>? Output;
+}
+
 public interface IAgentConnectionCatalog
 {
     IReadOnlyList<Guid> ConnectedAgentIds { get; }

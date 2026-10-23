@@ -53,6 +53,7 @@ internal sealed class OperationTestHarness : IAsyncDisposable
         registrations.AddMemoryCache(); registrations.AddScoped<ActionInputService>(); registrations.AddScoped<DeploymentActionOverview>();
         registrations.AddScoped<ISourceSnapshotProvider>(services => services.GetRequiredService<SourceService>());
         registrations.AddScoped<OperationService>();
+        registrations.AddScoped<OperationOutputStore>();
         harness.Services = registrations.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true, ValidateScopes = true });
         await harness.InScope(async services =>
         {
@@ -172,8 +173,14 @@ internal sealed class OperationTestHarness : IAsyncDisposable
     }
 }
 
-internal sealed class OperationTestDispatcher : IAgentCommandDispatcher
+internal sealed class OperationTestDispatcher : IAgentCommandDispatcher, IAgentWorkOutputSource
 {
+    public event Func<Guid, AgentOutputChunk, Task>? Output;
+    public async Task EmitAsync(Guid id, AgentOutputChunk chunk)
+    {
+        if (Output is not { } handlers) return;
+        foreach (Func<Guid, AgentOutputChunk, Task> handler in handlers.GetInvocationList()) await handler(id, chunk);
+    }
     private readonly ConcurrentQueue<(Guid Agent, AgentWorkRequest Request)> dispatched = new();
     private readonly SemaphoreSlim arrivals = new(0);
     public IReadOnlyList<(Guid Agent, AgentWorkRequest Request)> Requests => dispatched.ToArray();

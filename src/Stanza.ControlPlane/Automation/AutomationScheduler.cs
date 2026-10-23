@@ -105,6 +105,7 @@ public sealed class AutomationScheduler(StanzaDbContext db, AutomationService au
     private async Task RetainAsync(CancellationToken ct)
     {
         var limits = await automation.LimitsAsync(ct); var cutoff = automation.Now - limits.HistoryRetentionDays * 86400L;
+        if (limits.HistoryRetentionDays == 0) return;
         await db.Set<WebhookDelivery>().Where(x => x.ReceivedAt < cutoff).ExecuteDeleteAsync(ct);
         // Uncertain runs and active locks are never pruned automatically.
         await db.Set<AutomationRun>().Where(x => x.CompletedAt < cutoff && x.State != "uncertain").ExecuteDeleteAsync(ct);

@@ -42,7 +42,7 @@ public sealed class PortableDestinationPreviewService(StanzaDbContext db, Access
                 var agentText = string.IsNullOrEmpty(agent.ProtectedEnvironment) ? "" : protection.CreateProtector("Stanza.AgentEnvironment.v1")
                     .CreateProtector(destination.ToString("N")).Unprotect(agent.ProtectedEnvironment);
                 // This short-lived rule object only constructs an immutable scanner input. It is not application persistence.
-                var revision = new InMemoryDeploymentRevisionService(new(2, DeploymentDraftService.MaximumTextBytes, DeploymentDraftService.MaximumWorkspaceBytes))
+                var revision = new InMemoryDeploymentRevisionService(new(2, 0, 0))
                     .Save(deploymentId, destination, 0, "compose.yaml", [ManagedFileSnapshot.Text("compose.yaml", content.Compose)], content.Environment);
                 preview = EnvironmentLiteralPreviewScanner.Scan(EnvironmentScopeSnapshot.Capture(revision, global.GlobalEnvironment, agentText));
                 if (!preview.IsSupported) unavailable = "Literal preview unavailable for this syntax. Docker Compose remains authoritative; no effective values were approximated. Destination runtime validation is still required.";

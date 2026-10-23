@@ -27,7 +27,7 @@ public sealed class ImageRegistryIntegrationTests
         string? image = null;
         async Task<string> Docker(params string[] arguments)
         {
-            var result = await runner.RunAsync(new("/usr/bin/docker", root.Path, arguments, environment, TimeSpan.FromSeconds(120), 1048576));
+            var result = await runner.RunAsync(new("/usr/bin/docker", root.Path, arguments, environment, TimeSpan.FromSeconds(120)));
             Assert.True(result.ExitCode == 0 && !result.TimedOut && !result.OutputLimitExceeded, "Fixture Docker command failed: " + string.Join(' ', arguments.Take(3)) + "\n" + result.StandardError);
             return result.StandardOutput.Trim();
         }
@@ -36,7 +36,7 @@ public sealed class ImageRegistryIntegrationTests
         AgentWorkRequest Request(string operation, string registryAddress) => new(Guid.NewGuid(), id, operation,
             [new("compose.yaml", Encoding.UTF8.GetBytes($"services:\n  app:\n    image: {image}\n    command: [sleep, '300']\n    healthcheck:\n      test: [CMD, /bin/sh, -c, 'test -e /etc/alpine-release']\n      interval: 1s\n      timeout: 1s\n      retries: 10\n"))],
             [new("global.env", ""), new("agent.env", ""), new("deployment.env", "")],
-            Registries: [new(registryAddress, "fixture-user", "stanza-local-fixture-password")], Policy: new(TimeoutSeconds: 120, MaximumOutputCharacters: 1048576));
+            Registries: [new(registryAddress, "fixture-user", "stanza-local-fixture-password")], Policy: new(TimeoutSeconds: 120));
         try
         {
             // These credentials exist only in the isolated test registry; no external provider is used.

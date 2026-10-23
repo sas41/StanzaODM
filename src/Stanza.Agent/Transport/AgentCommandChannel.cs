@@ -1,5 +1,6 @@
 using System.Net.WebSockets;
 using System.Text.Json;
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using Stanza.Agent.Enrollment;
 using Stanza.Agent.Runtime;
@@ -37,31 +38,50 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
         using var send = new SemaphoreSlim(1, 1);
         Task? work = null;
+        var outputAcknowledgements = new ConcurrentDictionary<(Guid Id, long Sequence), TaskCompletionSource>();
         var terminalManager = terminals ?? new AgentTerminalManager();
         // Per-connection state: an interrupted replication always starts again with a full snapshot.
         var configuration = new AgentConfigurationCache(options);
         async Task SendAsync(AgentWireMessage message)
         {
             var bytes = JsonSerializer.SerializeToUtf8Bytes(message, message.Type.StartsWith("terminal.", StringComparison.Ordinal) ? TerminalJson : JsonSerializerOptions.Web);
-            if (bytes.Length > 32 * 1024 * 1024) throw new IOException("Agent frame exceeds the limit.");
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
             timeout.CancelAfter(TimeSpan.FromSeconds(15));
             await send.WaitAsync(timeout.Token);
-            try { await socket.SendAsync(bytes, WebSocketMessageType.Text, true, timeout.Token); }
+            try
+            {
+                for (var offset = 0; offset < bytes.Length; offset += 16384)
+                {
+                    var count = Math.Min(16384, bytes.Length - offset);
+                    await socket.SendAsync(bytes.AsMemory(offset, count), WebSocketMessageType.Text, offset + count == bytes.Length, timeout.Token);
+                }
+            }
             finally { send.Release(); }
         }
         async Task ExecuteAsync(AgentWorkRequest request)
         {
             async Task Report(Guid id, string stage) => await SendAsync(new("work.progress", id, Data: stage));
+            async Task Output(Guid id, AgentOutputChunk chunk)
+            {
+                var acknowledgement = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var key = (id, chunk.Sequence);
+                if (!outputAcknowledgements.TryAdd(key, acknowledgement)) throw new IOException("Duplicate output sequence.");
+                try
+                {
+                    await SendAsync(new("work.output", id, Output: chunk));
+                    await acknowledgement.Task.WaitAsync(TimeSpan.FromSeconds(30), lifetime.Token);
+                }
+                finally { outputAcknowledgements.TryRemove(key, out _); }
+            }
             var reporter = executor as IReportingAgentWorkExecutor;
-            if (reporter is not null) reporter.Progress += Report;
+            if (reporter is not null) { reporter.Progress += Report; reporter.Output += Output; }
             try
             {
                 var response = await executor.ExecuteAsync(request, lifetime.Token);
                 await SendAsync(new("work.response", response.Id, Response: response));
             }
             catch (Exception) { lifetime.Cancel(); socket.Abort(); }
-            finally { if (reporter is not null) reporter.Progress -= Report; }
+            finally { if (reporter is not null) { reporter.Progress -= Report; reporter.Output -= Output; } }
         }
         try
         {
@@ -104,6 +124,8 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
                 var message = await ReceiveAsync(socket, lifetime.Token);
                 if (message is null) break;
                 if (message.Type == "ping") await SendAsync(new("pong", message.Id));
+                else if (message.Type == "work.output.applied" && long.TryParse(message.Data, out var sequence) &&
+                    outputAcknowledgements.TryGetValue((message.Id, sequence), out var acknowledgement)) acknowledgement.TrySetResult();
                 else if (message.Type == "configuration.begin" && message.Id == Guid.Empty && message.Configuration is { } config)
                     configuration.Begin(config);
                 else if (message.Type == "configuration.deployment" && message.Deployment is { } deployment && message.Id == deployment.Id)
@@ -147,7 +169,7 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
         {
             var part = await socket.ReceiveAsync(buffer.AsMemory(), timeout.Token);
             if (part.MessageType == WebSocketMessageType.Close) return null;
-            if (part.MessageType != WebSocketMessageType.Text || stream.Length + part.Count > 32 * 1024 * 1024)
+            if (part.MessageType != WebSocketMessageType.Text)
                 throw new IOException("Invalid Agent frame.");
             stream.Write(buffer, 0, part.Count);
             if (part.EndOfMessage) break;

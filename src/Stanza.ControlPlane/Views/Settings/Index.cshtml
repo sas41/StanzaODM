@@ -15,8 +15,9 @@
     <div class="notice warning">These values may contain secrets. Configuration exports are fully plaintext and require explicit acknowledgement.</div>
     @if (Model.CanWriteSettings || Model.CanWriteEnvironment) { <button class="button primary" type="submit">Save settings</button> }
 </form></section>
+@if (Model.Operational is not null) { <partial name="_Operational" model="Model.Operational" /> }
 </div><aside>
-<section class="panel"><h2>Operational policy</h2><p>Manage session, execution, upload, retention, and live-connection limits.</p><a class="button" href="/policy">Open operational policy →</a></section>
+<section class="panel"><h2>Settings sections</h2><nav><a href="#operations">Operations</a> · <a href="#deployment-files">Deployment files</a> · <a href="#security">Security</a> · <a href="#networking">Networking</a> · <a href="#live-updates">Live updates</a> · <a href="#retention">Retention</a></nav></section>
 @if (User.IsInRole("SystemAdmin")) { <section class="panel"><h2>Instance recovery</h2><p>Encrypted database and encryption-key backup. Workload volumes are not included.</p><a href="/recovery">Backup and recovery →</a></section> }
 <section class="panel"><h2>Pre-launch and host prerequisites</h2><p class="muted">Database connectivity is configured before launch. Container mounts, host Docker permissions, listening ports, and reverse-proxy TLS are deployment prerequisites, not settings this process can safely modify.</p></section>
 <section class="panel"><h2>HTTP transport mode</h2>

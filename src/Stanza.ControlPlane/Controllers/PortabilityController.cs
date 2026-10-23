@@ -13,8 +13,8 @@ namespace Stanza.ControlPlane.Controllers;
 
 [Authorize, Route("portability"), ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 [TypeFilter(typeof(PortabilityExceptionFilter))]
-[RequestSizeLimit(34 * 1024 * 1024)]
-[RequestFormLimits(MultipartBodyLengthLimit = 33 * 1024 * 1024, ValueLengthLimit = 128 * 1024)]
+[DisableRequestSizeLimit]
+[RequestFormLimits(MultipartBodyLengthLimit = long.MaxValue, ValueLengthLimit = int.MaxValue)]
 public sealed class PortabilityController(PortabilityService portability, PortableMoveService moves,
     DeploymentDraftService drafts, AccessService access, StanzaDbContext db,
     PortableDestinationPreviewService destinationPreview) : Controller
@@ -53,7 +53,7 @@ public sealed class PortabilityController(PortabilityService portability, Portab
     {
         try
         {
-            if (bundle is null || bundle.Length > PortableBundleValidator.MaximumBundleBytes) throw new PortabilityException("Select a JSON bundle no larger than 32 MiB.");
+            if (bundle is null) throw new PortabilityException("Select a JSON bundle.");
             await using var stream = bundle.OpenReadStream();
             using var buffer = new MemoryStream();
             var chunk = new byte[81920];
@@ -61,7 +61,6 @@ public sealed class PortabilityController(PortabilityService portability, Portab
             {
                 var count = await stream.ReadAsync(chunk, ct);
                 if (count == 0) break;
-                if (buffer.Length + count > PortableBundleValidator.MaximumBundleBytes) throw new PortabilityException("The bundle exceeds 32 MiB.");
                 await buffer.WriteAsync(chunk.AsMemory(0, count), ct);
             }
             var mapping = new PortableImportMapping(PortableMappingParser.Parse<Guid>(agentMappings), PortableMappingParser.Parse<string>(deploymentNames), PortableMappingParser.Parse<string>(resourceMappings));

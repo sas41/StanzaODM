@@ -23,6 +23,26 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     IAgentHostPathResolver? hostPaths = null) : IAgentWorkExecutor, IReportingAgentWorkExecutor
 {
     public event Func<Guid, string, Task>? Progress;
+    public event Func<Guid, AgentOutputChunk, Task>? Output;
+    private long outputSequence;
+    private readonly SemaphoreSlim outputGate = new(1, 1);
+    private async Task EmitAsync(Guid id, string stream, string text)
+    {
+        if (Output is not { } handlers || text.Length == 0) return;
+        await outputGate.WaitAsync();
+        try
+        {
+            for (var offset = 0; offset < text.Length;)
+            {
+                var length = Math.Min(4096, text.Length - offset);
+                if (offset + length < text.Length && char.IsHighSurrogate(text[offset + length - 1])) length--;
+                var chunk = new AgentOutputChunk(++outputSequence, stream, text.Substring(offset, length));
+                foreach (Func<Guid, AgentOutputChunk, Task> handler in handlers.GetInvocationList()) await handler(id, chunk);
+                offset += length;
+            }
+        }
+        finally { outputGate.Release(); }
+    }
     private async Task ReportAsync(Guid id, string stage)
     {
         if (Progress is not { } progress) return;
@@ -37,11 +57,13 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     public async Task<AgentWorkResponse> ExecuteAsync(AgentWorkRequest request, CancellationToken token = default)
     {
         await execution.WaitAsync(token);
+        outputSequence = 0;
         string? secretDirectory = null;
         string? ledgerPath = null;
         string? hash = null;
         var started = false;
         var resultProduced = false;
+        using var operationTimeout = new CancellationTokenSource();
         var resolvedSources = new Dictionary<string, string>(StringComparer.Ordinal);
         var resolvedImages = new Dictionary<string, string>(StringComparer.Ordinal);
         FileStream? processLease = null;
@@ -59,7 +81,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
                 return new(request.Id, false, "invalid_request");
             var policy = request.Policy ?? new AgentRuntimePolicy();
             if (!policy.ExecutionEnabled) return new(request.Id, false, "execution_disabled");
-            if (policy.TimeoutSeconds is < 1 or > 3600 || policy.MaximumOutputCharacters is < 1 or > 1048576 ||
+            if (policy.TimeoutSeconds is < 0 or > 604800 ||
                 !DockerRuntimeOptions.IsValid(new DockerRuntimeOptions { Endpoint = policy.DockerEndpoint }))
                 return new(request.Id, false, "invalid_runtime_policy");
             var root = PrivateStorage.EnsureDirectory(options.Value.PersistentDataRoot);
@@ -83,8 +105,8 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             FlushDirectory(root);
             started = true;
             await ReportAsync(request.Id, "Validating");
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(policy.TimeoutSeconds));
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, timeout.Token);
+            if (policy.TimeoutSeconds > 0) operationTimeout.CancelAfter(LimitPolicy.Duration(policy.TimeoutSeconds));
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, operationTimeout.Token);
             var workspaces = PrivateStorage.EnsureDirectory(Path.Combine(root, "operation-workspaces"));
             var directory = Path.Combine(workspaces, request.Id.ToString("N"));
             if (Directory.Exists(directory)) throw new WorkFailure("workspace_conflict");
@@ -107,7 +129,6 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             var context = new WorkContext(request, policy, directory, secretDirectory, environment, resolvedImages, linked.Token);
             if (!ControlsExisting(request.Operation)) await PrepareSourcesAsync(context, resolvedSources);
             var output = await RunOperationAsync(context);
-            if (output?.Length > policy.MaximumOutputCharacters) throw new WorkFailure("runtime_output_limit");
             resultProduced = true;
             // Never report successful work while its temporary registry credentials remain on disk.
             Directory.Delete(secretDirectory, true);
@@ -120,6 +141,13 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         catch (Exception ex) when (ex is WorkFailure or ArgumentException or IOException or UnauthorizedAccessException or
             JsonException or OperationCanceledException or PlatformNotSupportedException or KeyNotFoundException or InvalidOperationException or HttpRequestException)
         {
+            if (ex is OperationCanceledException)
+            {
+                try { await EmitAsync(request.Id, "system", operationTimeout.IsCancellationRequested
+                    ? "\nThe global operation deadline was exceeded. Execution stopped; changes already made were not rolled back.\n"
+                    : "\nExecution was interrupted or cancellation was requested. Changes already made were not rolled back.\n"); }
+                catch (Exception) { /* A broken channel cannot acknowledge additional output. */ }
+            }
             var code = resultProduced ? "uncertain" : ex switch
             {
                 WorkFailure failure => failure.Code,
@@ -234,9 +262,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         // The enclosing operation-workspaces directory remains private. A bind-mounted
         // workspace itself must be traversable by non-root application container users.
         File.SetUnixFileMode(directory, readableDirectory);
-        if (request.Files.Count > 10000 || request.EnvironmentFiles.Count > 3 ||
-            request.Files.Sum(x => (long)x.Content.Length) > 24 * 1024 * 1024 ||
-            request.EnvironmentFiles.Sum(x => (long)x.Text.Length) > 3 * 1024 * 1024)
+        if (request.EnvironmentFiles.Count > 3)
             throw new WorkFailure("snapshot_limit");
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         // Reserve every ancestor too, to reject case aliases and file-vs-directory collisions before writing.
@@ -395,11 +421,36 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     private async Task<string> RunAsync(WorkContext context, string executable, string directory, IReadOnlyList<string> arguments,
         IReadOnlyDictionary<string, string>? environment = null, string failure = "runtime_failed")
     {
-        var result = await runner.RunAsync(new(executable, directory, arguments, environment ?? context.Environment,
-            TimeSpan.FromSeconds(context.Policy.TimeoutSeconds), context.Policy.MaximumOutputCharacters), context.Token);
+        // Internal inspection/configuration stdout can contain environment secrets and is not a user log.
+        var visible = executable != dockerOptions.Value.ExecutablePath && executable != "/usr/bin/git" ||
+            arguments.Any(a => a is "build" or "pull" or "up" or "start" or "stop" or "restart" or "down" or "logs" or "exec");
+        var secrets = (context.Request.Registries ?? []).Select(x => x.Password)
+            .Concat((context.Request.Sources ?? []).Select(x => x.Password)).Where(x => !string.IsNullOrEmpty(x)).Cast<string>().ToArray();
+        var stdout = new OutputRedactor(secrets);
+        var stderr = new OutputRedactor(secrets);
+        async Task Report(string stream, string text)
+        {
+            if (stream == "stdout" && !visible) return;
+            await EmitAsync(context.Request.Id, stream, (stream == "stdout" ? stdout : stderr).Append(text));
+        }
+        var capture = !visible || Output is null;
+        ProcessResult result;
+        try
+        {
+            result = await runner.RunAsync(new(executable, directory, arguments, environment ?? context.Environment,
+                LimitPolicy.Duration(context.Policy.TimeoutSeconds), OnOutput: Report, CaptureOutput: capture), context.Token);
+        }
+        finally
+        {
+            await EmitAsync(context.Request.Id, "stdout", stdout.Flush());
+            await EmitAsync(context.Request.Id, "stderr", stderr.Flush());
+        }
         if (result.TimedOut) throw new WorkFailure("uncertain");
-        if (result.OutputLimitExceeded) throw new WorkFailure("runtime_output_limit");
-        if (result.ExitCode != 0) throw new WorkFailure(failure);
+        if (result.ExitCode != 0)
+        {
+            await EmitAsync(context.Request.Id, "system", $"\nStep failed ({failure}); process exit code {result.ExitCode}.\n");
+            throw new WorkFailure(failure);
+        }
         return context.Request.Operation == "logs" && arguments.FirstOrDefault() == "logs" ? result.StandardOutput + result.StandardError : result.StandardOutput;
     }
 
@@ -614,7 +665,6 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             {
                 output.AppendLine("[" + id + "]");
                 output.AppendLine(await DockerAsync(context, ["logs", "--timestamps", "--tail", "200", id]));
-                if (output.Length > context.Policy.MaximumOutputCharacters) throw new WorkFailure("runtime_output_limit");
             }
             return output.ToString();
         }
@@ -907,7 +957,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             throw new WorkFailure("invalid_registry");
         var result = await runner.RunAsync(new(dockerOptions.Value.ExecutablePath, context.Directory,
             ["login", "--username", credential.Username, "--password-stdin", "--", origin.Authority], context.Environment,
-            TimeSpan.FromSeconds(context.Policy.TimeoutSeconds), context.Policy.MaximumOutputCharacters, credential.Password + "\n"), context.Token);
+            LimitPolicy.Duration(context.Policy.TimeoutSeconds), credential.Password + "\n"), context.Token);
         if (result.TimedOut) throw new WorkFailure("registry_timeout");
         if (result.ExitCode != 0 || result.OutputLimitExceeded) throw new WorkFailure("registry_authentication_failed");
     }

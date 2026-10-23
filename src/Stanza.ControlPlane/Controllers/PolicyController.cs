@@ -12,13 +12,8 @@ public sealed class PolicyController(OperationalPolicyService policies) : Contro
     [HttpGet("")]
     public async Task<IActionResult> Index(CancellationToken ct)
     {
-        try { return View(await policies.ReadAsync(Actor, ct)); } catch (SettingsOperationException) { return Forbid(); }
+        try { await policies.ReadAsync(Actor, ct); return Redirect("/settings#operational-settings"); } catch (SettingsOperationException) { return Forbid(); }
     }
     [HttpPost(""), ValidateAntiForgeryToken, Authorize(Roles = "Admin,SystemAdmin")]
-    public async Task<IActionResult> Index(OperationalPolicy policy, long version, CancellationToken ct)
-    {
-        if (!ModelState.IsValid) return View(new PolicyEditor(policy, version));
-        try { await policies.SaveAsync(Actor, new(policy, version), ct); TempData["Success"] = "Policy saved. Existing sessions retain their original expiry; new sessions and operations use the new limits."; return RedirectToAction(nameof(Index)); }
-        catch (SettingsOperationException error) { ModelState.AddModelError("", error.Message); return View(new PolicyEditor(policy, version)); }
-    }
+    public IActionResult Save() => RedirectPreserveMethod("/settings/operations");
 }

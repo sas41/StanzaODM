@@ -54,6 +54,7 @@ public sealed class ControlPlaneEntryPoint
         builder.Services.AddScoped<IDeploymentWorkspaceReservations>(provider => provider.GetRequiredService<DeploymentEditorAdapters>());
         builder.Services.AddScoped<IDeploymentRevisionStatusProvider>(provider => provider.GetRequiredService<DeploymentEditorAdapters>());
         builder.Services.AddScoped<OperationService>();
+        builder.Services.AddScoped<OperationOutputStore>();
         builder.Services.AddScoped<DeploymentRuntimeStatusService>();
         builder.Services.AddScoped<IOperationService>(provider => provider.GetRequiredService<OperationService>());
         builder.Services.AddStanzaAgentTransport();
@@ -90,7 +91,7 @@ public sealed class ControlPlaneEntryPoint
                 options.Events.OnSigningIn = async context =>
                 {
                     var policy = (await context.HttpContext.RequestServices.GetRequiredService<OperationalPolicyService>().GetAsync(context.HttpContext.RequestAborted)).Policy;
-                    context.Properties.ExpiresUtc = (context.Properties.IssuedUtc ?? TimeProvider.System.GetUtcNow()).AddHours(policy.SessionHours);
+                    context.Properties.ExpiresUtc = policy.SessionHours == 0 ? DateTimeOffset.MaxValue : (context.Properties.IssuedUtc ?? TimeProvider.System.GetUtcNow()).AddHours(policy.SessionHours);
                 };
                 options.Events.OnValidatePrincipal = async context =>
                 {
@@ -110,6 +111,8 @@ public sealed class ControlPlaneEntryPoint
         {
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
             options.AddPolicy("enrollment", context =>
+                OperationalPolicyMiddleware.RequestPolicy(context).EnrollmentRequestsPerMinute == 0
+                ? System.Threading.RateLimiting.RateLimitPartition.GetNoLimiter("enrollment-unlimited") :
                 System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
                     (context.Connection.RemoteIpAddress?.ToString() ?? "unknown") + ":" + OperationalPolicyMiddleware.RequestPolicy(context).EnrollmentRequestsPerMinute,
                     _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
@@ -117,22 +120,23 @@ public sealed class ControlPlaneEntryPoint
                         PermitLimit = OperationalPolicyMiddleware.RequestPolicy(context).EnrollmentRequestsPerMinute, Window = TimeSpan.FromMinutes(1), QueueLimit = 0, AutoReplenishment = true
                     }));
             options.AddPolicy("authentication", context =>
+                OperationalPolicyMiddleware.RequestPolicy(context).LoginAttempts == 0
+                ? System.Threading.RateLimiting.RateLimitPartition.GetNoLimiter("authentication-unlimited") :
                 System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
                     (context.Connection.RemoteIpAddress?.ToString() ?? "unknown") + ":" + OperationalPolicyMiddleware.RequestPolicy(context).LoginAttempts + ":" + OperationalPolicyMiddleware.RequestPolicy(context).LoginWindowMinutes,
                     _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
                     {
                         PermitLimit = OperationalPolicyMiddleware.RequestPolicy(context).LoginAttempts,
-                        Window = TimeSpan.FromMinutes(OperationalPolicyMiddleware.RequestPolicy(context).LoginWindowMinutes),
+                        Window = OperationalPolicyMiddleware.RequestPolicy(context).LoginWindowMinutes == 0 ? TimeSpan.FromDays(365000) : TimeSpan.FromMinutes(OperationalPolicyMiddleware.RequestPolicy(context).LoginWindowMinutes),
                         QueueLimit = 0,
-                        AutoReplenishment = true
+                        AutoReplenishment = OperationalPolicyMiddleware.RequestPolicy(context).LoginWindowMinutes != 0
                     }));
         });
         var app = builder.Build();
-        // Fresh-schema initialization only: this application intentionally has no migrations.
         await using (var scope = app.Services.CreateAsyncScope())
         {
             var database = scope.ServiceProvider.GetRequiredService<StanzaDbContext>();
-            await database.Database.EnsureCreatedAsync();
+            await DatabaseUpgrader.UpgradeAsync(database);
         }
         app.UseExceptionHandler("/error");
         app.Use(async (context, next) =>

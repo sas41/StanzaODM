@@ -473,8 +473,8 @@ public sealed class PortabilityTests : IAsyncLifetime
         foreach (var file in new[] { new PortableFile("link", "symlink", "target", null), new("bad.bin", "binary", null, "!!!!"), new("both", "text", "text", "AA==") })
             Assert.Throws<PortabilityException>(() => PortableBundleValidator.Parse(Bytes(b with { Deployments = [d with { Files = [file] }] })));
         Assert.Throws<PortabilityException>(() => PortableBundleValidator.Parse(Bytes(b with { Deployments = [d with { Files = [new("Dir/file", "text", "", null), new("dir/other", "text", "", null)] }] })));
-        Assert.Throws<PortabilityException>(() => PortableBundleValidator.Parse(new byte[PortableBundleValidator.MaximumBundleBytes + 1]));
-        Assert.Throws<PortabilityException>(() => PortableBundleValidator.Parse(Bytes(b with { Deployments = [d with { Compose = new string('x', DeploymentDraftService.MaximumTextBytes + 1) }] })));
+        Assert.Throws<PortabilityException>(() => PortableBundleValidator.Parse(new byte[32 * 1024 * 1024 + 1]));
+        Assert.Equal(DeploymentDraftService.MaximumTextBytes + 1, PortableBundleValidator.Parse(Bytes(b with { Deployments = [d with { Compose = new string('x', DeploymentDraftService.MaximumTextBytes + 1) }] })).Deployments[0].Compose.Length);
         Assert.Throws<PortabilityException>(() => PortableBundleValidator.Parse(Encoding.UTF8.GetBytes("{\"version\":1,\"version\":1,\"deployments\":[],\"agents\":[],\"sections\":[]}")));
         Assert.Throws<PortabilityException>(() => PortableBundleValidator.Parse(Encoding.UTF8.GetBytes("{\"version\":1,\"deployments\":[],\"agents\":[],\"sections\":[],\"unexpected\":true}")));
     }

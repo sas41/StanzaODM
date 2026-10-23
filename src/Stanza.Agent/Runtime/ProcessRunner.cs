@@ -4,7 +4,8 @@ using System.Text;
 namespace Stanza.Agent.Runtime;
 
 public sealed record ProcessRequest(string Executable, string WorkingDirectory, IReadOnlyList<string> Arguments,
-    IReadOnlyDictionary<string, string> Environment, TimeSpan Timeout, int MaxOutputCharacters = 65536, string? StandardInput = null)
+    IReadOnlyDictionary<string, string> Environment, TimeSpan Timeout, string? StandardInput = null,
+    Func<string, string, Task>? OnOutput = null, bool CaptureOutput = true)
 {
     public override string ToString() => "ProcessRequest { structured process invocation; arguments and environment redacted }";
 }
@@ -25,8 +26,8 @@ public sealed class ProcessRunner(TimeProvider timeProvider) : IProcessRunner
     {
         ArgumentNullException.ThrowIfNull(request);
         if (!Path.IsPathFullyQualified(request.Executable) || !Path.IsPathFullyQualified(request.WorkingDirectory) ||
-            request.Timeout <= TimeSpan.Zero || request.Timeout > TimeSpan.FromHours(1) ||
-            request.MaxOutputCharacters is < 1 or > 1048576 || request.StandardInput?.Length > 1048576)
+            request.Timeout != System.Threading.Timeout.InfiniteTimeSpan && (request.Timeout <= TimeSpan.Zero || request.Timeout > TimeSpan.FromDays(7)) ||
+            request.StandardInput?.Length > 1048576)
         {
             throw new ArgumentException("Invalid process invocation limits or paths.");
         }
@@ -63,11 +64,9 @@ public sealed class ProcessRunner(TimeProvider timeProvider) : IProcessRunner
             finally { process.StandardInput.Close(); }
         }
         var input = WriteInputAsync();
-        var gate = new object();
-        var captured = 0;
-        var limitExceeded = false;
         var stdout = new StringBuilder();
         var stderr = new StringBuilder();
+        var readerFailure = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         void Kill()
         {
@@ -76,28 +75,41 @@ public sealed class ProcessRunner(TimeProvider timeProvider) : IProcessRunner
             catch (System.ComponentModel.Win32Exception) { }
         }
 
-        async Task DrainAsync(StreamReader reader, StringBuilder target)
+        async Task DrainAsync(StreamReader reader, StringBuilder target, string stream)
         {
-            var buffer = new char[4096];
-            while (true)
+            try
             {
-                var count = await reader.ReadAsync(buffer.AsMemory(), linked.Token);
-                if (count == 0) { return; }
-                lock (gate)
+                var buffer = new char[4096];
+                var pending = "";
+                while (true)
                 {
-                    var retained = Math.Min(count, request.MaxOutputCharacters - captured);
-                    target.Append(buffer, 0, retained);
-                    captured += retained;
-                    if (count > retained) { limitExceeded = true; Kill(); }
+                    var count = await reader.ReadAsync(buffer.AsMemory(), linked.Token);
+                    if (count == 0)
+                    {
+                        if (pending.Length > 0 && request.OnOutput is not null) await request.OnOutput(stream, pending);
+                        return;
+                    }
+                    if (request.CaptureOutput) target.Append(buffer, 0, count);
+                    if (request.OnOutput is not null)
+                    {
+                        var text = pending + new string(buffer, 0, count);
+                        pending = char.IsHighSurrogate(text[^1]) ? text[^1..] : "";
+                        if (pending.Length > 0) text = text[..^1];
+                        if (text.Length > 0) await request.OnOutput(stream, text);
+                    }
                 }
             }
+            catch (Exception ex) { readerFailure.TrySetResult(ex); throw; }
         }
 
-        var drains = Task.WhenAll(DrainAsync(process.StandardOutput, stdout), DrainAsync(process.StandardError, stderr));
+        var drains = Task.WhenAll(DrainAsync(process.StandardOutput, stdout, "stdout"), DrainAsync(process.StandardError, stderr, "stderr"));
         var timedOut = false;
         try
         {
-            await process.WaitForExitAsync(linked.Token);
+            var exited = process.WaitForExitAsync(linked.Token);
+            await Task.WhenAny(exited, readerFailure.Task);
+            if (readerFailure.Task.IsCompleted) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(await readerFailure.Task).Throw();
+            await exited;
             await drains.WaitAsync(linked.Token);
             await input.WaitAsync(linked.Token);
         }
@@ -113,8 +125,13 @@ public sealed class ProcessRunner(TimeProvider timeProvider) : IProcessRunner
             catch (Exception ex) when (ex is IOException or OperationCanceledException) { }
             cancellationToken.ThrowIfCancellationRequested();
         }
-        finally { Kill(); }
+        finally
+        {
+            Kill();
+            if (!drains.IsCompleted) await linked.CancelAsync();
+            try { await drains; } catch (Exception) when (linked.IsCancellationRequested) { }
+        }
 
-        return new(process.ExitCode, stdout.ToString(), stderr.ToString(), limitExceeded, timedOut);
+        return new(process.ExitCode, stdout.ToString(), stderr.ToString(), false, timedOut);
     }
 }

@@ -127,7 +127,7 @@ public sealed class ManagedFileSnapshotTests
     [Fact]
     public void Limit_configuration_and_null_inputs_are_validated()
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => new ManagedFileLimits(0, 1, 1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ManagedFileLimits(-1, 1, 1));
         Assert.Throws<ArgumentOutOfRangeException>(() => new ManagedFileLimits(-1, 1, 1));
         Assert.Throws<ArgumentOutOfRangeException>(() => new ManagedFileLimits(1, -1, 1));
         Assert.Throws<ArgumentOutOfRangeException>(() => new ManagedFileLimits(1, 1, -1));

@@ -30,6 +30,7 @@ public static class OperationLive
             if (lease is null) { context.Response.StatusCode = 429; return; }
             using var socket = await context.WebSockets.AcceptWebSocketAsync();
             using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
+            var cursor = long.TryParse(context.Request.Query["after"], out var after) && after >= 0 ? after : 0;
             var input = socket.ReceiveAsync(new byte[1].AsMemory(), lifetime.Token).AsTask();
             try
             {
@@ -40,13 +41,19 @@ public static class OperationLive
                     if (account is null || !account.Enabled || account.SecurityStamp != stamp || DateTimeOffset.UtcNow >= expires)
                     { await socket.CloseOutputAsync(WebSocketCloseStatus.PolicyViolation, "Access revoked.", lifetime.Token); break; }
                     var detail = await scope.ServiceProvider.GetRequiredService<OperationService>().DetailAsync(actor, id, lifetime.Token);
-                    var output = detail.Output is { Length: > 65536 } ? detail.Output[^65536..] : detail.Output;
+                    var chunks = detail.OutputAllowed
+                        ? await scope.ServiceProvider.GetRequiredService<OperationOutputStore>().ReadAsync(id, cursor, ct: lifetime.Token)
+                        : [];
+                    if (chunks.Count > 0) cursor = chunks[^1].Sequence;
+                    var hasChunks = cursor > 0;
+                    var output = !hasChunks ? detail.Output : null;
                     var stage = await scope.ServiceProvider.GetRequiredService<Persistence.StanzaDbContext>().Set<OperationEntity>().Where(x => x.Id == id).Select(x => x.Stage).SingleAsync(lifetime.Token);
-                    var message = JsonSerializer.SerializeToUtf8Bytes(new { state = detail.Summary.State, stage, code = detail.Summary.Code, output });
+                    var message = JsonSerializer.SerializeToUtf8Bytes(new { state = detail.Summary.State, stage, code = detail.Summary.Code, output,
+                        chunks = chunks.Select(c => new { sequence = c.Sequence, stream = c.Stream, text = c.Text }), outputAllowed = detail.OutputAllowed });
                     using var send = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); send.CancelAfter(TimeSpan.FromSeconds(5));
                     await socket.SendAsync(message, WebSocketMessageType.Text, true, send.Token);
-                    if (OperationService.Terminal(detail.Summary.State)) { await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Operation finished.", send.Token); break; }
-                    await Task.WhenAny(input, Task.Delay(TimeSpan.FromSeconds(1), lifetime.Token));
+                    if (OperationService.Terminal(detail.Summary.State) && chunks.Count < 64) { await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Operation finished.", send.Token); break; }
+                    if (chunks.Count < 64) await Task.WhenAny(input, Task.Delay(TimeSpan.FromMilliseconds(200), lifetime.Token));
                 }
             }
             catch (OperationException) { if (socket.State == WebSocketState.Open) await socket.CloseOutputAsync(WebSocketCloseStatus.PolicyViolation, "Access revoked.", CancellationToken.None); }

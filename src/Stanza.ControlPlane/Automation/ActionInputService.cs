@@ -13,7 +13,8 @@ namespace Stanza.ControlPlane.Automation;
 public sealed record ActionChoicePage(IReadOnlyList<string> Values, string Search, int Page, bool HasMore, string? Selected = null, bool SelectedAvailable = false);
 public sealed record ActionExecutionBindings(IReadOnlyDictionary<string, string> Sources, IReadOnlyDictionary<string, string> Images);
 
-public sealed class ActionInputService(StanzaDbContext db, SourceService sources, IAgentCommandDispatcher dispatcher, IMemoryCache cache)
+public sealed class ActionInputService(StanzaDbContext db, SourceService sources, IAgentCommandDispatcher dispatcher, IMemoryCache cache,
+    Configuration.AgentPolicyService? policies = null)
 {
     public async Task<IReadOnlyList<string>> ValuesAsync(Guid owner, ActionPlan plan, ActionParameter parameter, bool refresh, CancellationToken ct)
     {
@@ -33,7 +34,7 @@ public sealed class ActionInputService(StanzaDbContext db, SourceService sources
         if (!refresh && cache.TryGetValue<string[]>(fingerprint, out var cached)) return cached!;
         var request = new AgentWorkRequest(Guid.NewGuid(), deployment, source is null ? "registry-tags" : "git-action-branches", [], [],
             Sources: source is null ? [] : [source], Registries: source is null ? snapshot.Registries : [],
-            Policy: new(MaximumOutputCharacters: 1048576), ImageRepository: parameter.Repository);
+            Policy: new(), ImageRepository: parameter.Repository);
         var response = await DispatchAsync(agent, request, ct);
         if (!response.Succeeded || response.Output is null) throw new AutomationException("Remote listing failed or was denied. Check repository access and tag-listing permissions.");
         string[] values;
@@ -85,10 +86,10 @@ public sealed class ActionInputService(StanzaDbContext db, SourceService sources
 
     private async Task<AgentWorkResponse> DispatchAsync(Guid agent, AgentWorkRequest request, CancellationToken ct)
     {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(90));
         try
         {
-            var response = await dispatcher.DispatchAsync(agent, request, timeout.Token);
+            if (policies is not null) request = request with { Policy = await policies.RuntimeAsync(agent, ct) };
+            var response = await dispatcher.DispatchAsync(agent, request, ct);
             if (response.Id != request.Id) throw new AutomationException("The Agent returned an invalid discovery response.");
             return response;
         }

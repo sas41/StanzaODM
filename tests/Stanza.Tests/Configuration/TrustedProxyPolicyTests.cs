@@ -72,7 +72,7 @@ public sealed class TrustedProxyPolicyTests
         await using var fixture = await ConfigurationTestStore.CreateAsync(); await using var db = fixture.Context(); var policies = fixture.Policies(db);
         await policies.SaveAsync(fixture.Owner, new(new() { TrustedProxyAddresses = "10.0.0.1" }, 0));
         Assert.Equal("https", (await InvokeAsync(policies, "10.0.0.1", "203.0.113.9", "https")).Request.Scheme);
-        await policies.SaveAsync(fixture.Owner, new(new(), 1));
+        await policies.SaveAsync(fixture.Owner, new(new() { TrustedProxyAddresses = "" }, 1));
         Assert.Equal("http", (await InvokeAsync(policies, "10.0.0.1", "203.0.113.9", "https")).Request.Scheme);
     }
 

@@ -28,6 +28,52 @@ namespace Stanza.Tests.Transport;
 public sealed class AgentTransportTests
 {
     [Fact]
+    public async Task LargeSnapshotsAndLiveFailureOutputCrossTheAuthenticatedChannelBeforeCompletion()
+    {
+        await using var fixture = await ServerFixture.CreateAsync();
+        using var root = new AgentTestDirectory(); using var identity = AgentIdentity.LoadOrCreate(root.Path);
+        var agent = await fixture.RegisterAsync(identity, true);
+        var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = fixture.Origin,
+            EnrollmentToken = fixture.Credential, AllowLoopbackHttp = true });
+        var executor = new StreamingExecutor(); var state = new AgentState();
+        var chunks = new List<AgentOutputChunk>();
+        fixture.Broker.Output += (_, chunk) => { chunks.Add(chunk); return Task.CompletedTask; };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var running = new AgentCommandChannel(options, state, executor, fixture.Store.Clock, environment: fixture.Environment).RunAsync(identity, timeout.Token);
+        try
+        {
+            await AgentTestWait.UntilAsync(() => state.Snapshot.Ready);
+            var request = AgentWorkExecutorTests.Request() with { Files = [new("large.bin", new byte[25 * 1024 * 1024])], Policy = new(TimeoutSeconds: 0) };
+            var dispatch = fixture.Broker.DispatchAsync(agent, request, timeout.Token);
+            await executor.Recorded.Task.WaitAsync(timeout.Token);
+            Assert.False(dispatch.IsCompleted);
+            Assert.Equal(20, chunks.Count);
+            Assert.Equal(81920, chunks.Sum(x => x.Text.Length));
+            Assert.Equal(Enumerable.Range(1, 20).Select(x => (long)x), chunks.Select(x => x.Sequence));
+            executor.Complete.TrySetResult();
+            var result = await dispatch;
+            Assert.False(result.Succeeded); Assert.Equal("runtime_failed", result.Code);
+        }
+        finally { executor.Complete.TrySetResult(); await timeout.CancelAsync(); await IgnoreConnectionCloseAsync(running); }
+    }
+
+    private sealed class StreamingExecutor : IAgentWorkExecutor, IReportingAgentWorkExecutor
+    {
+        public event Func<Guid, string, Task>? Progress;
+        public event Func<Guid, AgentOutputChunk, Task>? Output;
+        public TaskCompletionSource Recorded { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Complete { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async Task<AgentWorkResponse> ExecuteAsync(AgentWorkRequest request, CancellationToken token = default)
+        {
+            if (Progress is { } progress) await progress(request.Id, "Pulling");
+            for (var i = 1; i <= 20; i++) if (Output is { } output) await output(request.Id, new(i, i == 20 ? "stderr" : "stdout", new string('x', 4096)));
+            Recorded.TrySetResult();
+            await Complete.Task.WaitAsync(token);
+            return new(request.Id, false, "runtime_failed");
+        }
+    }
+
+    [Fact]
     public async Task Production_HTTP_agent_enrolls_waits_for_approval_syncs_executes_and_disconnects_on_revocation()
     {
         await using var fixture = await ServerFixture.CreateAsync("Production", allowInsecureHttp: true);
@@ -106,7 +152,7 @@ public sealed class AgentTransportTests
         await using (var db = fixture.Store.CreateContext())
         {
             var access = new AccessService(db, fixture.Store.Clock);
-            await new OperationalPolicyService(db, access).SaveAsync(fixture.Store.OwnerId, new(new() { StatusIntervalSeconds = 1 }, 0));
+            await new OperationalPolicyService(db, access).SaveAsync(fixture.Store.OwnerId, new(new() { ConfigurationIntervalSeconds = 1 }, 0));
             var drafts = new DeploymentDraftService(db, fixture.Store.Protection, new AccountService(db, fixture.Store.Clock), access, fixture.Store.Clock);
             deployment = (await drafts.CreateAsync(fixture.Store.OwnerId, "Synced app", agent, "services: {}\n", "LOCAL=initial\n")).Id;
         }
@@ -133,7 +179,7 @@ public sealed class AgentTransportTests
             && File.ReadAllText(Path.Combine(cache, "agent.env")) == "UPDATED=agent\n");
         await AgentTestWait.UntilAsync(() => !fixture.Broker.ConfigurationPending(agent));
         var saved = JsonSerializer.Deserialize<AgentConfiguration>(await File.ReadAllTextAsync(Path.Combine(cache, "agent.json")), JsonSerializerOptions.Web)!;
-        Assert.Equal("UPDATED=global\n", saved.GlobalEnvironment); Assert.False(saved.Policy.ExecutionEnabled); Assert.Equal(99, saved.Policy.TimeoutSeconds);
+        Assert.Equal("UPDATED=global\n", saved.GlobalEnvironment); Assert.False(saved.Policy.ExecutionEnabled); Assert.Equal(3600, saved.Policy.TimeoutSeconds);
         first.Cancel(); await IgnoreConnectionCloseAsync(running);
         await AgentTestWait.UntilAsync(() => !fixture.Broker.IsConnected(agent));
         await File.WriteAllTextAsync(compose, "local corruption");
@@ -305,15 +351,15 @@ public sealed class AgentTransportTests
         await AgentCommandChannel.ReceiveAsync(socket, default);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         await AgentTestWait.UntilAsync(() => fixture.Broker.IsConnected(agentId));
-        var request = AgentWorkExecutorTests.Request() with { Policy = new(MaximumOutputCharacters: 8) };
+        var request = AgentWorkExecutorTests.Request() with { Policy = new() };
         var dispatched = fixture.Broker.DispatchAsync(agentId, request, timeout.Token);
         await AgentCommandChannel.ReceiveAsync(socket, timeout.Token);
         var response = new AgentWorkResponse(request.Id, true, oversizedOutput ? "succeeded" : "invalid result code",
             oversizedOutput ? new string('x', 64) : null);
         await socket.SendAsync(JsonSerializer.SerializeToUtf8Bytes(new AgentWireMessage("work.response", request.Id, Response: response), JsonSerializerOptions.Web),
             WebSocketMessageType.Text, true, timeout.Token);
-        Assert.Equal("uncertain", (await dispatched.WaitAsync(timeout.Token)).Code);
-        Assert.False(fixture.Broker.IsConnected(agentId));
+        Assert.Equal(oversizedOutput ? "succeeded" : "uncertain", (await dispatched.WaitAsync(timeout.Token)).Code);
+        Assert.Equal(oversizedOutput, fixture.Broker.IsConnected(agentId));
     }
 
     private static async Task IgnoreConnectionCloseAsync(Task task)

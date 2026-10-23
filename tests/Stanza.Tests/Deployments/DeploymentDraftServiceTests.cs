@@ -308,8 +308,8 @@ public sealed class DeploymentDraftServiceTests : IAsyncLifetime
         var created = await drafts.CreateAsync(root.Id, "Count", null, "", "");
         for (var i = 0; i < DeploymentDraftService.MaximumSupportingFiles; i++)
             await drafts.UploadAsync(root.Id, created.Id, i + 1, $"file-{i}", []);
-        await Assert.ThrowsAsync<DeploymentDraftException>(() => drafts.UploadAsync(root.Id, created.Id, 101, "overflow", []));
-        Assert.Equal(100, (await drafts.ReadAsync(root.Id, created.Id)).Files.Count);
+        await Assert.ThrowsAsync<DeploymentDraftException>(() => drafts.UploadAsync(root.Id, created.Id, DeploymentDraftService.MaximumSupportingFiles + 1, "overflow", []));
+        Assert.Equal(DeploymentDraftService.MaximumSupportingFiles, (await drafts.ReadAsync(root.Id, created.Id)).Files.Count);
     }
 
     [Fact]

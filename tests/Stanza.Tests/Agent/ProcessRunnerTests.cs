@@ -43,13 +43,16 @@ public sealed class ProcessRunnerTests
     }
 
     [Fact]
-    public async Task OutputIsBoundedAndOverproductionFails()
+    public async Task VerboseOutputIsStreamedCompletelyWithoutTerminatingProcess()
     {
         using var directory = new AgentTestDirectory();
-        var result = await runner.RunAsync(new("/usr/bin/printf", directory.Path, ["%s", new string('x', 16384)],
-            new Dictionary<string, string>(), TimeSpan.FromSeconds(5), 64));
-        Assert.True(result.OutputLimitExceeded);
-        Assert.Equal(64, result.StandardOutput.Length + result.StandardError.Length);
+        var output = new System.Text.StringBuilder();
+        var result = await runner.RunAsync(new("/usr/bin/printf", directory.Path, ["%s", new string('x', 70000)],
+            new Dictionary<string, string>(), TimeSpan.FromSeconds(5), OnOutput: (stream, text) => { output.Append(text); return Task.CompletedTask; }, CaptureOutput: false));
+        Assert.False(result.OutputLimitExceeded);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(70000, output.Length);
+        Assert.Empty(result.StandardOutput);
         Assert.DoesNotContain(new string('x', 64), result.ToString());
     }
 
@@ -87,13 +90,11 @@ public sealed class ProcessRunnerTests
     }
 
     [Theory]
-    [InlineData("relative/docker", "/tmp/opencode", 5, 64)]
-    [InlineData("/usr/bin/docker", "relative", 5, 64)]
-    [InlineData("/usr/bin/docker", "/tmp/opencode", 0, 64)]
-    [InlineData("/usr/bin/docker", "/tmp/opencode", 3601, 64)]
-    [InlineData("/usr/bin/docker", "/tmp/opencode", 5, 0)]
-    [InlineData("/usr/bin/docker", "/tmp/opencode", 5, 1048577)]
-    public async Task InvalidProcessLimitsAreRejected(string executable, string directory, int seconds, int maxOutput) =>
+    [InlineData("relative/docker", "/tmp/opencode", 5)]
+    [InlineData("/usr/bin/docker", "relative", 5)]
+    [InlineData("/usr/bin/docker", "/tmp/opencode", 0)]
+    [InlineData("/usr/bin/docker", "/tmp/opencode", 604801)]
+    public async Task InvalidProcessLimitsAreRejected(string executable, string directory, int seconds) =>
         await Assert.ThrowsAsync<ArgumentException>(() => runner.RunAsync(new(executable, directory, [],
-            new Dictionary<string, string>(), TimeSpan.FromSeconds(seconds), maxOutput)));
+            new Dictionary<string, string>(), TimeSpan.FromSeconds(seconds))));
 }

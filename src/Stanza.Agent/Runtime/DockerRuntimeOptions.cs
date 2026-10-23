@@ -6,8 +6,7 @@ public sealed class DockerRuntimeOptions
     public string ExecutablePath { get; set; } = "/usr/bin/docker";
     // Unix socket only in this foundation. Remote endpoints need an explicit TLS design.
     public string Endpoint { get; set; } = "unix:///var/run/docker.sock";
-    public int OperationTimeoutSeconds { get; set; } = 300;
-    public int MaxOutputCharacters { get; set; } = 65536;
+    public int OperationTimeoutSeconds { get; set; } = 3600;
 
     public static bool IsValid(DockerRuntimeOptions options) =>
         !string.IsNullOrWhiteSpace(options.ExecutablePath) && Path.IsPathFullyQualified(options.ExecutablePath) &&
@@ -16,5 +15,5 @@ public sealed class DockerRuntimeOptions
         options.Endpoint.StartsWith("unix:///", StringComparison.Ordinal) &&
         string.IsNullOrEmpty(endpoint.Host) && !string.IsNullOrEmpty(endpoint.AbsolutePath) && endpoint.AbsolutePath != "/" &&
         string.IsNullOrEmpty(endpoint.Query) && string.IsNullOrEmpty(endpoint.Fragment) &&
-        options.OperationTimeoutSeconds is >= 1 and <= 3600 && options.MaxOutputCharacters is >= 1024 and <= 1048576;
+        options.OperationTimeoutSeconds is >= 0 and <= 604800;
 }

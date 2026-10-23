@@ -1,0 +1,37 @@
+@model Stanza.ControlPlane.Configuration.PolicyEditor
+@using Stanza.ControlPlane.Configuration
+@using System.ComponentModel.DataAnnotations
+<section id="operational-settings" class="panel"><h2>Operational settings</h2>
+<p>These settings apply instance-wide. Saved values are preserved on upgrades. Numeric 0 means unlimited, no expiry, or no periodic refresh as explained below. Unlimited settings can exhaust memory or disk. Changes do not restart workloads; queued/running operations retain their captured deadline.</p>
+<form method="post" action="/settings/operations">
+@Html.AntiForgeryToken()
+<div asp-validation-summary="All" class="validation"></div><input type="hidden" name="version" value="@Model.Version" />
+@foreach (var group in PolicyFields.Groups)
+{
+    <fieldset id="@group.Id"><legend>@group.Title</legend><div class="form-grid">
+    @foreach (var field in group.Fields)
+    {
+        var property = typeof(OperationalPolicy).GetProperty(field.Name)!;
+        var value = property.GetValue(Model.Policy);
+        <div class="field">
+        @if (property.PropertyType == typeof(bool))
+        {
+            <label class="check-field"><input id="@field.Name" name="@field.Name" type="checkbox" value="true" checked="@((bool)value!)" disabled="@(!(User.IsInRole("Admin") || User.IsInRole("SystemAdmin")))" /> @field.Label</label><input name="@field.Name" type="hidden" value="false" />
+        }
+        else
+        {
+            <label for="@field.Name">@field.Label</label>
+            @if (property.PropertyType == typeof(string))
+            { <textarea id="@field.Name" name="@field.Name" rows="3" readonly="@(!(User.IsInRole("Admin") || User.IsInRole("SystemAdmin")))">@value</textarea> }
+            else
+            {
+                var range = (RangeAttribute)Attribute.GetCustomAttribute(property, typeof(RangeAttribute))!;
+                <input id="@field.Name" name="@field.Name" type="number" min="0" max="@range.Maximum" value="@value" required readonly="@(!(User.IsInRole("Admin") || User.IsInRole("SystemAdmin")))" />
+            }
+        }
+        <p class="field-help">@field.Help</p></div>
+    }
+    </div></fieldset>
+}
+@if (User.IsInRole("Admin") || User.IsInRole("SystemAdmin")) { <button class="button primary" type="submit">Save operational settings</button> }
+</form></section>
