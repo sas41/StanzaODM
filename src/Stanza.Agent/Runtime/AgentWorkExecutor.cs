@@ -422,8 +422,16 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         IReadOnlyDictionary<string, string>? environment = null, string failure = "runtime_failed")
     {
         // Internal inspection/configuration stdout can contain environment secrets and is not a user log.
+        var commandIndex = 0;
+        if (arguments.FirstOrDefault() == "compose")
+        {
+            commandIndex = 1;
+            // ComposeArguments emits global options as flag/value pairs. Service names are not commands.
+            while (commandIndex < arguments.Count && arguments[commandIndex].StartsWith("--", StringComparison.Ordinal)) commandIndex += 2;
+        }
+        var command = commandIndex < arguments.Count ? arguments[commandIndex] : null;
         var visible = executable != dockerOptions.Value.ExecutablePath && executable != "/usr/bin/git" ||
-            arguments.Any(a => a is "build" or "pull" or "up" or "start" or "stop" or "restart" or "down" or "logs" or "exec");
+            executable == dockerOptions.Value.ExecutablePath && command is "build" or "pull" or "up" or "start" or "stop" or "restart" or "down" or "logs" or "exec";
         var secrets = (context.Request.Registries ?? []).Select(x => x.Password)
             .Concat((context.Request.Sources ?? []).Select(x => x.Password)).Where(x => !string.IsNullOrEmpty(x)).Cast<string>().ToArray();
         var stdout = new OutputRedactor(secrets);
@@ -454,8 +462,8 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         return context.Request.Operation == "logs" && arguments.FirstOrDefault() == "logs" ? result.StandardOutput + result.StandardError : result.StandardOutput;
     }
 
-    private Task<string> DockerAsync(WorkContext context, IReadOnlyList<string> arguments) =>
-        RunAsync(context, dockerOptions.Value.ExecutablePath, context.Directory, arguments);
+    private Task<string> DockerAsync(WorkContext context, IReadOnlyList<string> arguments, string failure = "runtime_failed") =>
+        RunAsync(context, dockerOptions.Value.ExecutablePath, context.Directory, arguments, failure: failure);
 
     private List<string> ComposeArguments(WorkContext context)
     {
@@ -583,12 +591,15 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             // Freeze image IDs after build/pull, using an internal override rather than modifying
             // authored Compose. A concurrent tag movement cannot alter the subsequent up.
             var pinned = new Dictionary<string, string>(StringComparer.Ordinal);
+            var references = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var service in services.EnumerateObject())
             {
-                if (!service.Value.TryGetProperty("image", out var image)) continue;
-                var reference = image.GetString() ?? ""; ValidateImageReference(reference);
-                var local = await LocalImageAsync(context, reference, service.Value.TryGetProperty("platform", out var configured) ? configured.GetString() : null);
+                var reference = await DeploymentImageReferenceAsync(context, prefix, service);
+                references[service.Name] = reference;
+                var local = await LocalImageAsync(context, reference, service.Value.TryGetProperty("platform", out var configured) ? configured.GetString() : null,
+                    failure: "deployment_image_unavailable");
                 var id = Digest(local.GetProperty("Id")); pinned[service.Name] = id;
+                await EmitAsync(request.Id, "system", $"Service '{service.Name}' pinned to image {id}.\n");
                 RecordAppliedImage(context, service.Name, reference, local);
                 if (!service.Value.TryGetProperty("build", out _))
                 {
@@ -622,12 +633,16 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             await ReportAsync(request.Id, "Checking");
             foreach (var service in services.EnumerateObject())
             {
-                var installed = await InstalledImageAsync(context, service.Name, service.Value.TryGetProperty("platform", out var configured) ? configured.GetString() : null);
-                if (installed is null) continue; // Profile-disabled/zero-replica services need not have a container.
-                var actual = Digest(installed.Value.GetProperty("Id"));
-                if (pinned.TryGetValue(service.Name, out var expected) && actual != expected) throw new WorkFailure("deployed_image_changed");
-                var reference = service.Value.TryGetProperty("image", out var image) ? image.GetString() ?? "" : "";
-                RecordAppliedImage(context, service.Name, reference, installed.Value);
+                var installed = await InstalledImageAsync(context, service.Name, service.Value.TryGetProperty("platform", out var configured) ? configured.GetString() : null,
+                    expectedImage: pinned[service.Name]);
+                if (installed is null)
+                {
+                    // Compose's normalized model already excludes inactive profiles. Only explicit zero scale can omit containers.
+                    if (ScaledToZero(service.Value)) continue;
+                    await EmitAsync(request.Id, "system", $"Deployment verification failed: no containers were found for service '{service.Name}' after Compose completed. Changes were not rolled back.\n");
+                    throw new WorkFailure("deployed_container_missing");
+                }
+                RecordAppliedImage(context, service.Name, references[service.Name], installed.Value);
             }
             return await DockerAsync(context, [.. prefix, "ps", "--all", "--format", "json"]);
         }
@@ -645,6 +660,29 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     }
 
     private static bool ControlsExisting(string kind) => kind is "start" or "stop" or "restart" or "remove" or "status" or "logs";
+
+    private async Task<string> DeploymentImageReferenceAsync(WorkContext context, IReadOnlyList<string> prefix, JsonProperty service)
+    {
+        if (!WorkspacePolicy.IsIdentifier(service.Name)) throw new WorkFailure("invalid_service");
+        string reference;
+        if (service.Value.TryGetProperty("image", out var image)) reference = image.GetString() ?? "";
+        else
+        {
+            if (!service.Value.TryGetProperty("build", out _)) throw new WorkFailure("invalid_compose_image");
+            // Ask Compose for this service's effective name under the exact project, files and environment used to build it.
+            // Never infer it from an existing container (which may still use the previous build).
+            var images = (await DockerAsync(context, [.. prefix, "config", "--images", "--", service.Name], "compose_image_resolution_failed"))
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (images.Length != 1) throw new WorkFailure("invalid_compose_image");
+            reference = images[0];
+        }
+        ValidateImageReference(reference);
+        return reference;
+    }
+
+    private static bool ScaledToZero(JsonElement service) =>
+        service.TryGetProperty("scale", out var scale) && scale.TryGetInt32(out var count) && count == 0 ||
+        service.TryGetProperty("deploy", out var deploy) && deploy.TryGetProperty("replicas", out var replicas) && replicas.TryGetInt32(out var deployedCount) && deployedCount == 0;
 
     private async Task<string> ExistingContainersAsync(WorkContext context)
     {
@@ -757,17 +795,17 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             || target.Length == 3 && Field(image, "Variant", "variant") != target[2]) throw new WorkFailure("image_platform_mismatch");
     }
 
-    private async Task<JsonElement> LocalImageAsync(WorkContext context, string reference, string? platform = null)
+    private async Task<JsonElement> LocalImageAsync(WorkContext context, string reference, string? platform = null, string failure = "runtime_failed")
     {
         var text = await DockerAsync(context, platform is null ? ["image", "inspect", "--format", "{{json .}}", "--", reference]
-            : ["image", "inspect", "--platform", platform, "--format", "{{json .}}", "--", reference]);
+            : ["image", "inspect", "--platform", platform, "--format", "{{json .}}", "--", reference], failure);
         using var document = JsonDocument.Parse(text);
         if (document.RootElement.ValueKind != JsonValueKind.Object || !document.RootElement.TryGetProperty("Id", out var id))
             throw new WorkFailure("invalid_installed_image");
         Digest(id); return document.RootElement.Clone();
     }
 
-    private async Task<JsonElement?> InstalledImageAsync(WorkContext context, string service, string? platform = null)
+    private async Task<JsonElement?> InstalledImageAsync(WorkContext context, string service, string? platform = null, string? expectedImage = null)
     {
         if (!WorkspacePolicy.IsIdentifier(service)) throw new WorkFailure("invalid_service");
         var project = "stanza-" + context.Request.DeploymentId.ToString("N");
@@ -787,10 +825,20 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
                 || labels.TryGetProperty("com.docker.compose.oneoff", out var oneoff) && oneoff.GetString()?.Equals("true", StringComparison.OrdinalIgnoreCase) == true)
                 throw new WorkFailure("container_scope_denied");
             var digest = Digest(root.GetProperty("Image"));
+            // Compare the container's recorded identity before looking up that image. A stale container's old
+            // image may no longer be inspectable; that must not conceal the deployment identity mismatch.
+            if (expectedImage is not null && digest != expectedImage)
+            {
+                await EmitAsync(context.Request.Id, "system", $"Deployment verification failed for service '{service}': container {id} uses {digest}, expected {expectedImage}. Changes were not rolled back.\n");
+                throw new WorkFailure("deployed_image_changed");
+            }
             if (current is not null && current != digest) throw new WorkFailure("installed_image_ambiguous");
             current = digest;
         }
-        return current is null ? null : await LocalImageAsync(context, current, platform);
+        if (current is null) return null;
+        var installed = await LocalImageAsync(context, current, platform, expectedImage is null ? "runtime_failed" : "deployment_image_unavailable");
+        if (expectedImage is not null && Digest(installed.GetProperty("Id")) != expectedImage) throw new WorkFailure("deployed_image_changed");
+        return installed;
     }
 
     private async Task<string> InstalledConfigDigestAsync(WorkContext context, JsonElement image, string reference, string platform)

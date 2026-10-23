@@ -226,6 +226,7 @@ public sealed class AgentWorkExecutorTests
     {
         using var directory = new AgentTestDirectory();
         var pinnedBeforeUp = false;
+        var work = Request("deploy");
         var runner = new FakeRunner { Result = request =>
         {
             if (request.Arguments.Contains("up"))
@@ -238,14 +239,17 @@ public sealed class AgentWorkExecutorTests
                     Assert.Equal("sha256:" + new string('a', 64), overrides.RootElement.GetProperty("services").GetProperty(service).GetProperty("image").GetString());
                 Assert.DoesNotContain("VALUE=", File.ReadAllText(composeFiles[1])); pinnedBeforeUp = true;
             }
+            var targetService = request.Arguments.LastOrDefault(a => a.StartsWith("label=com.docker.compose.service=", StringComparison.Ordinal))?.Split('=').Last();
+            if (request.Arguments[0] == "inspect") return new(0, JsonSerializer.Serialize(new { Image = "sha256:" + new string('a', 64), Config = new { Labels = new Dictionary<string, string>
+                { ["com.docker.compose.project"] = "stanza-" + work.DeploymentId.ToString("N"), ["com.docker.compose.service"] = request.Arguments[^1][0] == 'b' ? "built" : "remote" } } }), "", false, false);
             return new(0, request.Arguments.Contains("config") ?
                 "{\"services\":{\"built\":{\"build\":{\"context\":\".\"},\"image\":\"local\"},\"remote\":{\"image\":\"busybox\"}}}" :
                 request.Arguments[0] == "image" ? JsonSerializer.Serialize(new { Id = "sha256:" + new string('a', 64), Os = "linux", Architecture = "amd64", RepoDigests = Array.Empty<string>() }) :
-                request.Arguments[0] == "ps" ? "" : "[]", "", false, false);
+                request.Arguments[0] == "ps" ? new string(targetService == "built" ? 'b' : 'c', 64) : "[]", "", false, false);
         }};
-        var result = await Executor(directory.Path, runner).ExecuteAsync(Request("deploy"));
+        var result = await Executor(directory.Path, runner).ExecuteAsync(work);
         Assert.True(result.Succeeded, result.Code); Assert.True(pinnedBeforeUp);
-        Assert.Equal(9, runner.Requests.Count);
+        Assert.Equal(13, runner.Requests.Count);
         Assert.Contains("config", runner.Requests[0].Arguments); Assert.Contains("build", runner.Requests[1].Arguments);
         Assert.Contains("pull", runner.Requests[2].Arguments); Assert.Equal("remote", runner.Requests[2].Arguments[^1]);
         Assert.DoesNotContain("built", runner.Requests[2].Arguments);

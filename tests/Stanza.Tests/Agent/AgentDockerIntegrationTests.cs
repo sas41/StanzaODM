@@ -20,6 +20,81 @@ public sealed class AgentDockerIntegrationTests
 {
     [DockerIntegrationFact]
     [Trait("Category", "DockerIntegration")]
+    public async Task BuildOnlyRedeploymentReplacesBothReplicasWithTheNewBuiltIdAndKeepsInactiveServicesInactive()
+    {
+        using var root = new AgentTestDirectory();
+        var runner = new ProcessRunner(TimeProvider.System); var deployment = Guid.NewGuid();
+        var project = "stanza-" + deployment.ToString("N");
+        var environment = new Dictionary<string, string> { ["PATH"] = "/usr/bin:/bin", ["DOCKER_HOST"] = "unix:///var/run/docker.sock" };
+        var executor = new AgentWorkExecutor(runner, Options.Create(new AgentOptions { PersistentDataRoot = root.Path }),
+            Options.Create(new DockerRuntimeOptions()), Options.Create(new HostExecutionOptions()));
+        const string compose = """
+            name: authored-project-ignored-by-stanza
+            services:
+              app:
+                build: .
+                deploy:
+                  replicas: 2
+                healthcheck:
+                  test: [CMD, test, -s, /release.txt]
+                  interval: 1s
+                  timeout: 1s
+                  retries: 10
+              zero:
+                build: .
+                deploy:
+                  replicas: 0
+              inactive:
+                profiles: [manual]
+                build: .
+            """;
+        AgentWorkRequest Request(string release) => new(Guid.NewGuid(), deployment, "deploy",
+            [new("compose.yaml", Encoding.UTF8.GetBytes(compose)),
+             new("Dockerfile", Encoding.UTF8.GetBytes("FROM ubuntu:24.04\nCOPY release.txt /release.txt\nCMD [\"/usr/bin/sleep\",\"300\"]\n")),
+             new("release.txt", Encoding.UTF8.GetBytes(deployment.ToString("N") + ":" + release))],
+            [new("Global", ""), new("Agent", ""), new("Deployment", "")], Policy: new(TimeoutSeconds: 180));
+        Task<ProcessResult> Docker(params string[] args) => runner.RunAsync(new("/usr/bin/docker", root.Path, args, environment, TimeSpan.FromSeconds(30)));
+        var imageIds = new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            var first = await executor.ExecuteAsync(Request("first"));
+            Assert.True(first.Succeeded, first.Code); imageIds.Add(first.ResolvedImages!["app:image-id"]);
+            var second = await executor.ExecuteAsync(Request("second"));
+            Assert.True(second.Succeeded, second.Code); imageIds.Add(second.ResolvedImages!["app:image-id"]);
+            Assert.NotEqual(first.ResolvedImages["app:image-id"], second.ResolvedImages["app:image-id"]);
+            Assert.DoesNotContain("inactive:image-id", second.ResolvedImages.Keys);
+            var containers = await Docker("ps", "--all", "--quiet", "--filter", "label=com.docker.compose.project=" + project, "--filter", "label=com.docker.compose.service=app");
+            Assert.Equal(0, containers.ExitCode);
+            var ids = containers.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            Assert.Equal(2, ids.Length);
+            foreach (var id in ids)
+            {
+                var actual = await Docker("inspect", "--format", "{{.Image}}", "--", id);
+                Assert.Equal(0, actual.ExitCode); Assert.Equal(second.ResolvedImages["app:image-id"], actual.StandardOutput.Trim());
+                var release = await Docker("exec", id, "/usr/bin/cat", "/release.txt");
+                Assert.Equal(0, release.ExitCode); Assert.EndsWith(":second", release.StandardOutput);
+            }
+            var absent = await Docker("ps", "--all", "--quiet", "--filter", "label=com.docker.compose.project=" + project, "--filter", "label=com.docker.compose.service=zero");
+            Assert.Equal(0, absent.ExitCode); Assert.Empty(absent.StandardOutput.Trim());
+            Assert.NotEqual(0, (await Docker("image", "inspect", "--", project + "-inactive")).ExitCode);
+        }
+        finally
+        {
+            // Only this fixture's project, generated tags and project-labelled image IDs. Never prune or remove workload volumes.
+            var cleanup = Path.Combine(root.Path, "build-only-cleanup.yaml");
+            await File.WriteAllTextAsync(cleanup, $"services:\n  app:\n    image: {project}-app\n  zero:\n    image: {project}-zero\n");
+            await Docker("compose", "--project-name", project, "--file", cleanup, "down", "--remove-orphans");
+            await Docker("image", "rm", "--", project + "-app", project + "-zero");
+            foreach (var id in imageIds)
+            {
+                var owner = await Docker("image", "inspect", "--format", "{{index .Config.Labels \"com.docker.compose.project\"}}", "--", id);
+                if (owner.ExitCode == 0 && owner.StandardOutput.Trim() == project) await Docker("image", "rm", "--", id);
+            }
+        }
+    }
+
+    [DockerIntegrationFact]
+    [Trait("Category", "DockerIntegration")]
     public async Task RealComposeBuildDeployHealthExecLifecycleAndCleanupUseOnlyDedicatedProject()
     {
         using var root = new AgentTestDirectory();
