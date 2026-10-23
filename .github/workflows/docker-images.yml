@@ -76,6 +76,7 @@ jobs:
 
       - name: Validate Compose manifests
         run: |
+          docker compose -f compose.yaml config --quiet
           docker compose -f compose.control.yaml config --quiet
           docker compose -f compose.agent.yaml config --quiet
           docker compose -f compose.agent.yaml -f compose.agent.privileged.yaml config --quiet

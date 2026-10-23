@@ -120,6 +120,7 @@ public sealed class RepositoryConfigurationTests
         Assert.Contains("bash .github/scripts/image-metadata.sh", workflow);
         Assert.Contains("cache-to: type=gha,mode=max,scope=${{ matrix.component }}", workflow);
         Assert.Contains("docker compose -f compose.control.yaml config --quiet", workflow);
+        Assert.Contains("docker compose -f compose.yaml config --quiet", workflow);
         Assert.Contains("docker compose -f compose.agent.yaml config --quiet", workflow);
         Assert.Contains("docker compose -f compose.agent.yaml -f compose.agent.privileged.yaml config --quiet", workflow);
         Assert.Contains("platforms: linux/amd64", workflow);
@@ -163,7 +164,7 @@ public sealed class RepositoryConfigurationTests
         var root = ArchitectureTests.RepositoryRoot();
         var manifests = Directory.GetFiles(root).Where(path => Regex.IsMatch(Path.GetFileName(path), @"^(?:docker-)?compose(?:\..+)?\.ya?ml$"))
             .Select(Path.GetFileName).Order().ToArray();
-        Assert.Equal(new[] { "compose.agent.privileged.yaml", "compose.agent.yaml", "compose.control.yaml" }, manifests);
+        Assert.Equal(new[] { "compose.agent.privileged.yaml", "compose.agent.yaml", "compose.control.yaml", "compose.yaml" }, manifests);
         var control = File.ReadAllText(Path.Combine(root, "compose.control.yaml"));
         var ordinary = File.ReadAllText(Path.Combine(root, "compose.agent.yaml"));
         var privileged = File.ReadAllText(Path.Combine(root, "compose.agent.privileged.yaml"));

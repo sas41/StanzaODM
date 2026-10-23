@@ -32,6 +32,7 @@ public sealed class GitIgnoreTests(IgnoreRepository repository) : IClassFixture<
     [InlineData(".env.example", false)]
     [InlineData(".env.production.example", false)]
     [InlineData("agent.env.example", false)]
+    [InlineData("example.env", false)]
     [InlineData("compose.yaml", false)]
     [InlineData("compose.agent.yaml", false)]
     [InlineData("src/Stanza.Core/Stanza.Core.csproj", false)]

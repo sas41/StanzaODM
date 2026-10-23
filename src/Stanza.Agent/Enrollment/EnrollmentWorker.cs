@@ -38,7 +38,7 @@ public sealed class EnrollmentWorker(
                 while (!stoppingToken.IsCancellationRequested)
                 {
                     var request = identity.CreateEnrollmentRequest(options.Value.EnrollmentToken,
-                        Environment.MachineName, timeProvider.GetUtcNow());
+                        options.Value.RegistrationName, timeProvider.GetUtcNow());
                     var status = await client.RegisterAsync(new Uri(options.Value.ControlPlaneUrl), request, stoppingToken);
                     state.Set(new(status is EnrollmentStatus.NotStarted or EnrollmentStatus.Pending or EnrollmentStatus.Retrying, status, identity.AgentId));
                     if (status == EnrollmentStatus.Approved && channel is not null)

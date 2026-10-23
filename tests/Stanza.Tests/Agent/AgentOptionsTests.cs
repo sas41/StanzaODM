@@ -8,6 +8,31 @@ namespace Stanza.Tests.Agent;
 public sealed class AgentOptionsTests
 {
     [Theory]
+    [InlineData("edge-agent-one", true)]
+    [InlineData("  Edge agent one  ", true)]
+    [InlineData("", true)]
+    [InlineData("edge\nagent", false)]
+    [InlineData("edge\0agent", false)]
+    [InlineData(null, false)]
+    public void Friendly_name_is_validated_without_reflecting_its_contents(string? name, bool valid)
+    {
+        var options = ValidOptions(); options.Name = name!;
+        var result = new AgentOptionsValidator(new TestEnvironment("Production")).Validate(null, options);
+        Assert.Equal(valid, result.Succeeded);
+        Assert.DoesNotContain("edge\nagent", string.Join(";", result.Failures ?? []));
+        if (valid) Assert.Equal(string.IsNullOrWhiteSpace(name) ? Environment.MachineName : name.Trim(), options.RegistrationName);
+    }
+
+    [Fact]
+    public void Friendly_name_length_is_bounded()
+    {
+        var options = ValidOptions(); options.Name = new('a', 253);
+        Assert.True(new AgentOptionsValidator(new TestEnvironment("Production")).Validate(null, options).Succeeded);
+        options.Name += "a";
+        Assert.True(new AgentOptionsValidator(new TestEnvironment("Production")).Validate(null, options).Failed);
+    }
+
+    [Theory]
     [InlineData("https://control.example", false, "Production", true)]
     [InlineData("http://control.example", true, "Development", false)]
     [InlineData("http://localhost:5000", false, "Development", false)]

@@ -1,0 +1,140 @@
+# Full stack: copy example.env to .env, configure it, then follow README.md.
+# First start only Control Plane: docker compose up -d control-plane
+# After creating an enrollment token: docker compose up -d
+# Agent state is ./agent_data; database/Control Plane state uses the named volumes below.
+services:
+  initialize:
+    image: postgres:18-alpine
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ ! -s /secrets/database-password ]; then
+          umask 077
+          head -c 48 /dev/urandom | base64 > /secrets/database-password
+        fi
+        chmod 0444 /secrets/database-password
+        mkdir -p /control-plane/keys
+        chown -R 1654:1654 /control-plane
+        chmod 0700 /control-plane /control-plane/keys
+    volumes:
+      - database-secrets:/secrets
+      - control-plane-data:/control-plane
+    restart: "no"
+
+  database:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: stanza
+      POSTGRES_USER: stanza
+      POSTGRES_PASSWORD_FILE: /run/stanza-secrets/database-password
+    volumes:
+      - database-data:/var/lib/postgresql
+      - database-secrets:/run/stanza-secrets:ro
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stanza -d stanza"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  control-plane:
+    image: ghcr.io/sas41/stanzaodm-control-plane:${STANZA_VERSION:-latest}
+    pull_policy: always
+    ports:
+      - "${STANZA_BIND_ADDRESS:-127.0.0.1}:${STANZA_HTTP_PORT:-8080}:8080"
+    environment:
+      Database__Host: database
+      Database__Name: stanza
+      Database__Username: stanza
+      Database__PasswordFile: /run/stanza-secrets/database-password
+      Stanza__DataRoot: /var/lib/stanza
+      Stanza__AllowInsecureHttp: ${STANZA_ALLOW_INSECURE_HTTP:-false}
+    volumes:
+      - control-plane-data:/var/lib/stanza
+      - database-secrets:/run/stanza-secrets:ro
+    depends_on:
+      database:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  initialize-agent:
+    image: alpine:3.22
+    user: "0:0"
+    command:
+      - sh
+      - -ec
+      - |
+        # Validate storage before changing any ownership or permissions.
+        if [ -L /agent-data/identity.pk8 ] || { [ -e /agent-data/identity.pk8 ] && [ ! -f /agent-data/identity.pk8 ]; }; then
+          echo 'Agent identity must be a regular file, never a symlink or directory.' >&2
+          exit 1
+        fi
+        for store in request-ledger credentials runtime-home configuration-cache operation-workspaces; do
+          if [ -L "/agent-data/$$store" ] || { [ -e "/agent-data/$$store" ] && [ ! -d "/agent-data/$$store" ]; }; then
+            echo 'Agent storage paths must be directories, never files or symlinks. No files were changed.' >&2
+            exit 1
+          fi
+        done
+        if [ ! -f /agent-data/identity.pk8 ]; then
+          # A failed first Agent start can leave these initializer-created empty folders.
+          # Reuse only those folders; never claim unknown files or existing workload data.
+          for path in /agent-data/* /agent-data/.[!.]* /agent-data/..?*; do
+            if [ ! -e "$$path" ] && [ ! -L "$$path" ]; then continue; fi
+            case "$${path##*/}" in
+              request-ledger|credentials|runtime-home|configuration-cache|operation-workspaces)
+                if [ -d "$$path" ] && [ -z "$$(ls -A "$$path")" ]; then continue; fi
+                ;;
+            esac
+            echo 'Refusing to claim data without an Agent identity. Only empty Agent storage directories can be reused; unknown or nonempty entries were not changed.' >&2
+            exit 1
+          done
+        fi
+        if [ -n "$$(ls -A /agent-data)" ] && [ "$$(stat -c %u /agent-data)" != 1654 ]; then
+          echo 'Existing Agent data must be owned by UID 1654. No files were changed.' >&2
+          exit 1
+        fi
+        chown 1654:1654 /agent-data
+        chmod 0700 /agent-data
+        if [ -f /agent-data/identity.pk8 ]; then chown 1654:1654 /agent-data/identity.pk8; fi
+        for store in request-ledger credentials runtime-home configuration-cache; do
+          mkdir -p "/agent-data/$$store"
+          chown -hR 1654:1654 "/agent-data/$$store"
+          chmod 0700 "/agent-data/$$store"
+        done
+        mkdir -p /agent-data/operation-workspaces
+        chown 1654:1654 /agent-data/operation-workspaces
+    volumes:
+      - ./agent_data:/agent-data
+    restart: "no"
+
+  agent:
+    image: ghcr.io/sas41/stanzaodm-agent:${STANZA_VERSION:-latest}
+    pull_policy: always
+    environment:
+      Agent__ControlPlaneUrl: ${STANZA_CONTROL_PLANE_URL:?Set STANZA_CONTROL_PLANE_URL to your Control Plane origin}
+      Agent__EnrollmentToken: ${STANZA_ENROLLMENT_TOKEN:?Generate an enrollment token in the Control Plane UI}
+      Agent__Name: ${STANZA_AGENT_NAME:-${COMPOSE_PROJECT_NAME:-stanza}-agent}
+      Agent__PersistentDataRoot: /var/lib/stanza-agent
+      Agent__AllowInsecureHttp: ${STANZA_ALLOW_INSECURE_HTTP:-false}
+      Agent__Docker__EnableExecution: "true"
+    group_add:
+      - "${STANZA_DOCKER_GID:?Set STANZA_DOCKER_GID to the host Docker socket group ID}"
+    volumes:
+      - ./agent_data:/var/lib/stanza-agent
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      initialize-agent:
+        condition: service_completed_successfully
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  database-data:
+  database-secrets:
+  control-plane-data:

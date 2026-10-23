@@ -3,6 +3,7 @@
 # 2. Generate an enrollment token in /agents and set STANZA_ENROLLMENT_TOKEN.
 # 3. Set STANZA_DOCKER_GID to: stat -c %g /var/run/docker.sock
 # 4. Images default to latest. Optionally pin STANZA_VERSION to the SAME UTC release tag as the Control Plane.
+#    Set STANZA_AGENT_NAME for a friendly name in the Control Plane; otherwise the project name is used.
 # 5. Run: docker compose -f compose.agent.yaml up -d
 # The Agent opens only outbound management connections; no host ports are published.
 # Docker socket access is effectively privileged host access. Host actions require the separate opt-in
@@ -72,6 +73,7 @@ services:
     environment:
       Agent__ControlPlaneUrl: ${STANZA_CONTROL_PLANE_URL:?Set STANZA_CONTROL_PLANE_URL to your Control Plane origin}
       Agent__EnrollmentToken: ${STANZA_ENROLLMENT_TOKEN:?Generate an enrollment token in the Control Plane UI}
+      Agent__Name: ${STANZA_AGENT_NAME:-${COMPOSE_PROJECT_NAME:-stanza}-agent}
       Agent__PersistentDataRoot: /var/lib/stanza-agent
       Agent__AllowInsecureHttp: ${STANZA_ALLOW_INSECURE_HTTP:-false}
       Agent__Docker__EnableExecution: "true"

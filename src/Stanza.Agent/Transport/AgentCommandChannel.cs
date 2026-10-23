@@ -31,7 +31,7 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
         using var socket = new ClientWebSocket();
         socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(15);
         // ClientWebSocket uses the platform certificate chain and hostname verification; no bypass.
-        var proof = identity.CreateEnrollmentRequest(options.Value.EnrollmentToken, Environment.MachineName, clock.GetUtcNow());
+        var proof = identity.CreateEnrollmentRequest(options.Value.EnrollmentToken, options.Value.RegistrationName, clock.GetUtcNow());
         socket.Options.SetRequestHeader("X-Stanza-Proof", Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(proof, JsonSerializerOptions.Web)));
         var uri = new UriBuilder(origin) { Scheme = origin.Scheme == "https" ? "wss" : "ws", Path = "/api/agent-channel" }.Uri;
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);

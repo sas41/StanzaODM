@@ -33,14 +33,15 @@ public sealed class AgentTransportTests
         await using var fixture = await ServerFixture.CreateAsync("Production", allowInsecureHttp: true);
         using var root = new AgentTestDirectory(); using var identity = AgentIdentity.LoadOrCreate(root.Path);
         var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = fixture.Origin,
-            EnrollmentToken = fixture.Credential, AllowInsecureHttp = true });
+            EnrollmentToken = fixture.Credential, AllowInsecureHttp = true, Name = "edge-http-agent" });
         Assert.True(new AgentOptionsValidator(fixture.Environment).Validate(null, options.Value).Succeeded);
         using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false });
         var enrollment = new EnrollmentClient(http, fixture.Store.Clock, options, fixture.Environment);
-        AgentEnrollmentRequest Proof() => identity.CreateEnrollmentRequest(fixture.Credential, "http-agent", fixture.Store.Clock.GetUtcNow());
+        AgentEnrollmentRequest Proof() => identity.CreateEnrollmentRequest(fixture.Credential, options.Value.RegistrationName, fixture.Store.Clock.GetUtcNow());
         Assert.Equal(EnrollmentStatus.Pending, await enrollment.RegisterAsync(new(fixture.Origin), Proof(), default));
         var pending = Assert.Single(await fixture.Store.ListAsync());
         Assert.Equal(AgentEnrollmentProtocol.Pending, pending.Status);
+        Assert.Equal("edge-http-agent", pending.Hostname);
         Assert.False(fixture.Broker.IsConnected(pending.Id));
         using (var unapproved = fixture.Socket(identity))
             await Assert.ThrowsAsync<WebSocketException>(() => unapproved.ConnectAsync(fixture.ChannelUri, default));
@@ -51,6 +52,7 @@ public sealed class AgentTransportTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         var running = channel.RunAsync(identity, timeout.Token);
         await AgentTestWait.UntilAsync(() => state.Snapshot.Ready && fixture.Broker.ConfigurationSyncedAt(pending.Id) is not null);
+        Assert.Equal("edge-http-agent", Assert.Single(await fixture.Store.ListAsync()).Hostname);
         Assert.True(File.Exists(Path.Combine(root.Path, "configuration-cache", "agent.json")));
         var work = AgentWorkExecutorTests.Request();
         var result = await fixture.Broker.DispatchAsync(pending.Id, work, timeout.Token);
@@ -109,11 +111,12 @@ public sealed class AgentTransportTests
             deployment = (await drafts.CreateAsync(fixture.Store.OwnerId, "Synced app", agent, "services: {}\n", "LOCAL=initial\n")).Id;
         }
         var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = fixture.Origin,
-            EnrollmentToken = fixture.Credential, AllowInsecureHttp = true });
+            EnrollmentToken = fixture.Credential, AllowInsecureHttp = true, Name = "edge-before-reconnect" });
         var executor = new RecordingExecutor(); var state = new AgentState();
         using var first = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         var running = new AgentCommandChannel(options, state, executor, fixture.Store.Clock).RunAsync(identity, first.Token);
         await AgentTestWait.UntilAsync(() => state.Snapshot.Ready && fixture.Broker.ConfigurationSyncedAt(agent) is not null);
+        Assert.Equal("edge-before-reconnect", Assert.Single(await fixture.Store.ListAsync()).Hostname);
         var cache = Path.Combine(root.Path, "configuration-cache");
         var compose = Path.Combine(cache, "deployments", deployment.ToString("N"), "files", "compose.yaml");
         Assert.Equal("services: {}\n", await File.ReadAllTextAsync(compose));
@@ -134,9 +137,12 @@ public sealed class AgentTransportTests
         first.Cancel(); await IgnoreConnectionCloseAsync(running);
         await AgentTestWait.UntilAsync(() => !fixture.Broker.IsConnected(agent));
         await File.WriteAllTextAsync(compose, "local corruption");
+        options.Value.Name = "edge-after-reconnect";
         var reconnected = new AgentState(); using var second = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         running = new AgentCommandChannel(options, reconnected, executor, fixture.Store.Clock).RunAsync(identity, second.Token);
         await AgentTestWait.UntilAsync(() => reconnected.Snapshot.Ready && fixture.Broker.ConfigurationSyncedAt(agent) is not null);
+        var renamed = Assert.Single(await fixture.Store.ListAsync());
+        Assert.Equal(agent, renamed.Id); Assert.Equal("edge-after-reconnect", renamed.Hostname);
         Assert.Equal("# changed\nservices: {}\n", await File.ReadAllTextAsync(compose));
         Assert.Empty(executor.Requests);
         second.Cancel(); await IgnoreConnectionCloseAsync(running);

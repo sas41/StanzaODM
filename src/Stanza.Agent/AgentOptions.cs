@@ -8,6 +8,9 @@ public sealed class AgentOptions
     public string PersistentDataRoot { get; set; } = "/var/lib/stanza-agent";
     public string ControlPlaneUrl { get; set; } = "";
     public string EnrollmentToken { get; set; } = "";
+    public string Name { get; set; } = "";
+    // Friendly signed label only; never replace the Docker hostname used for self-mount discovery.
+    public string RegistrationName => string.IsNullOrWhiteSpace(Name) ? System.Environment.MachineName : Name.Trim();
     public bool AllowLoopbackHttp { get; set; }
     public bool AllowInsecureHttp { get; set; }
 
@@ -22,6 +25,8 @@ public sealed class AgentOptionsValidator(IHostEnvironment environment) : IValid
     public ValidateOptionsResult Validate(string? name, AgentOptions options)
     {
         var failures = new List<string>();
+        if (options.Name is null || options.Name.Length > 253 || options.Name.Any(char.IsControl))
+            failures.Add("Agent:Name must be at most 253 characters without control characters.");
         if (!IsPersistentDirectory(options.PersistentDataRoot))
         {
             failures.Add("Agent:PersistentDataRoot must be an absolute, dedicated persistent directory, not a filesystem root.");

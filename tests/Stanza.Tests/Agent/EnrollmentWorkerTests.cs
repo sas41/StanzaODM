@@ -10,6 +10,23 @@ namespace Stanza.Tests.Agent;
 
 public sealed class EnrollmentWorkerTests
 {
+    [Fact]
+    public async Task Worker_registers_the_configured_friendly_name_in_its_signed_proof()
+    {
+        using var directory = new AgentTestDirectory();
+        var options = AgentOptionsTests.ValidOptions(); options.PersistentDataRoot = directory.Path; options.Name = "  edge-one  ";
+        var client = new FakeClient(EnrollmentStatus.Pending); var clock = new ManualTimeProvider();
+        using var worker = new EnrollmentWorker(Options.Create(options), client, new AgentState(), clock, NullLogger<EnrollmentWorker>.Instance);
+        await worker.StartAsync(default);
+        try
+        {
+            await clock.NextTimerAsync();
+            var proof = Assert.Single(client.Requests);
+            Assert.Equal("edge-one", proof.Hostname); Assert.True(AgentEnrollmentProtocol.VerifyProof(proof, clock.GetUtcNow()));
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
     [Theory]
     [InlineData(1, 2)]
     [InlineData(2, 4)]

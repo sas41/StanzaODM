@@ -28,6 +28,36 @@ public sealed class DockerComposeFactAttribute : FactAttribute
 public sealed class ComposeConfigurationTests
 {
     [DockerComposeFact]
+    public async Task Default_stack_contains_exactly_the_component_services_with_identical_configuration()
+    {
+        using var full = await RenderAsync("compose.yaml");
+        using var control = await RenderAsync("compose.control.yaml");
+        using var agent = await RenderAsync("compose.agent.yaml");
+        var services = full.RootElement.GetProperty("services");
+        Assert.Equal(new[] { "agent", "control-plane", "database", "initialize", "initialize-agent" }, services.EnumerateObject().Select(x => x.Name).Order());
+        foreach (var component in new[] { control, agent })
+            foreach (var service in component.RootElement.GetProperty("services").EnumerateObject())
+                Assert.True(System.Text.Json.Nodes.JsonNode.DeepEquals(System.Text.Json.Nodes.JsonNode.Parse(service.Value.GetRawText()),
+                    System.Text.Json.Nodes.JsonNode.Parse(services.GetProperty(service.Name).GetRawText())), "Full-stack configuration differs for " + service.Name);
+        Assert.Equal(3, full.RootElement.GetProperty("volumes").EnumerateObject().Count());
+        using var privileged = await RenderAsync("compose.yaml", "compose.agent.privileged.yaml");
+        Assert.Equal("0:0", privileged.RootElement.GetProperty("services").GetProperty("agent").GetProperty("user").GetString());
+        Assert.Equal(5, privileged.RootElement.GetProperty("services").EnumerateObject().Count());
+    }
+
+    [DockerComposeFact]
+    public async Task Friendly_name_uses_the_environment_override_and_otherwise_the_project_name()
+    {
+        using var named = await RenderEnvironmentAtAsync(ArchitectureTests.RepositoryRoot(), null, null,
+            new Dictionary<string, string?> { ["STANZA_AGENT_NAME"] = "Edge agent one" }, "compose.yaml");
+        Assert.Equal("Edge agent one", named.RootElement.GetProperty("services").GetProperty("agent").GetProperty("environment").GetProperty("Agent__Name").GetString());
+        using var automatic = await RenderAsync("compose.agent.yaml");
+        Assert.Equal(automatic.RootElement.GetProperty("name").GetString() + "-agent",
+            automatic.RootElement.GetProperty("services").GetProperty("agent").GetProperty("environment").GetProperty("Agent__Name").GetString());
+        Assert.False(named.RootElement.GetProperty("services").GetProperty("agent").TryGetProperty("hostname", out _));
+    }
+
+    [DockerComposeFact]
     public async Task Separate_installation_directories_have_independent_local_storage_and_default_project_names()
     {
         using var directory = new AgentTestDirectory();
@@ -167,7 +197,11 @@ public sealed class ComposeConfigurationTests
     private static Task<JsonDocument> RenderSettingsAsync(string? version, string? allowHttp, params string[] manifests) =>
         RenderSettingsAtAsync(ArchitectureTests.RepositoryRoot(), version, allowHttp, manifests);
 
-    private static async Task<JsonDocument> RenderSettingsAtAsync(string directory, string? version, string? allowHttp, params string[] manifests)
+    private static Task<JsonDocument> RenderSettingsAtAsync(string directory, string? version, string? allowHttp, params string[] manifests) =>
+        RenderEnvironmentAtAsync(directory, version, allowHttp, null, manifests);
+
+    internal static async Task<JsonDocument> RenderEnvironmentAtAsync(string directory, string? version, string? allowHttp,
+        IReadOnlyDictionary<string, string?>? extra, params string[] manifests)
     {
         var start = new ProcessStartInfo("docker") { WorkingDirectory = directory,
             UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
@@ -180,12 +214,16 @@ public sealed class ComposeConfigurationTests
         // Storage is local to the installation; a stale variable must not split initializer/runtime mounts.
         start.Environment["STANZA_AGENT_DATA_ROOT"] = "/tmp/opencode/must-not-be-used";
         start.Environment.Remove("COMPOSE_PROJECT_NAME");
+        start.Environment.Remove("STANZA_AGENT_NAME");
         start.Environment["STANZA_BIND_ADDRESS"] = "127.0.0.1";
         start.Environment["STANZA_HTTP_PORT"] = "8080";
         if (version is null) start.Environment.Remove("STANZA_VERSION");
         else start.Environment["STANZA_VERSION"] = version;
         if (allowHttp is null) start.Environment.Remove("STANZA_ALLOW_INSECURE_HTTP");
         else start.Environment["STANZA_ALLOW_INSECURE_HTTP"] = allowHttp;
+        foreach (var setting in extra ?? new Dictionary<string, string?>())
+            if (setting.Value is null) start.Environment.Remove(setting.Key);
+            else start.Environment[setting.Key] = setting.Value;
         using var process = Process.Start(start)!;
         var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
