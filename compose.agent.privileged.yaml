@@ -1,6 +1,6 @@
 # OPTIONAL, HIGH PRIVILEGE: enables host actions in addition to normal Docker workloads.
 # Run only on hosts where administrators are trusted to execute commands as host root:
-# Set STANZA_VERSION to the same published UTC release tag used by the Control Plane.
+# Defaults to latest. To pin a release, use the same STANZA_VERSION as the Control Plane.
 # docker compose -f compose.agent.yaml -f compose.agent.privileged.yaml up -d
 # This is an override, not a standalone stack. Never run both Agent profiles on the same data root.
 # Also enable AllowHostActions in the Control Plane operational policy. No host terminal is exposed.

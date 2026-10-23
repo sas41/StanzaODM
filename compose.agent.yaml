@@ -2,7 +2,7 @@
 # 1. Set STANZA_CONTROL_PLANE_URL to the HTTPS Control Plane origin.
 # 2. Generate an enrollment token in /agents and set STANZA_ENROLLMENT_TOKEN.
 # 3. Set STANZA_DOCKER_GID to: stat -c %g /var/run/docker.sock
-# 4. Set STANZA_VERSION to the SAME published UTC release tag as the Control Plane.
+# 4. Images default to latest. Optionally pin STANZA_VERSION to the SAME UTC release tag as the Control Plane.
 # 5. Run: docker compose -f compose.agent.yaml up -d
 # The Agent opens only outbound management connections; no host ports are published.
 # Docker socket access is effectively privileged host access. Host actions require the separate opt-in
@@ -18,9 +18,30 @@ services:
       - sh
       - -ec
       - |
-        if [ -n "$$(ls -A /agent-data)" ] && [ ! -f /agent-data/identity.pk8 ]; then
-          echo 'Refusing to claim a nonempty directory without an Agent identity. Use a dedicated data directory.' >&2
+        # Validate storage before changing any ownership or permissions.
+        if [ -L /agent-data/identity.pk8 ] || { [ -e /agent-data/identity.pk8 ] && [ ! -f /agent-data/identity.pk8 ]; }; then
+          echo 'Agent identity must be a regular file, never a symlink or directory.' >&2
           exit 1
+        fi
+        for store in request-ledger credentials runtime-home configuration-cache operation-workspaces; do
+          if [ -L "/agent-data/$$store" ] || { [ -e "/agent-data/$$store" ] && [ ! -d "/agent-data/$$store" ]; }; then
+            echo 'Agent storage paths must be directories, never files or symlinks. No files were changed.' >&2
+            exit 1
+          fi
+        done
+        if [ ! -f /agent-data/identity.pk8 ]; then
+          # A failed first Agent start can leave these initializer-created empty folders.
+          # Reuse only those folders; never claim unknown files or existing workload data.
+          for path in /agent-data/* /agent-data/.[!.]* /agent-data/..?*; do
+            if [ ! -e "$$path" ] && [ ! -L "$$path" ]; then continue; fi
+            case "$${path##*/}" in
+              request-ledger|credentials|runtime-home|configuration-cache|operation-workspaces)
+                if [ -d "$$path" ] && [ -z "$$(ls -A "$$path")" ]; then continue; fi
+                ;;
+            esac
+            echo 'Refusing to claim data without an Agent identity. Only empty Agent storage directories can be reused; unknown or nonempty entries were not changed.' >&2
+            exit 1
+          done
         fi
         if [ -n "$$(ls -A /agent-data)" ] && [ "$$(stat -c %u /agent-data)" != 1654 ]; then
           echo 'Existing Agent data must be owned by UID 1654. No files were changed.' >&2
@@ -28,10 +49,8 @@ services:
         fi
         chown 1654:1654 /agent-data
         chmod 0700 /agent-data
-        if [ -L /agent-data/identity.pk8 ]; then exit 1; fi
         if [ -f /agent-data/identity.pk8 ]; then chown 1654:1654 /agent-data/identity.pk8; fi
         for store in request-ledger credentials runtime-home configuration-cache; do
-          if [ -L "/agent-data/$$store" ]; then exit 1; fi
           mkdir -p "/agent-data/$$store"
           chown -hR 1654:1654 "/agent-data/$$store"
           chmod 0700 "/agent-data/$$store"
@@ -43,7 +62,7 @@ services:
     restart: "no"
 
   agent:
-    image: ghcr.io/sas41/stanzaodm-agent:${STANZA_VERSION:?Set STANZA_VERSION to the shared UTC image version (YYYY-MM-DD-HHMMSS)}
+    image: ghcr.io/sas41/stanzaodm-agent:${STANZA_VERSION:-latest}
     pull_policy: always
     environment:
       Agent__ControlPlaneUrl: ${STANZA_CONTROL_PLANE_URL:?Set STANZA_CONTROL_PLANE_URL to your HTTPS Control Plane origin}

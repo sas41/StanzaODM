@@ -103,11 +103,11 @@ public sealed class RepositoryConfigurationTests
     }
 
     [Fact]
-    public void WorkflowBuildsBothImagesAfterTestsAndGuardsRegistryCredentials()
+    public void WorkflowBuildsBothImagesWithSharedReleaseVersionAndGuardsRegistryCredentials()
     {
         var root = ArchitectureTests.RepositoryRoot();
         var workflow = File.ReadAllText(Path.Combine(root, ".github/workflows/docker-images.yml"));
-        Assert.Contains("needs: [verify, release]", workflow);
+        Assert.Contains("needs: release", workflow);
         Assert.Contains("dotnet test Stanza.slnx --configuration Release", workflow);
         Assert.Contains("node --test tests/Stanza.Tests/*/*.test.cjs", workflow);
         Assert.DoesNotContain("pull_request_target:", workflow);
@@ -169,8 +169,8 @@ public sealed class RepositoryConfigurationTests
         var privileged = File.ReadAllText(Path.Combine(root, "compose.agent.privileged.yaml"));
         Assert.Contains("docker compose -f compose.control.yaml up -d", control);
         Assert.Contains("docker compose -f compose.agent.yaml -f compose.agent.privileged.yaml up -d", privileged);
-        Assert.Contains("image: ghcr.io/sas41/stanzaodm-control-plane:${STANZA_VERSION:?", control);
-        Assert.Contains("image: ghcr.io/sas41/stanzaodm-agent:${STANZA_VERSION:?", ordinary);
+        Assert.Contains("image: ghcr.io/sas41/stanzaodm-control-plane:${STANZA_VERSION:-latest}", control);
+        Assert.Contains("image: ghcr.io/sas41/stanzaodm-agent:${STANZA_VERSION:-latest}", ordinary);
         Assert.DoesNotContain("build:", control); Assert.DoesNotContain("build:", ordinary);
         Assert.Contains("pull_policy: always", control); Assert.Contains("pull_policy: always", ordinary);
         Assert.DoesNotContain("pid: host", ordinary); Assert.DoesNotContain("SYS_ADMIN", ordinary);

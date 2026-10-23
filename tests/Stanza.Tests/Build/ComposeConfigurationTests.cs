@@ -26,6 +26,18 @@ public sealed class DockerComposeFactAttribute : FactAttribute
 public sealed class ComposeConfigurationTests
 {
     [DockerComposeFact]
+    public async Task Unset_and_blank_versions_default_both_applications_to_latest()
+    {
+        foreach (var version in new string?[] { null, "" })
+        {
+            using var control = await RenderVersionAsync(version, "compose.control.yaml");
+            using var agent = await RenderVersionAsync(version, "compose.agent.yaml");
+            Assert.Equal("ghcr.io/sas41/stanzaodm-control-plane:latest", control.RootElement.GetProperty("services").GetProperty("control-plane").GetProperty("image").GetString());
+            Assert.Equal("ghcr.io/sas41/stanzaodm-agent:latest", agent.RootElement.GetProperty("services").GetProperty("agent").GetProperty("image").GetString());
+        }
+    }
+
+    [DockerComposeFact]
     public async Task Control_plane_manifest_renders_database_persistence_and_only_control_plane_services()
     {
         using var rendered = await RenderAsync("compose.control.yaml");
@@ -81,7 +93,9 @@ public sealed class ComposeConfigurationTests
         Assert.Contains(mounts, x => x.GetProperty("source").GetString() == "/var/lib/stanza-agent" && x.GetProperty("target").GetString() == "/var/lib/stanza-agent");
     }
 
-    private static async Task<JsonDocument> RenderAsync(params string[] manifests)
+    private static Task<JsonDocument> RenderAsync(params string[] manifests) => RenderVersionAsync("2026-10-23-115011", manifests);
+
+    private static async Task<JsonDocument> RenderVersionAsync(string? version, params string[] manifests)
     {
         var start = new ProcessStartInfo("docker") { WorkingDirectory = ArchitectureTests.RepositoryRoot(),
             UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
@@ -94,7 +108,8 @@ public sealed class ComposeConfigurationTests
         start.Environment["STANZA_AGENT_DATA_ROOT"] = "/var/lib/stanza-agent";
         start.Environment["STANZA_BIND_ADDRESS"] = "127.0.0.1";
         start.Environment["STANZA_HTTP_PORT"] = "8080";
-        start.Environment["STANZA_VERSION"] = "2026-10-23-115011";
+        if (version is null) start.Environment.Remove("STANZA_VERSION");
+        else start.Environment["STANZA_VERSION"] = version;
         using var process = Process.Start(start)!;
         var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
