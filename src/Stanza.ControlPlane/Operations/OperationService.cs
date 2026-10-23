@@ -157,7 +157,10 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
 
     public async Task<bool> CanReadOutputAsync(Guid actor, Guid id, CancellationToken ct = default)
     {
-        var row = await RequiredAsync(id, ct);
+        // Authorization checks must not load large encrypted execution snapshots on every live-feed tick.
+        var row = await db.Set<OperationEntity>().AsNoTracking().Where(x => x.Id == id)
+            .Select(x => new OperationEntity { Id = x.Id, Kind = x.Kind, DeploymentId = x.DeploymentId, AgentId = x.AgentId }).SingleOrDefaultAsync(ct)
+            ?? throw new OperationException("Operation not found.");
         return await CanReadAsync(actor, row, ct) && await CanReadOutputAsync(actor, row, ct);
     }
 

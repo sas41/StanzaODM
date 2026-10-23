@@ -10,7 +10,7 @@ public sealed class ActionEditorModel
     [Required, StringLength(100)] public string Name { get; set; } = "";
     public bool Enabled { get; set; }
     [Required] public string Concurrency { get; set; } = "queue";
-    [Required, StringLength(131072)] public string PlanJson { get; set; } = "{\"steps\":[{\"kind\":\"deploy\",\"deploymentId\":null,\"timeoutSeconds\":300,\"failure\":\"stop\"}],\"parameters\":[]}";
+    [Required, StringLength(131072)] public string PlanJson { get; set; } = "{\"steps\":[{\"kind\":\"deploy\",\"deploymentId\":null,\"failure\":\"stop\"}],\"parameters\":[]}";
 }
 public sealed class ScheduleEditorModel
 {

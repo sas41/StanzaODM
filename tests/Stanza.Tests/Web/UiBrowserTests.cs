@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
@@ -34,6 +35,7 @@ public sealed class UiBrowserTests
         var address = Assert.Single(factory.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses);
         Guid deployment, agent, action, qa;
         var operation = Guid.NewGuid();
+        var run = Guid.NewGuid();
         using (var scope = factory.Services.CreateScope())
         {
             var services = scope.ServiceProvider; var accounts = services.GetRequiredService<AccountService>();
@@ -65,6 +67,9 @@ public sealed class UiBrowserTests
             db.Add(new OperationEntity { Id = operation, ActorId = owner, DeploymentId = deployment, AgentId = agent, Kind = "deploy", State = "Failed", Code = "runtime_failed" });
             await db.SaveChangesAsync();
             await services.GetRequiredService<OperationOutputStore>().AppendAsync(operation, new(1, "stderr", "manifest unavailable: deployment failure details\n"));
+            db.Add(new AutomationRun { Id = run, OwnerId = owner, RequestedBy = owner, ActionId = action, ActionOwnerId = owner, OperationId = operation, Source = "manual", State = "running" });
+            db.Add(new AutomationStepRun { RunId = run, Index = 0, OperationId = operation, DeploymentId = deployment, AgentId = agent, Kind = "deploy", State = "running" });
+            await db.SaveChangesAsync();
         }
 
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(180));
@@ -74,7 +79,7 @@ public sealed class UiBrowserTests
         await browser.WaitAsync("location.pathname==='/' && document.readyState==='complete' && !!document.querySelector('[data-action-overview]')");
         var routes = new[] { "/", "/agents", "/deployments", "/deployments/create", $"/deployments/{deployment}", $"/deployments/{deployment}/edit", $"/deployments/{deployment}/file",
             "/sources", $"/sources/{deployment}", $"/sources/{deployment}/edit", "/credentials", "/credentials/create", "/automation", "/automation/actions/edit",
-            $"/automation/actions/edit?id={action}", $"/automation/actions/{action}/access", "/automation/schedules/edit", "/automation/webhooks/edit", "/automation/images/edit", "/automation/limits",
+            $"/automation/actions/edit?id={action}", $"/automation/actions/{action}/access", $"/automation/runs/{run}", "/automation/schedules/edit", "/automation/webhooks/edit", "/automation/images/edit", "/automation/limits",
             "/operations", $"/operations/{operation}", "/settings", $"/agents/{agent}/policy", $"/agents/{agent}/environment", "/users", "/users/create", $"/users/{qa}/access", "/groups", "/audit", "/portability", "/recovery", "/account/password" };
         foreach (var size in new[] { (1920, 1080), (1366, 768), (390, 844) })
         {
@@ -83,6 +88,19 @@ public sealed class UiBrowserTests
             {
                 await browser.GoAsync(route);
                 if (route == $"/operations/{operation}") await browser.WaitAsync("document.querySelector('[data-operation-output]')?.textContent.includes('deployment failure details')");
+                if (route == $"/automation/runs/{run}")
+                {
+                    await browser.WaitAsync("document.querySelector('[data-action-output]')?.textContent.includes('deployment failure details')");
+                    if (size.Item1 == 1920)
+                    {
+                        using var update = factory.Services.CreateScope(); var db = update.ServiceProvider.GetRequiredService<StanzaDbContext>();
+                        await update.ServiceProvider.GetRequiredService<OperationOutputStore>().AppendAsync(operation, new(2, "stderr", "new live action output\n"));
+                        await db.Set<AutomationRun>().Where(x => x.Id == run).ExecuteUpdateAsync(u => u.SetProperty(x => x.State, "failed").SetProperty(x => x.Code, "final-live-step-failed"));
+                        await db.Set<AutomationStepRun>().Where(x => x.RunId == run).ExecuteUpdateAsync(u => u.SetProperty(x => x.State, "failed"));
+                        await browser.WaitAsync("document.querySelector('#action-run-content')?.textContent.includes('final-live-step-failed') && document.querySelector('[data-action-output]')?.textContent.includes('new live action output')");
+                        Assert.True((await browser.EvaluateAsync("document.querySelector('[data-action-output]').textContent.includes('deployment failure details')")).GetBoolean());
+                    }
+                }
                 if (route == $"/sources/{deployment}") await browser.WaitAsync("!!document.querySelector('[data-branch-choice]')");
                 var metrics = await browser.EvaluateAsync("JSON.stringify({width:innerWidth,overflow:document.documentElement.scrollWidth-innerWidth,padding:parseFloat(getComputedStyle(document.querySelector('.content')).paddingLeft),maxWidth:getComputedStyle(document.querySelector('.content')).maxWidth,active:document.querySelectorAll('.sidebar nav [aria-current=page]').length,unstyledButtons:Array.from(document.querySelectorAll('.content button')).filter(b=>parseFloat(getComputedStyle(b).borderRadius)<4).length,largeChecks:Array.from(document.querySelectorAll('.content input[type=checkbox]')).filter(c=>c.getBoundingClientRect().width>20).length})");
                 using var data = JsonDocument.Parse(metrics.GetString()!); var m = data.RootElement;
@@ -114,6 +132,20 @@ public sealed class UiBrowserTests
                 Assert.True((await browser.EvaluateAsync("document.activeElement===document.querySelector('.nav-toggle') && !document.querySelector('.sidebar').hasAttribute('data-open')")).GetBoolean());
             }
         }
+        await browser.GoAsync($"/deployments/{deployment}/edit");
+        await browser.WaitAsync("document.querySelectorAll('[data-deployment-action] [data-editor-steps] > section').length>0");
+        await browser.EvaluateAsync("document.querySelector('[name=ComposeText]').value='unsaved compose edit'; true");
+        for (var revision = 2; revision <= 3; revision++)
+        {
+            await browser.EvaluateAsync($"(()=>{{const form=document.querySelector('[data-deployment-action] input[name=Id][value=\"{action}\"]').closest('form');form.querySelector('[name=Name]').value='Dev deployment edited {revision}';form.querySelector('[data-plan-order]').value='{revision}';form.requestSubmit();return true;}})()");
+            await browser.WaitAsync($"document.querySelector('[data-deployment-action] input[name=Id][value=\"{action}\"]')?.closest('form').querySelector('[name=Revision]').value==='{revision}'");
+            Assert.Equal("unsaved compose edit", (await browser.EvaluateAsync("document.querySelector('[name=ComposeText]').value")).GetString());
+        }
+        using var check = factory.Services.CreateScope();
+        var changed = await check.ServiceProvider.GetRequiredService<StanzaDbContext>().Set<ActionDefinition>().AsNoTracking().SingleAsync(x => x.Id == action);
+        Assert.Equal("Dev deployment edited 3", changed.Name);
+        Assert.Equal(3, check.ServiceProvider.GetRequiredService<AutomationService>().Unprotect<ActionPlan>(changed.ProtectedSteps).Order);
+        Assert.Equal(1, (await check.ServiceProvider.GetRequiredService<StanzaDbContext>().Set<DeploymentDraftEntity>().AsNoTracking().SingleAsync(x => x.Id == deployment)).Revision);
     }
 
     private sealed class UiDispatcher : IAgentCommandDispatcher

@@ -1,0 +1,26 @@
+@model ActionEditorModel
+@{ var deployment = (Guid)ViewData["DeploymentId"]!; }
+<section class="panel" data-deployment-action>
+<form method="post" action="/deployments/@deployment/actions/save" hx-post="/deployments/@deployment/actions/save" hx-target="closest [data-deployment-action]" hx-swap="outerHTML">
+@Html.AntiForgeryToken()<input name="Id" type="hidden" value="@Model.Id" /><input name="Revision" type="hidden" value="@Model.Revision" />
+<div asp-validation-summary="All" class="validation"></div>
+@if (ViewData["ActionSaved"] is true) { <p class="notice success" role="status">Action saved. Deployment draft and workloads were not changed.</p> }
+<div class="form-grid"><div class="field"><label>Name<input name="Name" value="@Model.Name" maxlength="100" required /></label></div>
+<div class="field"><label>Concurrency<select name="Concurrency"><option value="queue" selected="@(Model.Concurrency == "queue")">Queue conflicting runs</option><option value="reject" selected="@(Model.Concurrency == "reject")">Reject overlapping runs</option></select></label></div>
+<label class="check-field"><input name="Enabled" type="checkbox" value="true" checked="@Model.Enabled" /> Enabled</label><input name="Enabled" type="hidden" value="false" /></div>
+<details><summary>Edit steps, inputs &amp; confirmation</summary><p class="field-help">Every step must target this deployment. Scope and targets are validated on save.</p>
+<section data-action-button hidden><div class="form-grid">
+<label class="field">Scope<select data-plan-deployment disabled><option value="@deployment">This deployment</option></select></label>
+<label class="field">Button label<input data-plan-label maxlength="100" /></label>
+<label class="field">Button order<input data-plan-order type="number" min="0" max="10000" /></label>
+<label class="check-field"><input data-plan-visible type="checkbox" /> Show on overview</label>
+<label class="field span-full">Confirmation<input data-plan-confirmation maxlength="1000" /></label>
+</div></section>
+<section data-action-editor hidden>
+<div class="panel-heading"><h3>Inputs</h3><button type="button" data-add-input>Add input</button></div><div data-editor-inputs></div>
+<div class="panel-heading"><h3>Steps</h3><button type="button" data-add-step>Add step</button></div><div data-editor-steps></div><p data-editor-error class="validation" role="alert"></p>
+</section>
+<details data-advanced-plan><summary>Advanced JSON / no-JavaScript editor</summary><label>Action plan JSON<textarea name="PlanJson" rows="12" spellcheck="false" class="code-editor">@Model.PlanJson</textarea></label></details></details>
+<div class="form-actions"><button class="button primary" type="submit">Save action</button>
+@if (Model.Id is { } actionId) { <a class="button" href="/automation/actions/edit?id=@actionId">Visual editor &amp; schedules</a> }
+</div></form></section>

@@ -119,6 +119,7 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
         {
             var action = await automation.ActionAsync(actionId, ct);
             if (!action.Enabled || action.OwnerId != run.ActionOwnerId) throw new AutomationAccessException();
+            if (action.ScopeDeploymentId != automation.Unprotect<ActionPlan>(run.ProtectedPlan).DeploymentId) throw new AutomationAccessException();
             await authorization.RequireAsync(run.OwnerId, "action.execute", "action", actionId, ct);
             await authorization.RequireAsync(action.OwnerId, "action.execute", "action", actionId, ct);
             if (run.ActionOwnerId is { } owner) await authorization.RequireAsync(owner, "action.execute", "action", actionId, ct);

@@ -19,15 +19,20 @@ public sealed class AutomationController(AutomationService automation, Automatio
     public async Task<IActionResult> Index(CancellationToken ct) => View(await automation.ListAsync(Actor, ct));
 
     [HttpGet("actions/edit")]
-    public async Task<IActionResult> ActionEditor(Guid? id, CancellationToken ct)
+    public async Task<IActionResult> ActionEditor(Guid? id, CancellationToken ct, Guid? deploymentId = null)
     {
         try
         {
             await authorization.RequireAsync(Actor, "action.manage", "action", id, ct);
             ViewData["ActionDeployments"] = await sources.ListDeploymentsAsync(Actor, ct);
             ViewData["ActionAgents"] = await sources.ListAgentsAsync(Actor, ct);
-            if (id is null) return View(new ActionEditorModel());
+            if (id is null)
+            {
+                var initialPlan = new ActionPlan([new("deploy", deploymentId)], DeploymentId: deploymentId);
+                return View(new ActionEditorModel { PlanJson = JsonSerializer.Serialize(initialPlan, AutomationRules.Json) });
+            }
             var (definition, plan) = await automation.ReadActionAsync(Actor, id.Value, ct);
+            if (!AutomationRules.MatchesScope(plan)) ModelState.AddModelError("", "This legacy action was disabled because its steps escape its deployment scope. Review its targets or explicitly change it to Global before enabling it.");
             ViewData["ActionSchedules"] = await automation.ActionSchedulesAsync(Actor, id.Value, ct);
             return View(new ActionEditorModel { Id = id, Name = definition.Name, Enabled = definition.Enabled, Revision = definition.Revision,
                 Concurrency = definition.Concurrency, PlanJson = JsonSerializer.Serialize(plan, new JsonSerializerOptions(AutomationRules.Json) { WriteIndented = true }) });
@@ -290,7 +295,9 @@ public sealed class AutomationController(AutomationService automation, Automatio
     private async Task LoadEditorTargets(CancellationToken ct)
     {
         ViewData["EditorDeployments"] = await sources.ListDeploymentsAsync(Actor, ct);
-        ViewData["EditorActions"] = (await automation.ListAsync(Actor, ct)).Actions;
+        var overview = await automation.ListAsync(Actor, ct);
+        ViewData["EditorActions"] = overview.Actions;
+        ViewData["ActionScopeNames"] = overview.ScopeNames;
     }
 
     private async Task<IActionResult> Mutate(Func<Task<IActionResult>> action)

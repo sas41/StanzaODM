@@ -194,7 +194,7 @@ public sealed class RecoveryService(StanzaDbContext db, IConfiguration configura
         var actual = Convert.ToInt64(await count.ExecuteScalarAsync(token));
         if (actual == 0) return;
         if (table.Name == "Settings" && table.Schema is null && actual == 1 &&
-            await db.Settings.AsNoTracking().AnyAsync(x => x.Key == "schema-version" && x.Value == "1", token)) return;
+            await db.Settings.AsNoTracking().AnyAsync(x => x.Key == "schema-version" && x.Value == "2", token)) return;
         var store = StoreObjectIdentifier.Table(table.Name, table.Schema);
         var defaults = db.GetService<IDesignTimeModel>().Model.GetEntityTypes()
             .Where(x => x.GetTableName() == table.Name && x.GetSchema() == table.Schema)
@@ -246,6 +246,12 @@ public sealed class RecoveryService(StanzaDbContext db, IConfiguration configura
 
     private void Validate(RecoveryArchive archive, List<ITable> tables)
     {
+        var legacyTables = archive.Tables?.Any(x => x.Name == "OperationOutput") == true ? tables : tables.Where(x => x.Name != "OperationOutput").ToList();
+        if (archive.Tables is not null && archive.Tables.Count == legacyTables.Count && archive.SchemaFingerprint == FingerprintSchema(legacyTables, true))
+        {
+            UpgradeActionArchive(archive, tables);
+            archive.SchemaFingerprint = Fingerprint(legacyTables);
+        }
         // Version 1 upgrade: old backups have the identical schema except for the additive output table.
         var previous = tables.Where(x => x.Name != "OperationOutput").ToList();
         if (archive.Tables is not null && archive.Tables.Count == previous.Count &&
@@ -318,17 +324,58 @@ public sealed class RecoveryService(StanzaDbContext db, IConfiguration configura
         Columns = table.Columns.OrderBy(x => x.Name, StringComparer.Ordinal).Select(x => new RecoveryColumn { Name = x.Name, StoreType = x.StoreType, Nullable = x.IsNullable }).ToList()
     };
 
-    private string Fingerprint(List<ITable> tables)
+    private void UpgradeActionArchive(RecoveryArchive archive, List<ITable> tables)
+    {
+        var candidates = archive.Tables.Where(x => x.Name == "AutomationActions").ToArray();
+        if (candidates.Length != 1) throw new RecoveryOperationException("Missing or duplicate legacy action table.");
+        var saved = candidates[0];
+        var current = Describe(tables.Single(x => x.Name == "AutomationActions"));
+        var original = current.Columns.Where(x => x.Name is not ("ScopeDeploymentId" or "NormalizedName")).ToList();
+        if (saved.Columns is null || saved.Rows is null || saved.Columns.Any(x => x is null) || saved.Columns.Count != original.Count ||
+            !saved.Columns.Zip(original).All(x => x.First.Name == x.Second.Name && x.First.StoreType == x.Second.StoreType && x.First.Nullable == x.Second.Nullable))
+            throw new RecoveryOperationException("Invalid legacy action schema.");
+        var names = saved.Columns.Select(x => x.Name).ToArray();
+        var rows = new List<RecoveryCell[]>();
+        foreach (var row in saved.Rows)
+        {
+            if (row is null || row.Length != names.Length || row.Any(x => x is null)) throw new RecoveryOperationException("Invalid legacy action row.");
+            rows.Add(current.Columns.Select(column => column.Name switch
+            {
+                "ScopeDeploymentId" => RecoveryCell.From(DBNull.Value),
+                // Unique placeholders permit restoration before the restored DP keys are loaded on restart.
+                "NormalizedName" => RecoveryCell.From("legacy:" + row[Array.IndexOf(names, "Id")].Value),
+                _ => row[Array.IndexOf(names, column.Name)]
+            }).ToArray());
+        }
+        saved.Columns = current.Columns; saved.Rows = rows;
+        var settingsTables = archive.Tables.Where(x => x.Name == "Settings").ToArray();
+        if (settingsTables.Length != 1) throw new RecoveryOperationException("Missing or duplicate legacy settings table.");
+        var settings = settingsTables[0];
+        if (settings.Columns is null || settings.Rows is null || settings.Columns.Any(x => x is null) || settings.Columns.Count != 2 ||
+            settings.Rows.Any(x => x is null || x.Length != 2 || x.Any(c => c is null))) throw new RecoveryOperationException("Invalid legacy settings schema.");
+        var key = settings.Columns.FindIndex(x => x.Name == "Key"); var value = settings.Columns.FindIndex(x => x.Name == "Value");
+        if (key < 0 || value < 0) throw new RecoveryOperationException("Invalid legacy settings columns.");
+        var marker = settings.Rows.SingleOrDefault(x => x.Length == settings.Columns.Count && x[key].Value == "schema-version");
+        if (marker is not null) marker[value] = RecoveryCell.From("1");
+        else
+        {
+            var entry = new RecoveryCell[settings.Columns.Count]; entry[key] = RecoveryCell.From("schema-version"); entry[value] = RecoveryCell.From("1");
+            settings.Rows.Add(entry);
+        }
+    }
+
+    private string Fingerprint(List<ITable> tables) => FingerprintSchema(tables, false);
+    private string FingerprintSchema(List<ITable> tables, bool legacyActions)
     {
         // Canonical relational structure, including constraints, not a version string chosen
         // by an archive author. Provider store types deliberately prevent cross-provider imports.
         var fullModel = db.GetService<IDesignTimeModel>().Model.GetRelationalModel();
         var schema = tables.Select(table => fullModel.FindTable(table.Name, table.Schema)!).Select(t => new
         {
-            t.Name, t.Schema, Columns = Describe(t).Columns,
+            t.Name, t.Schema, Columns = Describe(t).Columns.Where(c => !legacyActions || t.Name != "AutomationActions" || c.Name is not ("ScopeDeploymentId" or "NormalizedName")).ToArray(),
             Keys = t.UniqueConstraints.OrderBy(x => x.Name, StringComparer.Ordinal).Select(x => new { x.Name, Columns = x.Columns.Select(c => c.Name).ToArray() }).ToArray(),
             ForeignKeys = t.ForeignKeyConstraints.OrderBy(x => x.Name, StringComparer.Ordinal).Select(x => new { x.Name, Columns = x.Columns.Select(c => c.Name).ToArray(), Principal = x.PrincipalTable.Name, x.PrincipalTable.Schema, PrincipalColumns = x.PrincipalColumns.Select(c => c.Name).ToArray(), x.OnDeleteAction }).ToArray(),
-            Indexes = t.Indexes.OrderBy(x => x.Name, StringComparer.Ordinal).Select(x => new { x.Name, x.IsUnique, Columns = x.Columns.Select(c => c.Name).ToArray() }).ToArray(),
+            Indexes = t.Indexes.Where(x => !legacyActions || t.Name != "AutomationActions" || x.Name is not ("UX_Action_GlobalName" or "UX_Action_ScopedName")).OrderBy(x => x.Name, StringComparer.Ordinal).Select(x => new { x.Name, x.IsUnique, Columns = x.Columns.Select(c => c.Name).ToArray() }).ToArray(),
             Checks = t.CheckConstraints.OrderBy(x => x.Name, StringComparer.Ordinal).Select(x => new { x.Name, x.Sql }).ToArray()
         }).ToArray();
         return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(schema)));

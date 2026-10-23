@@ -11,8 +11,8 @@
         <div class="field"><label asp-for="Concurrency"></label><select asp-for="Concurrency"><option value="queue">Queue conflicting action runs</option><option value="reject">Reject overlapping runs</option></select></div>
         <label class="check-field span-full"><input asp-for="Enabled" /> Enable this action</label>
     </div></section>
-        <section class="panel" data-action-button hidden><h2>Overview button</h2><div class="form-grid">
-            <label class="field">Deployment<select data-plan-deployment><option value="">No overview button</option>
+        <section class="panel" data-action-button hidden><h2>Scope &amp; overview button</h2><p class="field-help">Names are unique within a scope (ignoring case). A deployment-scoped action can target only that deployment. Changing the deployment scope retargets deployment steps; review them before saving. Global actions may target multiple deployments or execute host commands. Scope does not grant permissions.</p><div class="form-grid">
+            <label class="field">Action scope<select data-plan-deployment><option value="">Global</option>
             @foreach (var d in ViewData["ActionDeployments"] as IReadOnlyList<Stanza.ControlPlane.Sources.DeploymentSourceSummary> ?? []) { <option value="@d.DeploymentId">@d.Name</option> }
             </select></label>
             <label class="field">Button label<input data-plan-label maxlength="100" placeholder="Uses action name if empty" /></label>

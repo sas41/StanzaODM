@@ -25,5 +25,23 @@
     <p class="field-help">Unchanged text retains its original line endings; edited text uses the line endings submitted by your browser. Downloads preserve stored UTF-8 bytes exactly. Highlighting is visual only, not validation. Save first, then request Docker Compose validation.</p>
     <div class="form-actions"><button class="button primary" type="submit">Save new draft revision</button> <a class="button" asp-action="Details" asp-route-id="@Model.Id">Reload latest / cancel</a></div>
 </form></section>
+<section id="deployment-actions"><div class="section-heading"><h2>Deployment actions</h2></div>
+<p class="field-help">Actions in this scope can target only this deployment. Names are unique within the scope, ignoring case. Action saves are separate from the draft above and require action permissions.</p>
+@{ ViewData["DeploymentId"] = Model.Id; }
+@foreach (var action in Model.Actions) { <partial name="_DeploymentAction" model="action" /> }
+@if (Model.Actions.Count == 0) { <p class="muted">No editable actions in this deployment scope.</p> }
+@if (Model.CanCreateAction)
+{
+    <details class="panel"><summary>Add deployment action</summary>
+    @await Html.PartialAsync("_DeploymentAction", new ActionEditorModel { PlanJson = System.Text.Json.JsonSerializer.Serialize(new Stanza.ControlPlane.Automation.ActionPlan([new("deploy", Model.Id)], DeploymentId: Model.Id), Stanza.ControlPlane.Automation.AutomationRules.Json) })
+    <a class="button" href="/automation/actions/edit?deploymentId=@Model.Id">Create in visual editor</a></details>
+}
+</section>
+<template id="action-deployment-options"><option value="@Model.Id">@Model.Name</option></template>
+<template id="action-agent-options"><option value="">Host execution requires Global scope</option></template>
+<template id="action-source-options"><option value="">Select Git source destination</option>
+@foreach (var source in ViewData["ActionSources"] as IReadOnlyList<Stanza.ControlPlane.Sources.GitSourceSummary> ?? []) { <option value="@source.Destination" data-deployment="@Model.Id">@source.Destination</option> }
+</template>
+<script src="~/js/action-editor.js" defer asp-append-version="true"></script>
 <link rel="stylesheet" href="~/css/editor.css" asp-append-version="true" />
 <script src="~/js/editor.js" asp-append-version="true" defer></script>

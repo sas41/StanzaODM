@@ -55,6 +55,7 @@ public sealed class ControlPlaneEntryPoint
         builder.Services.AddScoped<IDeploymentRevisionStatusProvider>(provider => provider.GetRequiredService<DeploymentEditorAdapters>());
         builder.Services.AddScoped<OperationService>();
         builder.Services.AddScoped<OperationOutputStore>();
+        builder.Services.AddScoped<ActionRunOutputFeed>();
         builder.Services.AddScoped<DeploymentRuntimeStatusService>();
         builder.Services.AddScoped<IOperationService>(provider => provider.GetRequiredService<OperationService>());
         builder.Services.AddStanzaAgentTransport();
@@ -136,7 +137,7 @@ public sealed class ControlPlaneEntryPoint
         await using (var scope = app.Services.CreateAsyncScope())
         {
             var database = scope.ServiceProvider.GetRequiredService<StanzaDbContext>();
-            await DatabaseUpgrader.UpgradeAsync(database);
+            await DatabaseUpgrader.UpgradeAsync(database, protection: scope.ServiceProvider.GetRequiredService<IDataProtectionProvider>());
         }
         app.UseExceptionHandler("/error");
         app.Use(async (context, next) =>

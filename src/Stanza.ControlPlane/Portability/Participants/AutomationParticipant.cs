@@ -46,11 +46,17 @@ public sealed class AutomationParticipant(StanzaDbContext db, AutomationService 
         foreach (var a in all.Actions)
         {
             var read = await automation.ReadActionAsync(c.ActorId, a.Id, ct);
-            if (c.DeploymentIds.Count == 0 || read.Plan.DeploymentId is { } button && Included(button) || read.Plan.Steps.Any(s => s.DeploymentId is { } id && Included(id))) actions[a.Id] = a;
+            if (c.DeploymentIds.Count == 0 || read.Plan.DeploymentId is { } button && Included(button) ||
+                !c.DeploymentClone && read.Plan.Steps.Any(s => s.DeploymentId is { } id && Included(id))) actions[a.Id] = a;
         }
         foreach (var id in schedules.Select(s => s.ActionId).Concat(hooks.Select(h => h.ActionId)).Where(x => x.HasValue).Select(x => x!.Value))
-            actions[id] = (await automation.ReadActionAsync(c.ActorId, id, ct)).Definition;
+            if (!c.DeploymentClone || actions.ContainsKey(id)) actions[id] = (await automation.ReadActionAsync(c.ActorId, id, ct)).Definition;
         schedules = all.Schedules.Where(s => c.DeploymentIds.Count == 0 || s.DeploymentId is { } d && Included(d) || s.ActionId is { } a && actions.ContainsKey(a)).ToArray();
+        if (c.DeploymentClone)
+        {
+            schedules = schedules.Where(s => s.ActionId is null || actions.ContainsKey(s.ActionId.Value)).ToArray();
+            hooks = hooks.Where(h => h.ActionId is null || actions.ContainsKey(h.ActionId.Value)).ToArray();
+        }
         return new(actions.Values.ToArray(), schedules, hooks, all.ImagePolicies.Where(s => Included(s.DeploymentId)).ToArray(), []);
     }
     public async Task<IReadOnlyList<PortableResourceCandidate>> CollectReferencesAsync(PortableParticipantContext c, CancellationToken ct)
@@ -119,9 +125,14 @@ public sealed class AutomationParticipant(StanzaDbContext db, AutomationService 
         ParticipantSupport.Bound(section.Actions.Count); ParticipantSupport.Bound(section.Schedules.Count);
         ParticipantSupport.Bound(section.Webhooks.Count); ParticipantSupport.Bound(section.ImageUpdates.Count);
         if (section.Actions.Select(a => a.Id).Distinct().Count() != section.Actions.Count) throw new PortabilityException("Duplicate action definitions.");
+        var names = new HashSet<string>(StringComparer.Ordinal);
         foreach (var a in section.Actions)
         {
             AutomationRules.Name(a.Name);
+            var normalized = AutomationRules.NormalizeName(a.Name);
+            if (!names.Add((a.Deployment ?? "global") + ":" + normalized)) throw new PortabilityException("Duplicate action names within an imported scope.");
+            if (a.Deployment is null && await db.Set<ActionDefinition>().AnyAsync(x => x.ScopeDeploymentId == null && x.NormalizedName == normalized, ct))
+                throw new PortabilityException("A Global action with that name already exists. Rename it before importing.");
             if (a.Concurrency is not ("queue" or "reject")) throw new PortabilityException("Invalid action concurrency policy.");
             var owner = await support.Owner(c, a.Owner, ct);
             await support.Require(c.ActorId, "action.manage", "action", null, ct);

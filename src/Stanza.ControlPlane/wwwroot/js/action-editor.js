@@ -1,17 +1,21 @@
 (() => {
     "use strict";
-    const root = document.querySelector("[data-action-editor]");
-    if (!root) return;
+    const initialized = new WeakSet();
+    let editorCounter = 0;
+    function initialize(root) {
+    if (initialized.has(root)) return;
+    initialized.add(root);
     const form = root.closest("form"), json = form.querySelector("[name=PlanJson]"), advanced = form.querySelector("[data-advanced-plan]");
     const inputs = root.querySelector("[data-editor-inputs]"), steps = root.querySelector("[data-editor-steps]");
     let plan;
     try { plan = JSON.parse(json.value); } catch { advanced.open = true; return; }
     const initialJson = json.value;
+    const prefix = "action-editor-" + (++editorCounter);
     let nextControl = 0;
     const field = (parent, title, key, value = "", options = null, type = "text") => {
         const label = document.createElement("label"); label.className = type === "checkbox" ? "check-field" : "field";
         const control = document.createElement(options ? "select" : type === "textarea" ? "textarea" : "input");
-        control.id = "action-control-" + (++nextControl);
+        control.id = prefix + "-control-" + (++nextControl);
         label.htmlFor = control.id;
         control.dataset.field = key;
         if (options) for (const option of options) control.add(new Option(option, option));
@@ -80,7 +84,6 @@
         const kind = field(item, "Operation", "kind", s.kind || "deploy", ["validate", "git-refresh", "build", "pull", "deploy", "start", "stop", "restart", "remove", "status", "logs", "container-exec", "host-exec"]);
         const deployment = catalog(item, "Deployment", "deploymentId", s.deploymentId || form.querySelector("[data-plan-deployment]").value, "action-deployment-options");
         const agent = catalog(item, "Agent", "agentId", s.agentId, "action-agent-options");
-        field(item, "Timeout (seconds)", "timeoutSeconds", s.timeoutSeconds || 300, null, "number");
         field(item, "On failure", "failure", s.failure || "stop", ["stop", "continue"]);
         const command = document.createElement("div"); command.className = "execution-fields"; item.append(command);
         const exec = s.execution || {};
@@ -96,6 +99,10 @@
         field(advancedFields, "Fixed environment (JSON object, optional)", "environment", exec.environment ? JSON.stringify(exec.environment) : "", null, "textarea").parentElement.classList.add("span-full");
         advanced.open = Boolean(exec.user || exec.workingDirectory || exec.environment);
         function visibility() {
+            const scope = form.querySelector("[data-plan-deployment]").value;
+            for (const option of kind.options) option.disabled = Boolean(scope) && option.value === "host-exec";
+            for (const option of deployment.options) option.disabled = Boolean(scope) && option.value !== scope;
+            if (scope && !deployment.value && kind.value !== "host-exec") deployment.value = scope;
             agent.parentElement.hidden = kind.value !== "host-exec";
             deployment.parentElement.hidden = kind.value === "host-exec";
             command.hidden = !["container-exec", "host-exec"].includes(kind.value);
@@ -109,12 +116,18 @@
     };
     for (const [key, selector] of Object.entries(metadata)) {
         const control = form.querySelector(selector);
+        if (key === "deploymentId" && plan[key] && !Array.from(control.options).some(o => o.value === plan[key])) control.add(new Option("Unavailable deployment scope: " + plan[key], plan[key]));
         if (control.type === "checkbox") control.checked = plan[key] !== false; else control.value = plan[key] ?? (key === "order" ? "0" : "");
     }
     (plan.parameters || []).forEach(addInput); (plan.steps || []).forEach(addStep);
     const displayDeployment = form.querySelector("[data-plan-deployment]");
+    let initializingScope = true;
     displayDeployment.addEventListener("change", () => {
-        for (const select of steps.querySelectorAll("select[data-field=deploymentId]")) if (!select.value) select.value = displayDeployment.value;
+        for (const item of steps.children) {
+            const select = item.querySelector("select[data-field=deploymentId]");
+            if (!initializingScope && displayDeployment.value) select.value = displayDeployment.value;
+            item.querySelector("[data-field=kind]").dispatchEvent(new Event("change"));
+        }
         for (const select of inputs.querySelectorAll("select[data-field=source]")) {
             const value = select.value;
             select.replaceChildren(document.getElementById("action-source-options").content.cloneNode(true));
@@ -123,6 +136,7 @@
         }
     });
     displayDeployment.dispatchEvent(new Event("change"));
+    initializingScope = false;
     root.querySelector("[data-add-input]").addEventListener("click", () => addInput());
     root.querySelector("[data-add-step]").addEventListener("click", () => addStep());
     const values = item => Object.fromEntries(Array.from(item.querySelectorAll("[data-field]")).map(c => [c.dataset.field, c.type === "checkbox" ? c.checked : c.value]));
@@ -149,11 +163,15 @@
                     environment: s.environment ? JSON.parse(s.environment) : null
                 } : null;
                 return { kind: s.kind, deploymentId: s.kind === "host-exec" ? null : s.deploymentId || null,
-                    agentId: s.kind === "host-exec" ? s.agentId || null : null, timeoutSeconds: Number(s.timeoutSeconds), failure: s.failure, execution };
+                    agentId: s.kind === "host-exec" ? s.agentId || null : null, failure: s.failure, execution };
             });
             json.value = JSON.stringify(plan);
         } catch { event.preventDefault(); root.querySelector("[data-editor-error]").textContent = "Check the fixed environment JSON before saving."; }
-    });
+    }, true);
     root.hidden = false;
     form.querySelector("[data-action-button]").hidden = false;
+    }
+    function initializeAll() { document.querySelectorAll("[data-action-editor]").forEach(initialize); }
+    initializeAll();
+    document.addEventListener("htmx:afterSwap", initializeAll);
 })();

@@ -225,6 +225,7 @@ public sealed class ParticipantIntegrationTests
         await using var x = await Instance.Create("root");
         var seeded = await Seed(x);
         var before = await x.Settings.ReadAsync(x.Root);
+        var shared = await x.Automation.SaveActionAsync(x.Root, null, 0, "Shared global workflow", true, "queue", new([new("status", seeded.Deployment)]));
         var clone = await x.Portability.CloneAsync(x.Root, seeded.Deployment, "Concrete clone", x.Agent, true, ["sources", "automation"]);
         var draft = await x.Drafts.ReadAsync(x.Root, clone);
         Assert.Equal(1, draft.ViewedRevision);
@@ -236,7 +237,11 @@ public sealed class ParticipantIntegrationTests
         Assert.False(schedule.Enabled);
         var action = Assert.Single(automation.Actions, a => a.Id == schedule.ActionId);
         Assert.False(action.Enabled); Assert.Equal(x.Root, action.OwnerId);
-        Assert.Equal(clone, Assert.Single((await x.Automation.ReadActionAsync(x.Root, action.Id)).Plan.Steps).DeploymentId);
+        var clonedPlan = (await x.Automation.ReadActionAsync(x.Root, action.Id)).Plan;
+        Assert.Equal(clone, clonedPlan.DeploymentId); Assert.Equal(clone, action.ScopeDeploymentId);
+        Assert.Equal(clone, Assert.Single(clonedPlan.Steps).DeploymentId);
+        Assert.Equal("Reusable action", action.Name);
+        Assert.Equal(shared.Id, Assert.Single(automation.Actions, a => a.Name == "Shared global workflow").Id);
         Assert.Equal(before, await x.Settings.ReadAsync(x.Root));
         Assert.Empty(await x.Db.Grants.Where(g => g.ResourceId == clone).ToListAsync());
         await Assert.ThrowsAsync<PortabilityException>(() => x.Portability.CloneAsync(x.Root, seeded.Deployment, "Not an instance import", x.Agent, true, ["environment"]));

@@ -49,7 +49,7 @@ public sealed record PortableApplyResult(Guid Id, string State, IReadOnlyList<Gu
 public sealed record PortableParticipantContext(Guid ActorId, IReadOnlyList<Guid> DeploymentIds,
     IReadOnlyDictionary<Guid, string>? DeploymentReferences = null,
     IReadOnlyDictionary<Guid, string>? AgentReferences = null,
-    IReadOnlyDictionary<Guid, PortableResourceReference>? ResourceReferences = null);
+    IReadOnlyDictionary<Guid, PortableResourceReference>? ResourceReferences = null, bool DeploymentClone = false);
 public sealed record PortableParticipantImportContext(Guid ActorId, PortableImportMapping Mapping,
     IReadOnlyDictionary<string, Guid> CreatedDeployments, bool ActivateAutomation = false,
     PortableBundle? Bundle = null, IDictionary<string, Guid>? CreatedResources = null,

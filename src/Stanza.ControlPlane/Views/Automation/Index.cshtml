@@ -6,8 +6,13 @@
 <nav class="toolbar" aria-label="Automation sections"><a href="#actions">Actions</a> · <a href="#schedules">Schedules</a> · <a href="#webhooks">Webhooks</a> · <a href="#images">Image updates</a> · <a href="#history">Run history</a></nav>
 
 <div class="section-heading" id="actions"><h2>Reusable actions</h2><span class="badge neutral">@Model.Actions.Count</span></div>
+@foreach (var group in Model.Actions.GroupBy(x => x.ScopeDeploymentId).OrderBy(x => x.Key.HasValue).ThenBy(x => x.Key is { } d ? Model.ScopeNames.GetValueOrDefault(d) : ""))
+{
+<section data-action-scope="@(group.Key?.ToString() ?? "global")"><div class="section-heading"><h3>@(group.Key is { } deployment ? Model.ScopeNames.GetValueOrDefault(deployment, "Restricted deployment scope") : "Global actions")</h3>
+@if (group.Key is { } scope) { <a href="/deployments/@scope/edit#deployment-actions">Edit deployment actions</a> }<span class="badge neutral">@group.Count()</span></div>
+@if (group.Key is { } scopeId) { <p class="record-meta">Deployment scope: @scopeId</p> }
 <div class="panel-grid">
-@foreach (var x in Model.Actions)
+@foreach (var x in group)
 {
     <section class="panel automation-card"><div class="panel-heading"><h3>@x.Name</h3><span class="badge @(x.Enabled ? "" : "neutral")">@(x.Enabled ? "Enabled" : "Disabled")</span></div>
     <p class="record-meta">Concurrency: @x.Concurrency</p>
@@ -15,6 +20,8 @@
     <div class="toolbar"><a class="button" href="/automation/actions/edit?id=@x.Id">Edit</a><a class="button" href="/automation/actions/edit?id=@x.Id#action-schedules">Cron schedules</a><a class="button primary" href="/automation/actions/@x.Id/invoke">Run action</a></div></section>
 }
 </div>
+</section>
+}
 @if (Model.Actions.Count == 0) { <p class="empty-state">No readable actions yet. Create an action to define steps and deployment buttons.</p> }
 
 <div class="section-heading" id="schedules"><h2>Schedules</h2><span class="badge neutral">@Model.Schedules.Count</span></div>

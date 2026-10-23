@@ -17,7 +17,7 @@ namespace Stanza.ControlPlane.Controllers;
 [DisableRequestSizeLimit]
 [RequestFormLimits(ValueLengthLimit = int.MaxValue, MultipartBodyLengthLimit = long.MaxValue)]
 public sealed class DeploymentsController(DeploymentDraftService drafts, IOperationService? operations = null,
-    DeploymentRuntimeStatusService? runtimeStatus = null) : Controller
+    DeploymentRuntimeStatusService? runtimeStatus = null, Automation.AutomationService? automation = null, SourceService? sources = null) : Controller
 {
     private Guid ActorId => Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : Guid.Empty;
 
@@ -77,11 +77,13 @@ public sealed class DeploymentsController(DeploymentDraftService drafts, IOperat
         {
             var current = await drafts.ReadAsync(ActorId, id, ct: ct);
             if (!current.Permissions.CanWriteFiles) return Forbid();
-            return View(new EditDeploymentModel { Id = id, Name = current.Draft.Name, TargetAgentId = current.Draft.TargetAgentId,
+            var model = new EditDeploymentModel { Id = id, Name = current.Draft.Name, TargetAgentId = current.Draft.TargetAgentId,
                 ExpectedRevision = current.Draft.Revision, ComposeText = current.ComposeText,
                 EnvironmentText = current.Permissions.CanWriteEnvironment ? current.EnvironmentText : null,
                 Agents = await drafts.ListTargetAgentsAsync(ActorId, ct), CanEditCompose = current.Permissions.CanReadFiles,
-                CanEditEnvironment = current.Permissions.CanRevealEnvironment && current.Permissions.CanWriteEnvironment });
+                CanEditEnvironment = current.Permissions.CanRevealEnvironment && current.Permissions.CanWriteEnvironment };
+            await LoadActionsAsync(model, ct);
+            return View(model);
         }
         catch (DeploymentDraftAccessException) { return Forbid(); }
         catch (DeploymentDraftException error) { TempData["Error"] = error.Message; return RedirectToAction(nameof(Index)); }
@@ -98,6 +100,7 @@ public sealed class DeploymentsController(DeploymentDraftService drafts, IOperat
             model.CanEditCompose = current.Permissions.CanReadFiles;
             model.Agents = await drafts.ListTargetAgentsAsync(ActorId, ct);
             model.CanEditEnvironment = current.Permissions.CanRevealEnvironment && current.Permissions.CanWriteEnvironment;
+            await LoadActionsAsync(model, ct);
             if (!ModelState.IsValid) return View(model);
             await drafts.SaveAsync(ActorId, id, new(model.Name, model.TargetAgentId, model.ExpectedRevision,
                 PreserveUnchangedBrowserText(model.ComposeText, current.ComposeText),
@@ -107,6 +110,50 @@ public sealed class DeploymentsController(DeploymentDraftService drafts, IOperat
         }
         catch (DeploymentDraftAccessException) { return Forbid(); }
         catch (Exception error) when (IsSafeFailure(error)) { ModelState.AddModelError("", SafeMessage(error)); return View(model); }
+    }
+
+    private async Task LoadActionsAsync(EditDeploymentModel model, CancellationToken ct)
+    {
+        if (automation is null) return;
+        if (sources is not null) ViewData["ActionSources"] = (await sources.ListDeploymentsAsync(ActorId, ct)).Where(x => x.DeploymentId == model.Id).SelectMany(x => x.Git).ToArray();
+        model.CanCreateAction = await automation.CanManageActionAsync(ActorId, null, ct);
+        model.Actions = (await automation.ScopedActionsAsync(ActorId, model.Id, ct)).Select(x => new ActionEditorModel
+        {
+            Id = x.Definition.Id, Revision = x.Definition.Revision, Name = x.Definition.Name, Enabled = x.Definition.Enabled,
+            Concurrency = x.Definition.Concurrency, PlanJson = System.Text.Json.JsonSerializer.Serialize(x.Plan, new System.Text.Json.JsonSerializerOptions(Automation.AutomationRules.Json) { WriteIndented = true })
+        }).ToArray();
+    }
+
+    [HttpPost("{id:guid}/actions/save"), ValidateAntiForgeryToken]
+    public async Task<IActionResult> SaveAction([FromRoute] Guid id, ActionEditorModel model, CancellationToken ct)
+    {
+        if (automation is null) return NotFound();
+        try
+        {
+            await drafts.ReadAsync(ActorId, id, ct: ct);
+            if (!await automation.CanManageActionAsync(ActorId, model.Id, ct)) return Forbid();
+            if (model.Id is { } existing && (await automation.ReadActionAsync(ActorId, existing, ct)).Plan.DeploymentId != id) return BadRequest("This action belongs to another scope.");
+            if (!ModelState.IsValid) { ViewData["DeploymentId"] = id; return PartialView("_DeploymentAction", model); }
+            var plan = Automation.AutomationRules.ParsePlan(model.PlanJson);
+            if (plan.DeploymentId != id) return BadRequest("Actions edited here must remain in this deployment scope. Use the full action editor to change scope.");
+            if (ModelState.IsValid)
+            {
+                var saved = await automation.SaveActionAsync(ActorId, model.Id, model.Revision, model.Name, model.Enabled, model.Concurrency, plan, ct);
+                ModelState.Clear(); model.Id = saved.Id; model.Revision = saved.Revision;
+                ViewData["ActionSaved"] = true;
+            }
+            ViewData["DeploymentId"] = id;
+            if (Request.Headers["HX-Request"] == "true") return PartialView("_DeploymentAction", model);
+            TempData["Success"] = ModelState.IsValid ? "Action saved. Workloads were not changed." : "Action was not saved. Review the action editor.";
+            return ModelState.IsValid ? Redirect($"/deployments/{id}/edit#deployment-actions") : View("~/Views/Automation/ActionEditor.cshtml", model);
+        }
+        catch (Exception error) when (error is Automation.AutomationAccessException or DeploymentDraftAccessException) { return Forbid(); }
+        catch (Automation.AutomationException error)
+        {
+            ModelState.AddModelError("", error.Message); ViewData["DeploymentId"] = id;
+            return PartialView("_DeploymentAction", model);
+        }
+        catch (DeploymentDraftException) { return NotFound(); }
     }
 
     [HttpGet("{id:guid}/file")]

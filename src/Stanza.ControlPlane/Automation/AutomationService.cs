@@ -9,7 +9,10 @@ using Stanza.ControlPlane.Security;
 namespace Stanza.ControlPlane.Automation;
 
 public sealed record AutomationOverview(IReadOnlyList<ActionDefinition> Actions, IReadOnlyList<AutomationSchedule> Schedules,
-    IReadOnlyList<WebhookDefinition> Webhooks, IReadOnlyList<ImageUpdatePolicy> ImagePolicies, IReadOnlyList<AutomationRun> Runs);
+    IReadOnlyList<WebhookDefinition> Webhooks, IReadOnlyList<ImageUpdatePolicy> ImagePolicies, IReadOnlyList<AutomationRun> Runs)
+{
+    public IReadOnlyDictionary<Guid, string> ScopeNames { get; init; } = new Dictionary<Guid, string>();
+}
 public sealed record AutomationRunDetails(AutomationRun Run, IReadOnlyList<AutomationStepRun> Steps);
 public sealed record WebhookSaved(WebhookDefinition Definition, string? Secret)
 {
@@ -44,7 +47,11 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
         var runs = new List<AutomationRun>();
         foreach (var x in await db.Set<AutomationRun>().AsNoTracking().OrderByDescending(x => x.CreatedAt).Take(200).ToListAsync(ct))
             if (await CanReadRun(actor, x, ct)) runs.Add(x);
-        return new(actions, schedules, hooks, policies, runs);
+        var names = new Dictionary<Guid, string>();
+        foreach (var scope in actions.Where(x => x.ScopeDeploymentId.HasValue).Select(x => x.ScopeDeploymentId!.Value).Distinct())
+            if (await Allowed(actor, "deployment.read", "deployment", scope, ct))
+                names[scope] = await db.Set<Deployments.DeploymentDraftEntity>().Where(x => x.Id == scope).Select(x => x.Name).SingleOrDefaultAsync(ct) ?? "Unavailable deployment";
+        return new(actions, schedules, hooks, policies, runs) { ScopeNames = names };
     }
 
     public async Task<(ActionDefinition Definition, ActionPlan Plan)> ReadActionAsync(Guid actor, Guid id, CancellationToken ct = default)
@@ -52,6 +59,17 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
         await authorization.RequireAsync(actor, "action.read", "action", id, ct);
         var action = await ActionAsync(id, ct);
         return (action, Unprotect<ActionPlan>(action.ProtectedSteps));
+    }
+
+    public Task<bool> CanManageActionAsync(Guid actor, Guid? id, CancellationToken ct = default) => Allowed(actor, "action.manage", "action", id, ct);
+
+    public async Task<IReadOnlyList<(ActionDefinition Definition, ActionPlan Plan)>> ScopedActionsAsync(Guid actor, Guid deployment, CancellationToken ct)
+    {
+        var result = new List<(ActionDefinition, ActionPlan)>();
+        foreach (var action in await db.Set<ActionDefinition>().AsNoTracking().Where(x => x.ScopeDeploymentId == deployment).OrderBy(x => x.Name).ToListAsync(ct))
+            if (await Allowed(actor, "action.read", "action", action.Id, ct) && await CanManageActionAsync(actor, action.Id, ct))
+                result.Add((action, Unprotect<ActionPlan>(action.ProtectedSteps)));
+        return result;
     }
 
     public async Task<ActionDefinition> SaveActionAsync(Guid actor, Guid? id, long expectedRevision, string name, bool enabled,
@@ -68,7 +86,12 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
         var value = id is { } existing ? await db.Set<ActionDefinition>().SingleOrDefaultAsync(x => x.Id == existing, ct)
             ?? throw new AutomationException("Action is unavailable.") : new ActionDefinition { Id = Guid.NewGuid() };
         if (id is not null && value.Revision != expectedRevision) throw new AutomationException("The action changed. Reload before saving.");
+        var normalized = AutomationRules.NormalizeName(name);
+        if (normalized.Length > 100) throw new AutomationException("The normalized action name must be at most 100 characters.");
+        if (await db.Set<ActionDefinition>().AnyAsync(x => x.Id != value.Id && x.ScopeDeploymentId == plan.DeploymentId && x.NormalizedName == normalized, ct))
+            throw new AutomationException("An action with that name already exists in this scope. Choose another name.");
         value.Name = name; value.OwnerId = actor; value.Enabled = enabled; value.Concurrency = concurrency;
+        value.ScopeDeploymentId = plan.DeploymentId; value.NormalizedName = normalized;
         value.ProtectedSteps = Protect(plan); value.Revision++;
         if (id is null) db.Add(value);
         await RecordAuditAsync(actor, "automation.action.saved", value.Id.ToString(), enabled ? "enabled" : "disabled", ct);
@@ -364,6 +387,9 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
             var definition = await ActionAsync(action, ct);
             if (!definition.Enabled) throw new AutomationException("The action is disabled.");
             var plan = Unprotect<ActionPlan>(definition.ProtectedSteps);
+            AutomationRules.Validate(plan);
+            if (deploymentId is { } triggerDeployment && plan.DeploymentId is { } scope && triggerDeployment != scope)
+                throw new AutomationException("This action belongs to a different deployment scope.");
             await authorization.RequireAsync(definition.OwnerId, "action.execute", "action", action, ct);
             await authorization.PlanAsync(definition.OwnerId, plan, ct);
             // Executing a fixed action delegates its owner's approved capabilities, not generic

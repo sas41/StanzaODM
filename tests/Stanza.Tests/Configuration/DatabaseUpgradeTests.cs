@@ -29,7 +29,7 @@ public sealed class DatabaseUpgradeTests
         Assert.Equal(existing with { ConfigurationIntervalSeconds = 23, StaleStatusSeconds = 23 }, saved.Policy);
         Assert.Equal("old-encrypted-response", (await db.Set<OperationEntity>().SingleAsync()).ProtectedResponse);
         Assert.Empty(await db.Set<OperationOutputEntity>().ToListAsync());
-        Assert.Equal("1", (await db.Settings.SingleAsync(x => x.Key == "schema-version")).Value);
+        Assert.Equal("2", (await db.Settings.SingleAsync(x => x.Key == "schema-version")).Value);
     }
 
     [Fact]

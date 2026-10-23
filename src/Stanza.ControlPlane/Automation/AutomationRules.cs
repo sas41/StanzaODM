@@ -38,6 +38,11 @@ public static partial class AutomationRules
     public static string Name(string name) => !string.IsNullOrWhiteSpace(name) && name.Length <= 100 && !name.Any(char.IsControl)
         ? name.Trim() : throw new AutomationException("Use a name of 1–100 characters without control characters.");
 
+    public static string NormalizeName(string name) => Name(name).ToUpperInvariant();
+
+    public static bool MatchesScope(ActionPlan plan) => plan.DeploymentId is null ||
+        plan.Steps.All(s => s is not null && s.Kind != "host-exec" && s.DeploymentId == plan.DeploymentId && s.AgentId is null);
+
     public static ActionPlan ParsePlan(string json)
     {
         if (json.Length > 131072) throw new AutomationException("Action JSON must be at most 128 KiB.");
@@ -53,6 +58,7 @@ public static partial class AutomationRules
     {
         if (plan.Steps is null || plan.Steps.Count is < 1 or > 50 || (plan.Parameters?.Count ?? 0) > 50)
             throw new AutomationException("Use 1–50 steps and at most 50 parameters.");
+        if (!MatchesScope(plan)) throw new AutomationException("Deployment-scoped actions may target only their own deployment. Use Global scope for cross-deployment or host actions.");
         var parameters = plan.Parameters ?? [];
         if (parameters.Any(p => p is null || p.Name is null || !NamePattern().IsMatch(p.Name) || p.Type is not ("string" or "integer" or "boolean")))
             throw new AutomationException("Parameters require unique identifier names and string, integer, or boolean types.");

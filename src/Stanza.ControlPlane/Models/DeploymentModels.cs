@@ -28,6 +28,8 @@ public sealed class EditDeploymentModel
     [DisplayFormat(ConvertEmptyStringToNull = false)] public string? EnvironmentText { get; set; }
     public bool CanEditCompose { get; set; }
     public bool CanEditEnvironment { get; set; }
+    [Microsoft.AspNetCore.Mvc.ModelBinding.BindNever] public IReadOnlyList<ActionEditorModel> Actions { get; set; } = [];
+    [Microsoft.AspNetCore.Mvc.ModelBinding.BindNever] public bool CanCreateAction { get; set; }
 }
 
 public sealed class DeploymentFileModel

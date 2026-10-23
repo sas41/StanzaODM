@@ -58,6 +58,7 @@ public sealed class AutomationOperationGuard(StanzaDbContext db, AutomationServi
             var definition = await automation.ActionAsync(actionId, ct);
             if (!definition.Enabled || definition.OwnerId != run.ActionOwnerId) throw new AutomationAccessException();
             var plan = automation.Unprotect<ActionPlan>(run.ProtectedPlan);
+            if (definition.ScopeDeploymentId != plan.DeploymentId) throw new AutomationAccessException();
             var step = plan.Steps.FirstOrDefault(s => AutomationRules.OperationKind(s.Kind) == kind && s.DeploymentId == deploymentId && (s.Kind != "host-exec" || s.AgentId == agentId));
             if (step is null) throw new AutomationAccessException();
             await authorization.RequireAsync(run.OwnerId, "action.execute", "action", actionId, ct);

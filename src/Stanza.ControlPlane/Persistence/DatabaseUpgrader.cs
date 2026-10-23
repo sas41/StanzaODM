@@ -6,7 +6,8 @@ namespace Stanza.ControlPlane.Persistence;
 /// <summary>Versioned additive upgrades also support databases originally created with EnsureCreated.</summary>
 public static class DatabaseUpgrader
 {
-    public static async Task UpgradeAsync(StanzaDbContext db, CancellationToken ct = default)
+    public const int CurrentVersion = 2;
+    public static async Task UpgradeAsync(StanzaDbContext db, CancellationToken ct = default, Microsoft.AspNetCore.DataProtection.IDataProtectionProvider? protection = null)
     {
         await db.Database.EnsureCreatedAsync(ct);
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
@@ -44,7 +45,13 @@ public static class DatabaseUpgrader
                 values.TryAdd("StaleStatusSeconds", JsonValue.Create(interval));
                 policy.Value = document.ToJsonString();
             }
-            if (marker is null) db.Settings.Add(new() { Key = key, Value = "1" }); else marker.Value = "1";
+            if (marker is null) { marker = new() { Key = key, Value = "1" }; db.Settings.Add(marker); } else marker.Value = "1";
+            await db.SaveChangesAsync(ct);
+        }
+        if (version < 2)
+        {
+            await ActionScopeUpgrade.ApplyAsync(db, protection, ct);
+            marker!.Value = "2";
             await db.SaveChangesAsync(ct);
         }
         await transaction.CommitAsync(ct);

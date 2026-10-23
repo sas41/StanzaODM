@@ -15,6 +15,8 @@ public sealed class ActionDefinition
     public Guid Id { get; set; }
     public Guid OwnerId { get; set; }
     public string Name { get; set; } = "";
+    public string NormalizedName { get; set; } = "";
+    public Guid? ScopeDeploymentId { get; set; }
     public bool Enabled { get; set; }
     public string Concurrency { get; set; } = "queue";
     public long Revision { get; set; }
@@ -150,6 +152,9 @@ public sealed class ActionDefinitionConfiguration : IEntityTypeConfiguration<Act
     {
         b.ToTable("AutomationActions").HasKey(x => x.Id); b.Property(x => x.Revision).IsConcurrencyToken();
         b.Property(x => x.Name).HasMaxLength(100); b.HasIndex(x => x.OwnerId);
+        b.Property(x => x.NormalizedName).HasMaxLength(100);
+        b.HasIndex(x => x.NormalizedName).IsUnique().HasDatabaseName("UX_Action_GlobalName").HasFilter("\"ScopeDeploymentId\" IS NULL");
+        b.HasIndex(x => new { x.ScopeDeploymentId, x.NormalizedName }).IsUnique().HasDatabaseName("UX_Action_ScopedName").HasFilter("\"ScopeDeploymentId\" IS NOT NULL");
     }
 }
 public sealed class AutomationQueueGuardConfiguration : IEntityTypeConfiguration<AutomationQueueGuard>

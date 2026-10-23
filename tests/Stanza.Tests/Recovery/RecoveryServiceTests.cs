@@ -23,6 +23,45 @@ public sealed class RecoveryServiceTests
     internal const string Passphrase = "offline-only-long-recovery-passphrase";
     internal const string Password = "the-account-password-123";
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PreScopeBackupsRestoreThenMigrateScopesAndDuplicateNamesUsingRestoredEncryptionKeys(bool beforeOutputStorage)
+    {
+        await using var source = await RecoveryFixture.CreateAsync();
+        var owner = (await source.Accounts.BootstrapAsync("root", Password)).Id;
+        var provider = DataProtectionProvider.Create(new DirectoryInfo(source.Keys), b => b.SetApplicationName("Stanza.ControlPlane"));
+        var automation = new Stanza.ControlPlane.Automation.AutomationService(source.Db, new(new(source.Db, TimeProvider.System)), provider, TimeProvider.System);
+        var deployment = Guid.NewGuid();
+        var first = await automation.SaveActionAsync(owner, null, 0, "Deploy", true, "queue", new([new("deploy", deployment)], DeploymentId: deployment));
+        var second = await automation.SaveActionAsync(owner, null, 0, "Deploy other", true, "queue", new([new("deploy", deployment)], DeploymentId: deployment));
+        var archive = Decode(await source.Service.BackupAsync(owner, Passphrase));
+        var actions = Table(archive, "AutomationActions");
+        var oldNameIndex = actions["Columns"]!.AsArray().Select((x, i) => (x, i)).Single(x => x.x!["Name"]!.GetValue<string>() == "Name").i;
+        foreach (var row in actions["Rows"]!.AsArray()) row![oldNameIndex]!["Value"] = "Deploy";
+        for (var i = actions["Columns"]!.AsArray().Count - 1; i >= 0; i--)
+            if (actions["Columns"]![i]!["Name"]!.GetValue<string>() is "ScopeDeploymentId" or "NormalizedName")
+            {
+                actions["Columns"]!.AsArray().RemoveAt(i);
+                foreach (var row in actions["Rows"]!.AsArray()) row!.AsArray().RemoveAt(i);
+            }
+        if (beforeOutputStorage) archive["Tables"]!.AsArray().Remove(Table(archive, "OperationOutput"));
+        var service = typeof(RecoveryService);
+        var ordered = (List<ITable>)service.GetMethod("OrderedTables", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(source.Service, null)!;
+        if (beforeOutputStorage) ordered = ordered.Where(x => x.Name != "OperationOutput").ToList();
+        archive["SchemaFingerprint"] = (string)service.GetMethod("FingerprintSchema", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(source.Service, [ordered, true])!;
+        await using var target = await RecoveryFixture.CreateAsync();
+        await DatabaseUpgrader.UpgradeAsync(target.Db);
+        await target.Service.RestoreAsync(Encode(archive), Passphrase);
+        var restored = DataProtectionProvider.Create(new DirectoryInfo(target.Keys), b => b.SetApplicationName("Stanza.ControlPlane"));
+        await DatabaseUpgrader.UpgradeAsync(target.Db, protection: restored);
+        var saved = await target.Db.Set<Stanza.ControlPlane.Automation.ActionDefinition>().AsNoTracking().ToListAsync();
+        Assert.Equal(new[] { first.Id, second.Id }.Order(), saved.Select(x => x.Id).Order());
+        Assert.Equal(new[] { "Deploy", "Deploy (2)" }, saved.Select(x => x.Name).Order());
+        Assert.All(saved, action => { Assert.Equal(deployment, action.ScopeDeploymentId); Assert.True(action.Enabled); });
+        Assert.Equal("2", (await target.Db.Settings.AsNoTracking().SingleAsync(x => x.Key == "schema-version")).Value);
+    }
+
     [Fact]
     public async Task PreOutputSchemaBackupRestoresOnAnUpgradedFreshInstanceWithoutLosingExistingData()
     {

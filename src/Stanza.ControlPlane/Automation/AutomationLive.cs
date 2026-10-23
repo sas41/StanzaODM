@@ -19,11 +19,24 @@ public static class AutomationLive
     {
         endpoints.MapGet("/live/deployment-actions", (HttpContext context) => StreamAsync(context, null)).RequireAuthorization();
         endpoints.MapGet("/live/actions/{id:guid}", (HttpContext context, Guid id) => StreamAsync(context, id)).RequireAuthorization();
+        endpoints.MapGet("/live/actions/{id:guid}/output", (HttpContext context, Guid id) => StreamAsync(context, id, true)).RequireAuthorization();
         return endpoints;
     }
 
-    private static async Task StreamAsync(HttpContext context, Guid? runId)
+    private static async Task StreamAsync(HttpContext context, Guid? runId, bool includeOutput = false)
     {
+        var cursors = new Dictionary<Guid, long>();
+        if (includeOutput && context.Request.Query["after"].ToString() is { Length: > 0 } text)
+        {
+            try
+            {
+                if (text.Length > 8192) throw new JsonException();
+                cursors = JsonSerializer.Deserialize<Dictionary<Guid, long>>(text) ?? throw new JsonException();
+                if (cursors.Count > 51 || cursors.Any(x => x.Key == Guid.Empty || x.Value < 0)) throw new JsonException();
+            }
+            catch (JsonException) { context.Response.StatusCode = 400; return; }
+        }
+        var legacySent = new HashSet<Guid>();
         var origin = await context.RequestServices.GetRequiredService<InstanceSettingsService>().ReadPublicOriginAsync(context.RequestAborted);
         if (!TerminalExtensions.IsSameOrigin(context.Request, origin)) { context.Response.StatusCode = 403; return; }
         if (!context.WebSockets.IsWebSocketRequest) { context.Response.StatusCode = 400; return; }
@@ -56,14 +69,22 @@ public static class AutomationLive
                     ? await scope.ServiceProvider.GetRequiredService<AutomationService>().ReadRunAsync(actor, id, lifetime.Token)
                     : await scope.ServiceProvider.GetRequiredService<DeploymentActionOverview>().ReadAsync(actor, lifetime.Token);
                 var version = Version(data);
-                if (version != previous)
+                var batch = includeOutput && data is AutomationRunDetails detail
+                    ? await scope.ServiceProvider.GetRequiredService<ActionRunOutputFeed>().ReadAsync(actor, detail, cursors, legacySent, lifetime.Token) : null;
+                if (version != previous || batch is not null)
                 {
                     using var send = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); send.CancelAfter(TimeSpan.FromSeconds(5));
                     // Content is fetched by HTMX after this invalidation. The socket never exposes private inputs.
-                    await socket.SendAsync(JsonSerializer.SerializeToUtf8Bytes(new { version }), WebSocketMessageType.Text, true, send.Token);
+                    var payload = batch is not null && data is AutomationRunDetails run
+                        ? JsonSerializer.SerializeToUtf8Bytes(new { version, state = run.Run.State, operations = batch.Operations }, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+                        : JsonSerializer.SerializeToUtf8Bytes(new { version });
+                    await socket.SendAsync(payload, WebSocketMessageType.Text, true, send.Token);
                     previous = version;
                 }
-                await Task.WhenAny(input, Task.Delay(TimeSpan.FromSeconds(2), lifetime.Token));
+                if (batch is not null && !batch.HasMore && batch.Operations.All(x => Operations.OperationService.Terminal(x.State)) &&
+                    data is AutomationRunDetails final && final.Run.State is not ("queued" or "running"))
+                { await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Run finished.", lifetime.Token); break; }
+                if (batch?.HasMore != true) await Task.WhenAny(input, Task.Delay(TimeSpan.FromMilliseconds(includeOutput ? 250 : 2000), lifetime.Token));
             }
         }
         catch (AutomationAccessException) { if (socket.State == WebSocketState.Open) await socket.CloseOutputAsync(WebSocketCloseStatus.PolicyViolation, "Access revoked.", CancellationToken.None); }

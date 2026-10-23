@@ -1,6 +1,7 @@
 @model Guid?
-@{ var actions = ViewData["EditorActions"] as IReadOnlyList<Stanza.ControlPlane.Automation.ActionDefinition> ?? []; }
+@{ var actions = ViewData["EditorActions"] as IReadOnlyList<Stanza.ControlPlane.Automation.ActionDefinition> ?? [];
+   var scopes = ViewData["ActionScopeNames"] as IReadOnlyDictionary<Guid, string> ?? new Dictionary<Guid, string>(); }
 @if (Model.HasValue && !actions.Any(a => a.Id == Model))
 { <option value="@Model" selected>Unavailable current action — @Model</option> }
 @foreach (var a in actions)
-{ <option value="@a.Id" selected="@(Model == a.Id)">@a.Name@(a.Enabled ? "" : " (disabled)")</option> }
+{ <option value="@a.Id" selected="@(Model == a.Id)">@(a.ScopeDeploymentId is { } deployment ? scopes.GetValueOrDefault(deployment, "Restricted deployment scope") : "Global") / @a.Name@(a.Enabled ? "" : " (disabled)")</option> }

@@ -28,6 +28,7 @@ public sealed class AutomationAuthorization(AccessService access)
 
     public async Task PlanAsync(Guid actor, ActionPlan plan, CancellationToken ct = default)
     {
+        AutomationRules.Validate(plan);
         foreach (var step in plan.Steps) await TargetAsync(actor, step, ct);
     }
 

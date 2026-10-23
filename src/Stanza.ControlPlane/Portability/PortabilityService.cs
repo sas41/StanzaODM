@@ -202,7 +202,7 @@ public sealed class PortabilityService(StanzaDbContext db, AccessService access,
         var referenceMap = new Dictionary<Guid, PortableResourceReference>();
         var agentMap = new Dictionary<Guid, string> { [destinationAgent] = "destination" };
         var cloneAgents = new List<PortableAgent> { new("destination", "Destination") };
-        var exportContext = new PortableParticipantContext(actor, [sourceId], new Dictionary<Guid, string> { [sourceId] = "source" }, agentMap, referenceMap);
+        var exportContext = new PortableParticipantContext(actor, [sourceId], new Dictionary<Guid, string> { [sourceId] = "source" }, agentMap, referenceMap, DeploymentClone: true);
         await CollectReferencesAsync(exportContext, selected, cloneAgents, referenceMap, ct);
         foreach (var participant in selected)
         {

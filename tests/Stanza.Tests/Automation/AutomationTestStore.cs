@@ -47,7 +47,8 @@ public sealed class AutomationTestStore : IAsyncDisposable
     public AutomationScheduler Scheduler() => new(Db, Service, Authorization, Clock);
     public WebhookReceiver Receiver() => new(Db, Service, Authorization);
     public Task<GrantSummary> Grant(string permission, string type, Guid? id) => Access.AddGrantAsync(Root, User, null, permission, type, id);
-    public Task<ActionDefinition> Action(ActionPlan? plan = null, string concurrency = "queue") => Service.SaveActionAsync(Root, null, 0, "Action", true, concurrency,
+    private int actionNumber;
+    public Task<ActionDefinition> Action(ActionPlan? plan = null, string concurrency = "queue") => Service.SaveActionAsync(Root, null, 0, ++actionNumber == 1 ? "Action" : $"Action {actionNumber}", true, concurrency,
         plan ?? new ActionPlan([new("deploy", Deployment)]));
     public Task<AutomationSchedule> Schedule(Guid? action = null, string missed = "skip", string overlap = "skip") => Service.SaveScheduleAsync(Root,
         new() { Name = "Schedule", DeploymentId = Deployment, ActionId = action, Expression = "* * * * *", Enabled = true, MissedRun = missed, Overlap = overlap }, 0);

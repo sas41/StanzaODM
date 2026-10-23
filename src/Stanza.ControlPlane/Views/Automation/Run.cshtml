@@ -4,10 +4,10 @@
 <h1>Automation run</h1>
 <p>@Model.Run.Id · @Model.Run.Source · @Model.Run.State · @Model.Run.Code</p>
 <p>Execution identity: @Model.Run.OwnerId · requested by: @Model.Run.RequestedBy · requested: @DateTimeOffset.FromUnixTimeSeconds(Model.Run.CreatedAt).ToString("u")</p>
-@if (Model.Run.OperationId is { } operation) { <p>Correlated operation: <code>@operation</code></p> }
+@if (Model.Run.OperationId is { } operation) { <p>Correlated operation: <a href="/operations/@operation">@operation</a></p> }
 <table><thead><tr><th>Step</th><th>Kind</th><th>Deployment</th><th>Resolved Agent</th><th>Operation</th><th>Result</th></tr></thead><tbody>
 @foreach (var x in Model.Steps)
-{ <tr><td>@(x.Index + 1)</td><td>@x.Kind</td><td>@x.DeploymentId</td><td>@x.AgentId</td><td>@x.OperationId</td><td>@x.State · @x.Code</td></tr> }
+{ <tr><td>@(x.Index + 1)</td><td>@x.Kind</td><td>@x.DeploymentId</td><td>@x.AgentId</td><td>@if (x.OperationId is { } stepOperation) { <a href="/operations/@stepOperation">Operation details</a> }</td><td>@x.State · @x.Code</td></tr> }
 </tbody></table>
 @if (Model.Run.State is "queued" or "running")
 { <form method="post" action="/automation/runs/@Model.Run.Id/cancel">@Html.AntiForgeryToken()<button>Request cancellation</button></form> }
@@ -17,4 +17,8 @@
 @if (Model.Run.ReconciledBy is { } reconciler) { <p>Externally reconciled by @reconciler. No automatic replay occurred.</p> }
 <p><a href="/automation/runs/@Model.Run.Id">Refresh</a> · <a href="/automation">Back</a></p>
 </div>
+<section class="panel" data-action-output="@Model.Run.Id"><h2>Live execution feed</h2>
+<p data-feed-status>Connecting to live step output. Output access is checked separately from permission to run an action.</p>
+<label class="check-field"><input type="checkbox" data-feed-follow checked /> Follow output</label>
+<div data-feed-operations></div></section>
 <script src="~/js/action-run.js" defer asp-append-version="true"></script>

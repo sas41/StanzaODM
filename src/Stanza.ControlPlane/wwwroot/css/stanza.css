@@ -195,6 +195,7 @@ dialog [data-close-action] { margin-top: 10px; }
 .execution-fields .form-grid { margin-top: 10px; }
 [data-action-schedule] { padding: 12px; }
 .automation-card h3 { margin-top: 0; }
+.automation-card h3, [data-action-scope] > .section-heading h3 { max-width: 100%; overflow-wrap: anywhere; }
 .automation-card .toolbar { margin-bottom: 0; }
 .record-meta { color: var(--muted); font-size: 11px; }
 .htmx-indicator { display: none; }
