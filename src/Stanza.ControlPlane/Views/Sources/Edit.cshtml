@@ -1,16 +1,19 @@
 @model GitSourceEditModel
 @{ ViewData["Title"] = Model.Id.HasValue ? "Edit Git source" : "Add Git source"; }
-<h1>@ViewData["Title"]</h1>
+<div class="page-heading"><div><span class="eyebrow">APPLICATION SOURCE</span><h1>@ViewData["Title"]</h1><p>Connect a repository as an isolated build input for this deployment.</p></div><a class="button subtle" href="/sources/@Model.DeploymentId">Deployment sources</a></div>
 <div asp-validation-summary="All" class="validation" role="alert"></div>
-<form method="post" action="/sources/@Model.DeploymentId/save" class="panel">
+<div class="workspace">
+<form method="post" action="/sources/@Model.DeploymentId/save" class="panel form-grid">
     @Html.AntiForgeryToken()<input asp-for="Id" type="hidden" /><input asp-for="ExpectedVersion" type="hidden" />
-    <label asp-for="Url">HTTPS repository URL</label><input asp-for="Url" required maxlength="2048" />
-    <label asp-for="CredentialId">Credential</label><select asp-for="CredentialId"><option value="">Public repository (no credential)</option>
+    <div class="field span-full"><label asp-for="Url">HTTPS repository URL</label><input asp-for="Url" required maxlength="2048" placeholder="https://github.com/organization/application.git" /></div>
+    <div class="field span-full"><label asp-for="CredentialId">Credential</label><select asp-for="CredentialId"><option value="">Public repository (no credential)</option>
         @foreach (var c in Model.Credentials) { <option value="@c.Id">@c.Name — @c.Endpoint</option> }
-    </select>
-    <label asp-for="Reference">Branch, tag, full ref, or exact commit</label><input asp-for="Reference" required maxlength="256" />
-    <p>Save the endpoint first, then browse/search remote branches and tags on the source page. Commit hashes may be entered directly.</p>
-    <label asp-for="Destination">Isolated relative destination</label><input asp-for="Destination" required maxlength="512" />
-    <p>Use this directory in your manually authored Compose build.context, for example ./sources/app. Checkouts are read-only in the browser; Stanza never commits, pushes, or rewrites Compose. Submodules are unsupported: repositories containing .gitmodules are rejected, not initialized.</p>
-    <button class="button primary" type="submit">Save source</button><a class="button" href="/sources/@Model.DeploymentId">Cancel</a>
+    </select><p class="field-help">Leave this unset for public repositories. Private repositories require a credential bound to this exact URL.</p></div>
+    <div class="field"><label asp-for="Reference">Branch, tag, full ref, or exact commit</label><input asp-for="Reference" required maxlength="256" placeholder="main" /></div>
+    <div class="field"><label asp-for="Destination">Isolated relative destination</label><input asp-for="Destination" required maxlength="512" placeholder="sources/app" /></div>
+    <p class="field-help span-full">Save the endpoint first, then browse/search remote branches and tags on the source page. Commit hashes may be entered directly.</p>
+    <div class="form-actions"><button class="button primary" type="submit">Save source</button><a class="button" href="/sources/@Model.DeploymentId">Cancel</a></div>
 </form>
+<aside><section class="panel"><h2>Build from this checkout</h2><p>Use the destination in your manually authored Compose file, for example <code>build.context: ./sources/app</code>.</p><p class="field-help">Checkouts are read-only in the browser; Stanza never commits, pushes, or rewrites Compose. Submodules are unsupported: repositories containing .gitmodules are rejected, not initialized.</p></section>
+<section class="panel"><h2>Add a branch selector</h2><p>Create an action for this deployment, add a <strong>branch</strong> input, and bind it to this source destination. Use a <strong>deploy</strong> step to build and apply the selected branch.</p><a href="/automation/actions/edit">Create an action →</a></section></aside>
+</div>

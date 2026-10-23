@@ -7,14 +7,19 @@
     let plan;
     try { plan = JSON.parse(json.value); } catch { advanced.open = true; return; }
     const initialJson = json.value;
+    let nextControl = 0;
     const field = (parent, title, key, value = "", options = null, type = "text") => {
-        const label = document.createElement("label"); label.textContent = title;
+        const label = document.createElement("label"); label.className = type === "checkbox" ? "check-field" : "field";
         const control = document.createElement(options ? "select" : type === "textarea" ? "textarea" : "input");
+        control.id = "action-control-" + (++nextControl);
+        label.htmlFor = control.id;
         control.dataset.field = key;
         if (options) for (const option of options) control.add(new Option(option, option));
         else if (type !== "textarea") control.type = type;
         if (type === "checkbox") control.checked = Boolean(value); else control.value = value ?? "";
-        label.append(control); parent.append(label); return control;
+        if (type === "checkbox") label.append(control, document.createTextNode(title));
+        else { const text = document.createElement("span"); text.textContent = title; label.append(text, control); }
+        parent.append(label); return control;
     };
     const catalog = (parent, title, key, value, template) => {
         const select = field(parent, title, key, "", []);
@@ -24,35 +29,45 @@
     };
     const row = (parent, title) => {
         const section = document.createElement("section"); section.className = "panel action-editor-row";
-        const heading = document.createElement("h3"); heading.textContent = title; section.append(heading);
+        const header = document.createElement("div"); header.className = "panel-heading";
+        const heading = document.createElement("h3"); heading.textContent = title; header.append(heading);
+        const toolbar = document.createElement("div"); toolbar.className = "toolbar"; header.append(toolbar); section.append(header);
         const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "Remove " + title.toLowerCase();
-        remove.addEventListener("click", () => section.remove()); section.append(remove);
+        remove.className = "danger";
+        remove.addEventListener("click", () => section.remove()); toolbar.append(remove);
         for (const [label, up] of [["Move up", true], ["Move down", false]]) {
             const move = document.createElement("button"); move.type = "button"; move.textContent = label;
+            move.setAttribute("aria-label", label + " " + title.toLowerCase());
             move.addEventListener("click", () => {
                 const sibling = up ? section.previousElementSibling : section.nextElementSibling;
                 if (sibling) parent.insertBefore(up ? section : sibling, up ? sibling : section);
             });
-            section.append(move);
+            toolbar.append(move);
         }
         parent.append(section); return section;
     };
     function addInput(p = {}) {
         const item = row(inputs, "Input");
+        item.classList.add("action-input-row");
         field(item, "Variable name", "name", p.name);
         field(item, "Label", "label", p.label);
         const input = field(item, "Input control", "input", p.input || "text", ["text", "dropdown", "version", "branch"]);
-        field(item, "Value type", "type", p.type || "string", ["string", "integer", "boolean"]);
-        field(item, "Required", "required", p.required !== false, null, "checkbox");
+        const valueType = field(item, "Value type", "type", p.type || "string", ["string", "integer", "boolean"]);
+        const required = field(item, "Required", "required", p.required !== false, null, "checkbox");
         field(item, "Default value (optional)", "default", p.default);
         const options = field(item, "Dropdown choices (one per line)", "options", (p.options || []).join("\n"), null, "textarea");
+        options.parentElement.classList.add("span-full");
         const source = catalog(item, "Git source checkout destination", "source", p.source, "action-source-options");
         for (const option of Array.from(source.options))
-            if (option.dataset.deployment && option.dataset.deployment !== root.querySelector("[data-plan-deployment]").value) option.remove();
+            if (option.dataset.deployment && option.dataset.deployment !== form.querySelector("[data-plan-deployment]").value) option.remove();
         const repository = field(item, "Image repository (without tag)", "repository", p.repository);
         repository.placeholder = "ghcr.io/organization/application";
         const services = field(item, "Target Compose services (comma-separated)", "services", (p.services || []).join(", "));
         function visibility() {
+            valueType.parentElement.hidden = input.value !== "text";
+            if (input.value !== "text") valueType.value = "string";
+            required.parentElement.hidden = ["branch", "version"].includes(input.value);
+            if (required.parentElement.hidden) required.checked = true;
             options.parentElement.hidden = input.value !== "dropdown";
             source.parentElement.hidden = input.value !== "branch";
             repository.parentElement.hidden = services.parentElement.hidden = input.value !== "version";
@@ -61,25 +76,30 @@
     }
     function addStep(s = {}) {
         const item = row(steps, "Step");
+        item.classList.add("action-step-row");
         const kind = field(item, "Operation", "kind", s.kind || "deploy", ["validate", "git-refresh", "build", "pull", "deploy", "start", "stop", "restart", "remove", "status", "logs", "container-exec", "host-exec"]);
-        const deployment = catalog(item, "Deployment", "deploymentId", s.deploymentId || root.querySelector("[data-plan-deployment]").value, "action-deployment-options");
+        const deployment = catalog(item, "Deployment", "deploymentId", s.deploymentId || form.querySelector("[data-plan-deployment]").value, "action-deployment-options");
         const agent = catalog(item, "Agent", "agentId", s.agentId, "action-agent-options");
         field(item, "Timeout (seconds)", "timeoutSeconds", s.timeoutSeconds || 300, null, "number");
         field(item, "On failure", "failure", s.failure || "stop", ["stop", "continue"]);
-        const command = document.createElement("div"); item.append(command);
+        const command = document.createElement("div"); command.className = "execution-fields"; item.append(command);
         const exec = s.execution || {};
         field(command, "Executable (absolute path)", "executable", exec.executable);
         const args = field(command, "Arguments (one per line; use ${variable} as a whole argument)", "arguments", (exec.arguments || []).join("\n"), null, "textarea");
         args.placeholder = "--database\ntesting";
-        field(command, "Compose service (container-exec)", "service", exec.service);
-        field(command, "Or explicit container (container-exec)", "container", exec.container);
-        field(command, "User (optional)", "user", exec.user);
-        field(command, "Working directory (optional)", "workingDirectory", exec.workingDirectory);
-        field(command, "Fixed environment (JSON object, optional)", "environment", exec.environment ? JSON.stringify(exec.environment) : "", null, "textarea");
+        const service = field(command, "Compose service (container-exec)", "service", exec.service);
+        const container = field(command, "Or explicit container (container-exec)", "container", exec.container);
+        const advanced = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = "User, working directory & fixed environment"; advanced.append(summary);
+        const advancedFields = document.createElement("div"); advancedFields.className = "form-grid"; advanced.append(advancedFields); command.append(advanced);
+        field(advancedFields, "User (optional)", "user", exec.user);
+        field(advancedFields, "Working directory (optional)", "workingDirectory", exec.workingDirectory);
+        field(advancedFields, "Fixed environment (JSON object, optional)", "environment", exec.environment ? JSON.stringify(exec.environment) : "", null, "textarea").parentElement.classList.add("span-full");
+        advanced.open = Boolean(exec.user || exec.workingDirectory || exec.environment);
         function visibility() {
             agent.parentElement.hidden = kind.value !== "host-exec";
             deployment.parentElement.hidden = kind.value === "host-exec";
             command.hidden = !["container-exec", "host-exec"].includes(kind.value);
+            service.parentElement.hidden = container.parentElement.hidden = kind.value === "host-exec";
         }
         kind.addEventListener("change", visibility); visibility();
     }
@@ -88,11 +108,11 @@
         confirmation: "[data-plan-confirmation]", showOnOverview: "[data-plan-visible]"
     };
     for (const [key, selector] of Object.entries(metadata)) {
-        const control = root.querySelector(selector);
+        const control = form.querySelector(selector);
         if (control.type === "checkbox") control.checked = plan[key] !== false; else control.value = plan[key] ?? (key === "order" ? "0" : "");
     }
     (plan.parameters || []).forEach(addInput); (plan.steps || []).forEach(addStep);
-    const displayDeployment = root.querySelector("[data-plan-deployment]");
+    const displayDeployment = form.querySelector("[data-plan-deployment]");
     displayDeployment.addEventListener("change", () => {
         for (const select of steps.querySelectorAll("select[data-field=deploymentId]")) if (!select.value) select.value = displayDeployment.value;
         for (const select of inputs.querySelectorAll("select[data-field=source]")) {
@@ -110,7 +130,7 @@
         if (json.value !== initialJson) return;
         try {
             for (const [key, selector] of Object.entries(metadata)) {
-                const c = root.querySelector(selector); plan[key] = c.type === "checkbox" ? c.checked : key === "order" ? Number(c.value) : c.value || null;
+                const c = form.querySelector(selector); plan[key] = c.type === "checkbox" ? c.checked : key === "order" ? Number(c.value) : c.value || null;
             }
             plan.parameters = Array.from(inputs.children).map(item => {
                 const p = values(item);
@@ -135,4 +155,5 @@
         } catch { event.preventDefault(); root.querySelector("[data-editor-error]").textContent = "Check the fixed environment JSON before saving."; }
     });
     root.hidden = false;
+    form.querySelector("[data-action-button]").hidden = false;
 })();

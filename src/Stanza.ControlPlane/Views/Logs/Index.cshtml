@@ -3,12 +3,14 @@
 <script src="~/js/logs.js" defer asp-append-version="true"></script>
 <h1>Container logs · @Model.Name</h1>
 <p>Deployed revision @Model.Revision; observed state: @Model.ObservedState. Read-only, timestamped container logs, starting with the last 200 lines and following new output. Stopped-container logs are available while the container still exists.</p>
-<form id="logs-connect" data-deployment-id="@Model.DeploymentId">
-    <label>Target type <select name="targetType"><option value="service">Compose service</option><option value="container">Container name or ID</option></select></label>
-    <label>Service or container <input name="target" required maxlength="128" autocomplete="off" /></label>
+<form id="logs-connect" data-deployment-id="@Model.DeploymentId" class="panel form-grid">
+    <label class="field">Target type <select name="targetType"><option value="service">Compose service</option><option value="container">Container name or ID</option></select></label>
+    <label class="field">Service or container <input name="target" required maxlength="128" autocomplete="off" /></label>
+    <div class="toolbar span-full">
     <button type="submit">Connect</button>
     <button type="button" id="logs-disconnect" disabled>Disconnect</button>
     <button type="button" id="logs-clear">Clear display</button>
+    </div>
 </form>
 <p id="logs-status" role="status">Disconnected. Reconnect explicitly to start a new stream; recent lines may repeat.</p>
 <p>Display retains at most 256 KiB of UTF-8 text. Log contents are not saved as operations or audit contents.</p>

@@ -1,3 +1,7 @@
+@{
+    bool Active(string path) => path == "/" ? Context.Request.Path == "/" : Context.Request.Path.StartsWithSegments(path);
+    var authenticated = User.Identity?.IsAuthenticated == true;
+}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8,33 +12,40 @@
     <link rel="stylesheet" href="~/css/stanza.css" asp-append-version="true" />
     <script src="~/vendor/htmx.min.js" defer asp-append-version="true"></script>
     <script src="~/js/status.js" defer asp-append-version="true"></script>
+    <script src="~/js/ui.js" defer asp-append-version="true"></script>
 </head>
-<body>
+<body class="@(authenticated ? "app-layout" : "auth-layout")">
+    <a class="skip-link" href="#main-content">Skip to content</a>
     <aside class="sidebar">
+        <div class="sidebar-header">
         <a class="brand" href="/"><span class="brand-mark">S</span><span>Stanza<small>OPEN DEPLOYMENT MANAGER</small></span></a>
-        @if (User.Identity?.IsAuthenticated == true)
+        @if (authenticated) { <button type="button" class="nav-toggle subtle" aria-controls="primary-navigation" aria-expanded="false">Menu</button> }
+        </div>
+        @if (authenticated)
         {
-            <div class="nav-label">CONTROL PLANE</div>
-            <nav aria-label="Main navigation">
-                <a href="/">Overview</a>
-                <a href="/deployments">Deployments</a>
-                <a href="/operations">Operations</a>
-                <a href="/sources">Git sources</a>
-                <a href="/credentials">Credentials &amp; registries</a>
-                <a href="/agents">Agents</a>
-                <a href="/settings">Settings</a>
-                <a href="/portability">Clone, move &amp; import/export</a>
-                <a href="/automation">Actions &amp; automation</a>
+            <nav id="primary-navigation" aria-label="Main navigation">
+                <div class="nav-label">WORKSPACE</div>
+                <a href="/" aria-current="@(Active("/") ? "page" : null)">Overview</a>
+                <a href="/deployments" aria-current="@(Active("/deployments") || Active("/logs") || Active("/terminals") ? "page" : null)">Deployments</a>
+                <a href="/automation" aria-current="@(Active("/automation") ? "page" : null)">Actions &amp; automation</a>
+                <a href="/operations" aria-current="@(Active("/operations") ? "page" : null)">Operations</a>
+                <div class="nav-label">CONFIGURATION</div>
+                <a href="/agents" aria-current="@(Active("/agents") ? "page" : null)">Agents</a>
+                <a href="/sources" aria-current="@(Active("/sources") ? "page" : null)">Git sources</a>
+                <a href="/credentials" aria-current="@(Active("/credentials") ? "page" : null)">Credentials &amp; registries</a>
+                <a href="/portability" aria-current="@(Active("/portability") ? "page" : null)" title="Clone, move and import/export configuration">Clone, move &amp; transfer</a>
+                <a href="/settings" aria-current="@(Active("/settings") || Active("/policy") ? "page" : null)">Settings &amp; policy</a>
                 @if (User.IsInRole("Admin") || User.IsInRole("SystemAdmin"))
                 {
-                    <a href="/users">Users</a>
-                    <a href="/groups">Groups &amp; permissions</a>
-                    <a href="/audit">Audit history</a>
-                    <a href="/recovery">Backup &amp; recovery</a>
+                    <div class="nav-label">ADMINISTRATION</div>
+                    <a href="/users" aria-current="@(Active("/users") ? "page" : null)">Users</a>
+                    <a href="/groups" aria-current="@(Active("/groups") ? "page" : null)">Groups &amp; permissions</a>
+                    <a href="/audit" aria-current="@(Active("/audit") ? "page" : null)">Audit history</a>
+                    <a href="/recovery" aria-current="@(Active("/recovery") ? "page" : null)">Backup &amp; recovery</a>
                 }
-                <a href="/account/password">Account security</a>
+                <a href="/account/password" aria-current="@(Active("/account/password") ? "page" : null)">Account security</a>
             </nav>
-            <div class="sidebar-footer"><strong>@User.Identity.Name</strong><span>@User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value</span>
+            <div class="sidebar-footer"><div><strong>@User.Identity!.Name</strong><span>@User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value</span></div>
                 <form method="post" asp-controller="Account" asp-action="Logout"><button class="button subtle" type="submit">Sign out</button></form>
             </div>
         }
@@ -43,8 +54,8 @@
             <p class="sidebar-copy">Your servers.<br />Your deployments.<br />One control plane.</p>
         }
     </aside>
-    <main>
-        <header class="topbar"><span>STANZA / CONTROL PLANE</span><span class="version">.NET 10 LTS</span></header>
+    <main id="main-content" tabindex="-1">
+        <header class="topbar"><span>STANZA <span class="current-page">/ @(ViewData["Title"] ?? "Control Plane")</span></span><span class="version">.NET 10 LTS</span></header>
         <div class="content">
             @if (!Context.Request.IsHttps && (Context.RequestServices.GetService(typeof(Stanza.ControlPlane.Configuration.HttpTransportPolicy)) as Stanza.ControlPlane.Configuration.HttpTransportPolicy)?.AllowInsecureHttp == true)
             {

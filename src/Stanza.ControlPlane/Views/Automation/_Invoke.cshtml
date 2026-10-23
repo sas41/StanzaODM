@@ -29,5 +29,5 @@
     }
     @if (!string.IsNullOrEmpty(Model.Plan.Confirmation))
     { <label><input type="checkbox" name="confirmed" value="true" required /> @Model.Plan.Confirmation</label> }
-    <button type="submit">Run @Model.Name</button>
+    <button class="primary" type="submit">Run @Model.Name</button>
 </form>

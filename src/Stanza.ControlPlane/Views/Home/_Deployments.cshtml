@@ -3,6 +3,7 @@
 @foreach (var agent in Model)
 {
     <section class="panel"><h2>@agent.Name Deployments <small class="muted">@(agent.Connected ? "Connected" : "Offline")</small></h2>
+    <div class="deployment-list">
     @foreach (var deployment in agent.Deployments)
     {
         <section class="deployment-action-row" data-deployment-id="@deployment.Id">
@@ -19,6 +20,6 @@
             @if (deployment.RunId is { } run) { <a href="/automation/runs/@run">Latest action: @deployment.RunState</a> }
         </section>
     }
-    </section>
+    </div></section>
 }
 </div>

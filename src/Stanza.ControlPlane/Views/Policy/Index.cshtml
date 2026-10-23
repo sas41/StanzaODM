@@ -2,15 +2,22 @@
 @{ ViewData["Title"] = "Operational policy"; }
 <h1>Operational policy</h1><p class="muted">Limits apply to new requests and operations. Hard safety ceilings protect process memory and protocol compatibility. Host actions additionally require opt-in Agent host namespace configuration.</p>
 <form method="post"><div asp-validation-summary="All" class="validation"></div><input type="hidden" name="version" value="@Model.Version" />
-<section class="panel">
+<section class="panel"><div class="form-grid three-column">
 @foreach (var property in typeof(Stanza.ControlPlane.Configuration.OperationalPolicy).GetProperties())
 {
-    <label for="@property.Name">@property.Name</label>
-    @if (property.PropertyType == typeof(bool)) { <input id="@property.Name" name="@property.Name" type="checkbox" value="true" checked="@((bool)property.GetValue(Model.Policy)!)" /><input type="hidden" name="@property.Name" value="false" /> }
-    else if (property.PropertyType == typeof(string)) { <input id="@property.Name" name="@property.Name" value="@property.GetValue(Model.Policy)" /> }
-    else { <input id="@property.Name" name="@property.Name" type="number" value="@property.GetValue(Model.Policy)" required /> }
+    var label = System.Text.RegularExpressions.Regex.Replace(property.Name, "(?<=[a-z0-9])(?=[A-Z])", " ");
+    @if (property.PropertyType == typeof(bool))
+    { <label class="check-field" title="@property.Name"><input id="@property.Name" name="@property.Name" type="checkbox" value="true" checked="@((bool)property.GetValue(Model.Policy)!)" /> @label</label><input type="hidden" name="@property.Name" value="false" /> }
+    else
+    {
+        <div class="field"><label for="@property.Name" title="@property.Name">@label</label>
+        @if (property.PropertyType == typeof(string)) { <input id="@property.Name" name="@property.Name" value="@property.GetValue(Model.Policy)" /> }
+        else { <input id="@property.Name" name="@property.Name" type="number" value="@property.GetValue(Model.Policy)" required /> }
+        </div>
+    }
 }
-@if (User.IsInRole("Admin") || User.IsInRole("SystemAdmin")) { <button class="button primary" type="submit">Save policy</button> }
+@if (User.IsInRole("Admin") || User.IsInRole("SystemAdmin")) { <div class="form-actions"><button class="button primary" type="submit">Save policy</button><a class="button subtle" href="/settings">Settings</a></div> }
+</div>
 </section></form>
 <p class="field-help">StatusIntervalSeconds also controls how often connected Agents check for saved configuration changes. Startup and reconnect always perform a full synchronization. Unchanged configuration is not transferred.</p>
 <div class="notice warning">For HTTPS termination at a reverse proxy, configure only that proxy's actual IP or narrowly scoped network above and preserve the original Host header. Unconfigured forwarded headers are ignored; trust-all networks are rejected. The public URL in Settings must match the browser origin.</div>

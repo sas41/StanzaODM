@@ -1,16 +1,18 @@
 @model ImagePolicyEditorModel
 @{ ViewData["Title"] = "Image update policy"; }
 <h1>Image update policy</h1>
-<form method="post" action="/automation/images/edit">@Html.AntiForgeryToken()
+<form method="post" action="/automation/images/edit" class="panel form-grid">@Html.AntiForgeryToken()
 <div asp-validation-summary="All"></div><input asp-for="Id" type="hidden" /><input asp-for="Revision" type="hidden" />
-<label asp-for="Name"></label><input asp-for="Name" />
-<label asp-for="DeploymentId"></label><input asp-for="DeploymentId" />
-<label asp-for="Services">Compose service names (comma-separated)</label><textarea asp-for="Services"></textarea>
-<label asp-for="Mode"></label><select asp-for="Mode"><option value="notify-only">Notify only (record available updates; no redeploy)</option><option value="auto-deploy">Redeploy through normal pipeline and verify health</option></select>
-<label asp-for="FrequencyMinutes">Check frequency (minutes, 1–525600)</label><input asp-for="FrequencyMinutes" type="number" min="1" max="525600" />
-<label asp-for="FailureBackoffMinutes">Retry after failure (minutes, 1–525600)</label><input asp-for="FailureBackoffMinutes" type="number" min="1" max="525600" />
-<label><input asp-for="Enabled" /> Enabled</label><button>Save image policy</button></form>
+<div class="field"><label asp-for="Name"></label><input asp-for="Name" /></div>
+<div class="field"><label asp-for="DeploymentId">Deployment</label><select asp-for="DeploymentId"><option value="">Select deployment</option>@await Html.PartialAsync("_DeploymentOptions", (Guid?)Model.DeploymentId)</select></div>
+<div class="field"><label asp-for="Services">Compose service names (comma-separated)</label><textarea asp-for="Services" rows="3"></textarea></div>
+<div class="field"><label asp-for="Mode"></label><select asp-for="Mode"><option value="notify-only">Notify only (record available updates; no redeploy)</option><option value="auto-deploy">Redeploy through normal pipeline and verify health</option></select></div>
+<div class="field"><label asp-for="FrequencyMinutes">Check frequency (minutes, 1–525600)</label><input asp-for="FrequencyMinutes" type="number" min="1" max="525600" /></div>
+<div class="field"><label asp-for="FailureBackoffMinutes">Retry after failure (minutes, 1–525600)</label><input asp-for="FailureBackoffMinutes" type="number" min="1" max="525600" /></div>
+<label class="check-field span-full"><input asp-for="Enabled" /> Enabled</label><div class="form-actions"><button class="primary">Save image policy</button></div></form>
+<details class="help-disclosure"><summary>Digest comparison and automatic deployment safety</summary>
 <p>Checks compare immutable SHA-256 image digests resolved for the Agent platform, with scoped registry credentials supplied only by the normal operation pipeline. Locally built services are excluded unless they have an explicitly configured registry source. Unknown current digests never trigger automatic deployment.</p>
 <p>Checks do not overlap for a policy. Redeployments use the normal deployment operation queue, coordinating with builds, Git updates and scheduled deployments. Missing digest-probe support or registry errors produce a failed check, never a fabricated success. Notify-only updates appear in the automation overview.</p>
 <p>Checks use the actually applied revision, placement, environment, and pinned Git commits. Pending manual configuration/environment/source changes or conflicting deployment operations must be resolved first. Installed and remote image <strong>config digests</strong> are compared; registry manifest identities are retained separately in operation metadata. A service without an installed baseline never triggers automatic deployment.</p>
+</details>
 <a href="/automation">Back</a>

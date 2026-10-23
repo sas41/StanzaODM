@@ -1,6 +1,7 @@
 @model SettingsModel
 @{ ViewData["Title"] = "Instance settings"; }
 <span class="eyebrow">INSTANCE CONFIGURATION</span><h1>Settings</h1><p class="muted">Settings are stored in PostgreSQL. Sensitive configuration is encrypted using the persisted instance keys.</p>
+<div class="workspace"><div>
 <section class="panel"><form method="post" asp-action="Index">
     <div asp-validation-summary="All" class="validation" role="alert"></div>
     <input asp-for="Version" type="hidden" />
@@ -14,9 +15,11 @@
     <div class="notice warning">These values may contain secrets. Configuration exports are fully plaintext and require explicit acknowledgement.</div>
     @if (Model.CanWriteSettings || Model.CanWriteEnvironment) { <button class="button primary" type="submit">Save settings</button> }
 </form></section>
-<section class="panel"><h2>Operational policy</h2><p>Manage session, execution, upload, retention, and live-connection limits.</p><a href="/policy">Open operational policy →</a></section>
+</div><aside>
+<section class="panel"><h2>Operational policy</h2><p>Manage session, execution, upload, retention, and live-connection limits.</p><a class="button" href="/policy">Open operational policy →</a></section>
 @if (User.IsInRole("SystemAdmin")) { <section class="panel"><h2>Instance recovery</h2><p>Encrypted database and encryption-key backup. Workload volumes are not included.</p><a href="/recovery">Backup and recovery →</a></section> }
 <section class="panel"><h2>Pre-launch and host prerequisites</h2><p class="muted">Database connectivity is configured before launch. Container mounts, host Docker permissions, listening ports, and reverse-proxy TLS are deployment prerequisites, not settings this process can safely modify.</p></section>
 <section class="panel"><h2>HTTP transport mode</h2>
 <p>Allow insecure HTTP: <strong>@(((Context.RequestServices.GetService(typeof(Stanza.ControlPlane.Configuration.HttpTransportPolicy)) as Stanza.ControlPlane.Configuration.HttpTransportPolicy)?.AllowInsecureHttp == true) ? "Enabled" : "Disabled (secure default)")</strong></p>
 <p class="field-help">Controlled before launch by STANZA_ALLOW_INSECURE_HTTP in compose.control.yaml; defaults to false. Set it to true only for a trusted LAN and recreate the Control Plane container to apply. HTTP Agents must also set STANZA_ALLOW_INSECURE_HTTP=true in their own deployment. This is read-only here so a browser request or imported configuration cannot downgrade transport security. HTTPS certificate checks, Git/registry TLS and proxy trust remain unchanged.</p></section>
+</aside></div>

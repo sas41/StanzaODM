@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -25,7 +26,7 @@ public sealed class AutomationBrowserTests
     {
         await using var original = new StanzaFactory();
         await using var configured = AutomationHttpTests.Configure(original);
-        await using var factory = configured.WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+        await using var factory = configured.WithWebHostBuilder(builder => builder.UseUrls("http://127.0.0.1:0").ConfigureServices(services =>
         { services.RemoveAll<IAgentCommandDispatcher>(); services.AddSingleton<IAgentCommandDispatcher, ChoiceDispatcher>(); }));
         factory.UseKestrel(0); factory.StartServer();
         var address = Assert.Single(factory.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses);
@@ -59,7 +60,9 @@ public sealed class AutomationBrowserTests
             await chrome.Wait("!!document.querySelector('#Password')");
             await chrome.Eval("document.querySelector('#Username').value='owner'; document.querySelector('#Password').value='a-secure-password-123'; setTimeout(()=>document.querySelector('form').requestSubmit(),0); true");
             await chrome.Wait("location.pathname==='/'");
-            var deployment = Guid.NewGuid();
+            Guid deployment;
+            using (var seed = factory.Services.CreateScope())
+                deployment = (await seed.ServiceProvider.GetRequiredService<DeploymentDraftService>().CreateAsync(owner, "Automation demo", null, "services: {}", "")).Id;
             await chrome.Go(address, "/automation/actions/edit", "!!document.querySelector('#PlanJson')");
             var plan = JsonSerializer.Serialize(new ActionPlan([new("validate", deployment)]), AutomationRules.Json);
             await chrome.Eval("document.querySelector('#Name').value='Browser ordered action'; document.querySelector('#PlanJson').value=" + JsonSerializer.Serialize(plan) + "; document.querySelector('#Enabled').checked=true; setTimeout(()=>document.querySelector('form[action=\"/automation/actions/edit\"]').requestSubmit(),0); true");

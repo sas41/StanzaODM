@@ -1,22 +1,22 @@
 @model Stanza.ControlPlane.Automation.AutomationSchedule
 @{ var prefix = "action-schedule-" + Model.Id.ToString("N"); }
-<form method="post" action="/automation/actions/@Model.ActionId/schedules" class="panel" data-action-schedule>
+<form method="post" action="/automation/actions/@Model.ActionId/schedules" class="panel form-grid" data-action-schedule>
     @Html.AntiForgeryToken()
     <input type="hidden" name="Id" value="@Model.Id" /><input type="hidden" name="Revision" value="@Model.Revision" />
-    <label for="@prefix-name">Schedule name</label><input id="@prefix-name" name="Name" value="@Model.Name" required maxlength="100" />
-    <label for="@prefix-expression">Cron (minute hour day-of-month month weekday)</label><input id="@prefix-expression" name="Expression" value="@Model.Expression" required maxlength="256" placeholder="0 3 * * *" />
-    <label for="@prefix-timezone">Timezone</label><input id="@prefix-timezone" name="TimeZone" value="@Model.TimeZone" required maxlength="100" placeholder="UTC or Europe/London" />
-    <label><input type="checkbox" name="Enabled" value="true" checked="@Model.Enabled" /> Enable periodic execution</label>
-    <label for="@prefix-overlap">If a previous occurrence is queued or running</label>
-    <select id="@prefix-overlap" name="Overlap"><option value="skip" selected="@(Model.Overlap == "skip")">Skip this occurrence</option><option value="queue" selected="@(Model.Overlap == "queue")">Queue this occurrence</option></select>
-    <label for="@prefix-missed">If Stanza was offline</label>
-    <select id="@prefix-missed" name="MissedRun"><option value="skip" selected="@(Model.MissedRun == "skip")">Skip missed occurrences</option><option value="run-once" selected="@(Model.MissedRun == "run-once")">Run once on recovery (never replay every missed occurrence)</option></select>
+    <div class="field span-full"><label for="@prefix-name">Schedule name</label><input id="@prefix-name" name="Name" value="@Model.Name" required maxlength="100" /></div>
+    <div class="field"><label for="@prefix-expression">Cron expression</label><input id="@prefix-expression" name="Expression" value="@Model.Expression" required maxlength="256" placeholder="0 3 * * *" /></div>
+    <div class="field"><label for="@prefix-timezone">Timezone</label><input id="@prefix-timezone" name="TimeZone" value="@Model.TimeZone" required maxlength="100" placeholder="UTC or Europe/London" /></div>
+    <label class="check-field span-full"><input type="checkbox" name="Enabled" value="true" checked="@Model.Enabled" /> Enable periodic execution</label>
+    <div class="field"><label for="@prefix-overlap">Overlapping run</label>
+    <select id="@prefix-overlap" name="Overlap"><option value="skip" selected="@(Model.Overlap == "skip")">Skip this occurrence</option><option value="queue" selected="@(Model.Overlap == "queue")">Queue this occurrence</option></select></div>
+    <div class="field"><label for="@prefix-missed">Missed occurrence</label>
+    <select id="@prefix-missed" name="MissedRun"><option value="skip" selected="@(Model.MissedRun == "skip")">Skip missed occurrences</option><option value="run-once" selected="@(Model.MissedRun == "run-once")">Run once on recovery (never replay every missed occurrence)</option></select></div>
     @if (Model.Id != Guid.Empty)
     {
-        <p>@(Model.Enabled ? "Enabled" : "Paused") · @Stanza.ControlPlane.Automation.AutomationRules.DescribeCron(Model.Expression)</p>
-        if (Model.Enabled) { <p>Next occurrence: @DateTimeOffset.FromUnixTimeSeconds(Model.NextRunAt).ToString("u") (UTC), timezone @Model.TimeZone.</p> }
+        <p class="field-help span-full">@(Model.Enabled ? "Enabled" : "Paused") · @Stanza.ControlPlane.Automation.AutomationRules.DescribeCron(Model.Expression)</p>
+        if (Model.Enabled) { <p class="field-help span-full">Next occurrence: @DateTimeOffset.FromUnixTimeSeconds(Model.NextRunAt).ToString("u") (UTC), timezone @Model.TimeZone.</p> }
     }
-    <button type="submit">Save schedule</button>
-    <button type="submit" formaction="/automation/schedules/preview" hx-post="/automation/schedules/preview" hx-target="#@prefix-preview" hx-include="closest form">Preview next five runs</button>
+    <div class="form-actions"><button type="submit">Save schedule</button>
+    <button type="submit" formaction="/automation/schedules/preview" hx-post="/automation/schedules/preview" hx-target="#@prefix-preview" hx-include="closest form">Preview next five runs</button></div>
 </form>
 <div id="@prefix-preview" aria-live="polite"></div>

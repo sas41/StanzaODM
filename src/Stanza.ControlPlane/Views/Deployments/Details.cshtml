@@ -1,11 +1,14 @@
 @model Stanza.ControlPlane.Deployments.DeploymentDraftView
 @using Stanza.Core.Deployments
 @{ ViewData["Title"] = Model.Draft.Name; var isCurrent = Model.ViewedRevision == Model.Draft.Revision; }
-<span class="eyebrow">DEPLOYMENT DRAFT</span><h1>@Model.Draft.Name</h1>
-<p class="muted">Viewing saved revision @Model.ViewedRevision · Latest saved revision @Model.Draft.Revision · Agent reference: @(Model.Draft.TargetAgentId?.ToString() ?? "Unassigned")</p>
+<div class="page-heading"><div><span class="eyebrow">DEPLOYMENT DRAFT</span><h1>@Model.Draft.Name</h1></div><div class="toolbar">
+@if (Model.Permissions.CanWriteFiles) { <a class="button primary" asp-action="Edit" asp-route-id="@Model.Draft.Id">Edit latest draft</a> }
+<a class="button subtle" asp-action="Index">All deployments</a></div></div>
+<p class="record-meta">Viewing saved revision @Model.ViewedRevision · Latest saved revision @Model.Draft.Revision · Agent reference: @(Model.Draft.TargetAgentId?.ToString() ?? "Unassigned")</p>
 <p>Saved revision: <strong>@Model.Draft.Revision</strong> · Successfully deployed revision: <strong>@(Model.DeployedRevision?.ToString() ?? "None / unknown")</strong>
 @if (Model.DeployedRevision.HasValue && Model.DeployedRevision != Model.Draft.Revision) { <span class="notice warning">Saved changes are not deployed.</span> }</p>
 <p class="field-help">Saving configuration never changes running workloads. Validation uses Docker Compose through the durable operation queue and does not rewrite files.</p>
+<div class="workspace balanced"><div>
 @if (Model.Runtime is { } runtime)
 {
     <section class="panel"><h2>Runtime observation</h2><p>Desired: <strong>@runtime.DesiredState</strong> · Last observed: <strong>@runtime.ObservedState</strong></p>
@@ -13,17 +16,18 @@
     @if (runtime.DesiredState != runtime.ObservedState) { <p class="notice warning">Last observed state differs from desired state. Inspect current status before acting; containers may have changed outside Stanza.</p> }
     <p class="field-help">This is the last operation result, not a continuous health guarantee. Queue “Inspect current status” to refresh it. Configuration synchronization alone does not deploy or restart workloads.</p></section>
 }
-<form method="post" action="/operations/queue">@Html.AntiForgeryToken()<input type="hidden" name="deploymentId" value="@Model.Draft.Id" /><input type="hidden" name="kind" value="environment-preview" /><button class="button" type="submit">Preview resolved environment on Agent</button><span class="field-help">Requires separate reveal permission at Global, Agent, and Deployment scopes. Docker Compose resolves quoting, interpolation, multiline values, defaults, and empty values; no approximate parser is used.</span></form>
+<form class="panel" method="post" action="/operations/queue">@Html.AntiForgeryToken()<input type="hidden" name="deploymentId" value="@Model.Draft.Id" /><input type="hidden" name="kind" value="environment-preview" /><button class="button" type="submit">Preview resolved environment on Agent</button><span class="field-help">Requires separate reveal permission at Global, Agent, and Deployment scopes. Docker Compose resolves quoting, interpolation, multiline values, defaults, and empty values; no approximate parser is used.</span></form>
+</div><div>
 @if (isCurrent) {
 <section class="panel"><h2>Runtime operations</h2><form method="post" action="/operations/queue">@Html.AntiForgeryToken()<input name="deploymentId" type="hidden" value="@Model.Draft.Id" /><label for="operation-kind">Action</label><select id="operation-kind" name="kind"><option value="deploy">Deploy / redeploy (build mixed sources and verify health)</option><option value="build">Build images</option><option value="pull">Pull registry images</option><option value="start">Start</option><option value="stop">Stop</option><option value="restart">Restart</option><option value="status">Inspect current status</option><option value="logs">Read recent logs</option><option value="remove">Remove containers (preserve volumes)</option></select><button class="button primary" type="submit">Queue authorized operation</button></form>
 <p><a href="/operations?deploymentId=@Model.Draft.Id">Operation history</a> · <a href="/sources/@Model.Draft.Id">Git and registry sources</a> · <a href="/terminals/@Model.Draft.Id">Container terminal</a> · <a href="/logs/@Model.Draft.Id">Live logs</a> · <a href="/portability">Clone / move / export</a></p><p class="field-help">Each action and target is authorized on the server and checked again before execution. Global/Agent changes do not alter already queued snapshots. Source credential changes invalidate queued snapshots.</p></section>
 }
+</div></div>
 @if (isCurrent && Model.CanValidate) {
     <form method="post" asp-action="Validate" asp-route-id="@Model.Draft.Id"><button class="button" type="submit">Validate saved Compose on Agent</button></form>
 }
 @if (!isCurrent) { <p><strong>Historical revision — read-only.</strong> <a asp-action="Details" asp-route-id="@Model.Draft.Id">View latest saved revision</a></p> }
-@if (Model.Permissions.CanWriteFiles) { <p><a class="button primary" asp-action="Edit" asp-route-id="@Model.Draft.Id">Edit latest draft</a></p> }
-<section class="panel"><h2>Main Compose file · compose.yaml</h2>
+<div class="panel-grid"><section class="panel"><h2>Main Compose file · compose.yaml</h2>
 @if (Model.ComposeText is not null)
 {
     <p><a class="button" asp-action="DownloadDefinition" asp-route-id="@Model.Draft.Id" asp-route-revision="@Model.ViewedRevision">Download exact file</a></p>
@@ -40,17 +44,20 @@ else { <p class="muted">File content requires files.read permission.</p> }
 else { <p class="muted">Environment values require the separate environment.reveal permission. They are not revealed by deployment.read or files.read.</p> }
 <p class="field-help">Raw Compose .env syntax is preserved. Use the resolved-environment operation above for authoritative interpolation preview. Saving never automatically changes workloads.</p>
 </section>
+</div>
 <section class="panel"><h2>Supporting managed files</h2>
 @if (Model.Permissions.CanReadFiles)
 {
     @if (Model.Files.Count == 0) { <p class="muted">No supporting files in this revision.</p> }
+    <div class="panel-grid">
     @foreach (var file in Model.Files)
     {
         <article class="panel"><h3>@file.Path</h3><p class="muted">@file.Kind · @file.Length bytes</p>
         @if (file.Kind != ManagedEntryKind.Directory) { <a class="button" asp-action="Download" asp-route-id="@Model.Draft.Id" asp-route-path="@file.Path" asp-route-revision="@Model.ViewedRevision">Download</a> }
         @if (isCurrent && Model.Permissions.CanWriteFiles)
         {
-            @if (file.Kind == ManagedEntryKind.Text) { <a class="button" asp-action="FileEditor" asp-route-id="@Model.Draft.Id" asp-route-path="@file.Path">Edit text</a> }
+             @if (file.Kind == ManagedEntryKind.Text) { <a class="button" asp-action="FileEditor" asp-route-id="@Model.Draft.Id" asp-route-path="@file.Path">Edit text</a> }
+             <details class="help-disclosure"><summary>Rename, replace, or delete</summary>
             @if (file.Kind == ManagedEntryKind.Binary) {
                 <form method="post" enctype="multipart/form-data" asp-action="Upload" asp-route-id="@Model.Draft.Id">
                     <input name="expectedRevision" type="hidden" value="@Model.Draft.Revision" /><input name="path" type="hidden" value="@file.Path" /><input name="replace" type="hidden" value="true" />
@@ -63,15 +70,17 @@ else { <p class="muted">Environment values require the separate environment.reve
             </form>
             <form method="post" asp-action="DeleteFile" asp-route-id="@Model.Draft.Id">
                 <input name="expectedRevision" type="hidden" value="@Model.Draft.Revision" /><input name="path" type="hidden" value="@file.Path" />
-                <button class="button" type="submit">@(file.Kind == ManagedEntryKind.Directory ? "Delete directory and its managed contents" : "Delete from latest draft")</button>
-            </form>
+                <button class="button danger" type="submit">@(file.Kind == ManagedEntryKind.Directory ? "Delete directory and its managed contents" : "Delete from latest draft")</button>
+             </form>
+             </details>
         }
         </article>
-    }
-    @if (isCurrent && Model.Permissions.CanWriteFiles)
+     }
+    </div>
+     @if (isCurrent && Model.Permissions.CanWriteFiles)
     {
         <p><a class="button" asp-action="FileEditor" asp-route-id="@Model.Draft.Id">Create supporting text file</a></p>
-        <h3>Upload binary asset</h3>
+        <div class="panel-grid"><section class="panel"><h3>Upload binary asset</h3>
         <form method="post" enctype="multipart/form-data" asp-action="Upload" asp-route-id="@Model.Draft.Id">
             <input name="expectedRevision" type="hidden" value="@Model.Draft.Revision" />
             <label>Relative destination path<input name="path" maxlength="1024" required placeholder="assets/image.bin" autocomplete="off" /></label>
@@ -79,13 +88,14 @@ else { <p class="muted">Environment values require the separate environment.reve
             <button class="button" type="submit">Upload to new revision</button>
         </form>
         <p class="field-help">Uploads never overwrite existing paths unless you explicitly replace a binary asset. All paths are relative to the managed workspace, never host paths.</p>
-        <h3>Create directory</h3>
+        </section><section class="panel"><h3>Create directory</h3>
         <form method="post" asp-action="CreateDirectory" asp-route-id="@Model.Draft.Id"><input name="expectedRevision" type="hidden" value="@Model.Draft.Revision" /><label>Relative directory path<input name="path" required maxlength="1024" /></label><button class="button" type="submit">Create directory</button></form>
-        <h3>Import ZIP archive</h3>
+        </section><section class="panel"><h3>Import ZIP archive</h3>
         <form method="post" enctype="multipart/form-data" asp-action="ImportArchive" asp-route-id="@Model.Draft.Id">
             <input name="expectedRevision" type="hidden" value="@Model.Draft.Revision" /><label>Relative destination directory (optional)<input name="destination" maxlength="1024" /></label><label>ZIP file<input name="upload" type="file" accept=".zip" required /></label><button class="button" type="submit">Import into one new revision</button>
         </form>
         <p class="field-help">ZIP entries preserve exact bytes. Valid UTF-8 files within the text limit become editable text; other files remain binary assets. Links, unsafe/case-conflicting paths, existing paths and expansion beyond configured limits reject the entire import. No files are extracted onto the Control Plane host.</p>
+        </section></div>
     }
 }
 else { <p class="muted">Managed file listing and downloads require files.read permission.</p> }

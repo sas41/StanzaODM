@@ -10,10 +10,11 @@
 }
 else
 {
-<section class="panel"><h2>Getting started</h2><ol class="checklist">
+<div class="panel-grid"><section class="panel"><h2>Getting started</h2><ol class="checklist">
     <li><span class="step complete">1</span><div><strong>Secure your Control Plane</strong><p>The initial System Admin is configured. Use HTTPS before exposing this instance.</p></div></li>
     <li><span class="step">2</span><div><strong>Set up your team</strong><p>Administrators can manage ordinary users. Only System Admins can manage privileged accounts.</p>@if (User.IsInRole("Admin") || User.IsInRole("SystemAdmin")) { <a href="/users">Manage users →</a> }</div></li>
     <li><span class="step">3</span><div><strong>Connect your infrastructure</strong><p>Generate an enrollment token, start an Agent over HTTPS, and approve its registration. Then queue deployment operations or configure actions and automation.</p>@if (User.IsInRole("Admin") || User.IsInRole("SystemAdmin")) { <a href="/agents">Manage Agents →</a> }</div></li>
 </ol></section>
 <section class="panel"><h2>Prepare and deploy</h2><p class="muted">Edit Compose, .env, Dockerfiles, and supporting assets; select Git and registry sources, assign an approved Agent, and explicitly queue a validated deployment. Saving files alone never restarts workloads.</p><a href="/deployments">Open deployments →</a></section>
+</div>
 }

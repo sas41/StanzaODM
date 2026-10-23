@@ -6,15 +6,17 @@
 <script src="~/js/terminal.js" defer asp-append-version="true"></script>
 <h1>Container terminal · @Model.Name</h1>
 <p>Deployed revision @Model.Revision. Only containers belonging to this deployment are eligible. Closing this page closes the terminal process; sessions are not resumed automatically.</p>
-<form id="terminal-connect" data-deployment-id="@Model.DeploymentId">
-    <label>Target type <select name="targetType"><option value="service">Compose service</option><option value="container">Container name or ID</option></select></label>
-    <label>Service or container <input name="target" required maxlength="128" autocomplete="off" /></label>
-    <label>Executable <input name="executable" value="/bin/sh" required maxlength="1024" autocomplete="off" /></label>
-    <label>Arguments (JSON array; no shell concatenation) <input name="arguments" value="[]" maxlength="8192" autocomplete="off" /></label>
-    <label>Container user (optional) <input name="user" maxlength="128" autocomplete="off" /></label>
-    <label>Working directory (optional absolute path) <input name="workingDirectory" maxlength="1024" autocomplete="off" /></label>
+<form id="terminal-connect" data-deployment-id="@Model.DeploymentId" class="panel form-grid three-column">
+    <label class="field">Target type <select name="targetType"><option value="service">Compose service</option><option value="container">Container name or ID</option></select></label>
+    <label class="field">Service or container <input name="target" required maxlength="128" autocomplete="off" /></label>
+    <label class="field">Executable <input name="executable" value="/bin/sh" required maxlength="1024" autocomplete="off" /></label>
+    <label class="field">Arguments (JSON array; no shell concatenation) <input name="arguments" value="[]" maxlength="8192" autocomplete="off" /></label>
+    <label class="field">Container user (optional) <input name="user" maxlength="128" autocomplete="off" /></label>
+    <label class="field">Working directory (optional absolute path) <input name="workingDirectory" maxlength="1024" autocomplete="off" /></label>
+    <div class="toolbar span-full">
     <button type="submit">Connect</button>
     <button type="button" id="terminal-disconnect" disabled>Disconnect</button>
+    </div>
 </form>
 <p id="terminal-status" role="status">Disconnected.</p>
 <div id="container-terminal" aria-label="Interactive container terminal"></div>

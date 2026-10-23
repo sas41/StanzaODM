@@ -1,0 +1,6 @@
+@model Guid?
+@{ var actions = ViewData["EditorActions"] as IReadOnlyList<Stanza.ControlPlane.Automation.ActionDefinition> ?? []; }
+@if (Model.HasValue && !actions.Any(a => a.Id == Model))
+{ <option value="@Model" selected>Unavailable current action — @Model</option> }
+@foreach (var a in actions)
+{ <option value="@a.Id" selected="@(Model == a.Id)">@a.Name@(a.Enabled ? "" : " (disabled)")</option> }

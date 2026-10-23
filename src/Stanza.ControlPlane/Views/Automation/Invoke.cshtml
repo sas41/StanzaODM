@@ -1,5 +1,5 @@
 @model Stanza.ControlPlane.Models.ActionInvocationModel
 @{ ViewData["Title"] = Model.Name; }
-@await Html.PartialAsync("_Invoke", Model)
+<section class="panel narrow">@await Html.PartialAsync("_Invoke", Model)</section>
 <p><a href="/">Back to overview</a></p>
 <script src="~/js/actions.js" defer asp-append-version="true"></script>

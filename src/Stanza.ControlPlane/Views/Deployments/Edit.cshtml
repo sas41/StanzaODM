@@ -5,21 +5,25 @@
 <section class="panel"><form method="post" asp-action="Edit" asp-route-id="@Model.Id">
     <div asp-validation-summary="All" class="validation" role="alert"></div>
     <input asp-for="ExpectedRevision" type="hidden" />
-    <label asp-for="Name">Draft name</label><input asp-for="Name" maxlength="100" autocomplete="off" />
-    <label asp-for="TargetAgentId">Target Agent</label><select asp-for="TargetAgentId"><option value="">Unassigned draft</option>@if (Model.TargetAgentId.HasValue && !Model.Agents.Any(x => x.Id == Model.TargetAgentId)) { <option value="@Model.TargetAgentId">Unavailable current target — choose an approved Agent or explicitly unassign</option> }@foreach (var agent in Model.Agents) { <option value="@agent.Id">@agent.Hostname · @agent.Id</option> }</select>
+    <div class="form-grid">
+    <div class="field"><label asp-for="Name">Draft name</label><input asp-for="Name" maxlength="100" autocomplete="off" /></div>
+    <div class="field"><label asp-for="TargetAgentId">Target Agent</label><select asp-for="TargetAgentId"><option value="">Unassigned draft</option>@if (Model.TargetAgentId.HasValue && !Model.Agents.Any(x => x.Id == Model.TargetAgentId)) { <option value="@Model.TargetAgentId">Unavailable current target — choose an approved Agent or explicitly unassign</option> }@foreach (var agent in Model.Agents) { <option value="@agent.Id">@agent.Hostname · @agent.Id</option> }</select></div>
+    </div>
     <p class="field-help">Only approved Agents with agent.read access are available. Changing the target never rewrites .env.</p>
+    <div class="editor-columns">
     @if (Model.CanEditCompose)
     {
-        <label asp-for="ComposeText">Main Compose file (compose.yaml)</label><textarea asp-for="ComposeText" rows="24" class="code-editor" data-language="compose" spellcheck="false" autocomplete="off"></textarea>
+        <div class="field"><label asp-for="ComposeText">Main Compose file (compose.yaml)</label><textarea asp-for="ComposeText" rows="24" class="code-editor" data-language="compose" spellcheck="false" autocomplete="off"></textarea></div>
     }
     else { <p class="muted">Compose content is hidden without files.read permission and will be preserved.</p> }
     @if (Model.CanEditEnvironment)
     {
-        <label asp-for="EnvironmentText">Deployment environment (.env)</label><textarea asp-for="EnvironmentText" rows="14" class="code-editor" data-language="env" spellcheck="false" autocomplete="off"></textarea>
+        <div class="field"><label asp-for="EnvironmentText">Deployment environment (.env)</label><textarea asp-for="EnvironmentText" rows="14" class="code-editor" data-language="env" spellcheck="false" autocomplete="off"></textarea></div>
     }
     else { <p class="muted">Environment content is hidden or read-only without environment.reveal and environment.write. Existing text will be preserved.</p> }
+    </div>
     <p class="field-help">Unchanged text retains its original line endings; edited text uses the line endings submitted by your browser. Downloads preserve stored UTF-8 bytes exactly. Highlighting is visual only, not validation. Save first, then request Docker Compose validation.</p>
-    <button class="button primary" type="submit">Save new draft revision</button> <a class="button" asp-action="Details" asp-route-id="@Model.Id">Reload latest / cancel</a>
+    <div class="form-actions"><button class="button primary" type="submit">Save new draft revision</button> <a class="button" asp-action="Details" asp-route-id="@Model.Id">Reload latest / cancel</a></div>
 </form></section>
 <link rel="stylesheet" href="~/css/editor.css" asp-append-version="true" />
 <script src="~/js/editor.js" asp-append-version="true" defer></script>

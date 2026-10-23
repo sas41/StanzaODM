@@ -1,0 +1,6 @@
+@model Guid?
+@{ var deployments = ViewData["EditorDeployments"] as IReadOnlyList<Stanza.ControlPlane.Sources.DeploymentSourceSummary> ?? []; }
+@if (Model.HasValue && !deployments.Any(d => d.DeploymentId == Model))
+{ <option value="@Model" selected>Unavailable current deployment — @Model</option> }
+@foreach (var d in deployments)
+{ <option value="@d.DeploymentId" selected="@(Model == d.DeploymentId)">@d.Name</option> }

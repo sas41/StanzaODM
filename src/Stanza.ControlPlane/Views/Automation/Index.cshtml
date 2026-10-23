@@ -1,42 +1,63 @@
 @model Stanza.ControlPlane.Automation.AutomationOverview
 @{ ViewData["Title"] = "Automation"; }
-<h1>Automation</h1>
-<p>Action grants allow only the configured steps and inputs, using the action owner's approved capabilities. They do not grant arbitrary commands or deployment access. Caller and owner access are rechecked before execution.</p>
-<p><a href="/automation/actions/edit">New action</a> · <a href="/automation/schedules/edit">New schedule</a> · <a href="/automation/webhooks/edit">New webhook</a> · <a href="/automation/images/edit">New image policy</a> · <a href="/automation/limits">Limits and retention</a></p>
-<h2>Reusable actions</h2>
+<div class="page-heading"><div><span class="eyebrow">ACTIONS &amp; AUTOMATION</span><h1>Automation</h1><p>Fixed actions, scheduled execution, signed webhooks, and image updates.</p></div><a class="button primary" href="/automation/actions/edit">New action</a></div>
+<div class="toolbar"><a class="button" href="/automation/schedules/edit">New schedule</a><a class="button" href="/automation/webhooks/edit">New webhook</a><a class="button" href="/automation/images/edit">New image policy</a><a class="button subtle" href="/automation/limits">Limits and retention</a></div>
+<p class="field-help">Action grants allow only configured steps and inputs using the owner's approved capabilities, not arbitrary commands. Caller and owner access are rechecked before execution.</p>
+<nav class="toolbar" aria-label="Automation sections"><a href="#actions">Actions</a> · <a href="#schedules">Schedules</a> · <a href="#webhooks">Webhooks</a> · <a href="#images">Image updates</a> · <a href="#history">Run history</a></nav>
+
+<div class="section-heading" id="actions"><h2>Reusable actions</h2><span class="badge neutral">@Model.Actions.Count</span></div>
+<div class="panel-grid">
 @foreach (var x in Model.Actions)
 {
-    <section><h3>@x.Name</h3><p>@x.Id · @(x.Enabled ? "Enabled" : "Disabled") · concurrency: @x.Concurrency · owner: @x.OwnerId</p>
-    <a href="/automation/actions/edit?id=@x.Id">Edit</a> · <a href="/automation/actions/edit?id=@x.Id#action-schedules">Cron schedules</a>
-    <a href="/automation/actions/@x.Id/invoke">Run action</a></section>
+    <section class="panel automation-card"><div class="panel-heading"><h3>@x.Name</h3><span class="badge @(x.Enabled ? "" : "neutral")">@(x.Enabled ? "Enabled" : "Disabled")</span></div>
+    <p class="record-meta">Concurrency: @x.Concurrency</p>
+    <details><summary>Action identifiers</summary><p class="record-meta">Action: <code>@x.Id</code><br />Owner: <code>@x.OwnerId</code></p></details>
+    <div class="toolbar"><a class="button" href="/automation/actions/edit?id=@x.Id">Edit</a><a class="button" href="/automation/actions/edit?id=@x.Id#action-schedules">Cron schedules</a><a class="button primary" href="/automation/actions/@x.Id/invoke">Run action</a></div></section>
 }
-<h2>Schedules</h2>
+</div>
+@if (Model.Actions.Count == 0) { <p class="empty-state">No readable actions yet. Create an action to define steps and deployment buttons.</p> }
+
+<div class="section-heading" id="schedules"><h2>Schedules</h2><span class="badge neutral">@Model.Schedules.Count</span></div>
+<div class="panel-grid">
 @foreach (var x in Model.Schedules)
 {
-    <section><h3>@x.Name</h3><p>@x.Expression in @x.TimeZone · @(x.Enabled ? "Enabled" : "Paused") · next: @DateTimeOffset.FromUnixTimeSeconds(x.NextRunAt).ToString("u") · overlap @x.Overlap · missed @x.MissedRun</p>
-    <p>@Stanza.ControlPlane.Automation.AutomationRules.DescribeCron(x.Expression) Timezone: @x.TimeZone.</p>
-    <a href="/automation/schedules/edit?id=@x.Id">Edit / preview next runs</a>
+    <section class="panel automation-card"><div class="panel-heading"><h3>@x.Name</h3><span class="badge @(x.Enabled ? "" : "neutral")">@(x.Enabled ? "Enabled" : "Paused")</span></div>
+    <p><code>@x.Expression</code> · @x.TimeZone</p><p class="field-help">@Stanza.ControlPlane.Automation.AutomationRules.DescribeCron(x.Expression)</p>
+    <p class="record-meta">Next: @DateTimeOffset.FromUnixTimeSeconds(x.NextRunAt).ToString("u") · overlap @x.Overlap · missed @x.MissedRun</p>
+    <div class="toolbar"><a class="button" href="/automation/schedules/edit?id=@x.Id">Edit / preview next runs</a>
     <form method="post" action="/automation/schedules/@x.Id/enabled">@Html.AntiForgeryToken()<input type="hidden" name="enabled" value="@((!x.Enabled).ToString().ToLowerInvariant())" /><button>@(x.Enabled ? "Pause" : "Resume")</button></form>
-    <form method="post" action="/automation/schedules/@x.Id/run">@Html.AntiForgeryToken()<button>Run now as me</button></form></section>
+    <form method="post" action="/automation/schedules/@x.Id/run">@Html.AntiForgeryToken()<button>Run now as me</button></form></div></section>
 }
-<h2>Webhooks</h2>
+</div>
+@if (Model.Schedules.Count == 0) { <p class="empty-state">No schedules configured. Add cron schedules in an action's editor or create a deployment schedule.</p> }
+
+<div class="section-heading" id="webhooks"><h2>Webhooks</h2><span class="badge neutral">@Model.Webhooks.Count</span></div>
+<div class="panel-grid">
 @foreach (var x in Model.Webhooks)
 {
-    <section><h3>@x.Name</h3><p>@(x.Enabled ? "Enabled" : "Disabled") · @x.Provider · <code>/hooks/@x.Id</code> · events: @x.Events · refs: @x.Refs</p>
-    <a href="/automation/webhooks/edit?id=@x.Id">Edit</a> · <a href="/automation/webhooks/@x.Id/deliveries">Delivery history</a>
-    <form method="post" action="/automation/webhooks/@x.Id/secret">@Html.AntiForgeryToken()<button name="revoke" value="false">Rotate secret (old secret stops working)</button><button name="revoke" value="true">Revoke and disable</button></form></section>
+    <section class="panel automation-card"><div class="panel-heading"><h3>@x.Name</h3><span class="badge @(x.Enabled ? "" : "neutral")">@(x.Enabled ? "Enabled" : "Disabled")</span></div>
+    <p><code>/hooks/@x.Id</code></p><p class="record-meta">@x.Provider · events: @x.Events · refs: @x.Refs</p>
+    <div class="toolbar"><a class="button" href="/automation/webhooks/edit?id=@x.Id">Edit</a><a class="button" href="/automation/webhooks/@x.Id/deliveries">Delivery history</a></div>
+    <details><summary>Rotate or revoke signing secret</summary><p class="field-help">Rotating immediately invalidates the old secret. Revoking disables the webhook.</p><form method="post" action="/automation/webhooks/@x.Id/secret">@Html.AntiForgeryToken()<button name="revoke" value="false">Rotate secret (old secret stops working)</button><button class="danger" name="revoke" value="true">Revoke and disable</button></form></details></section>
 }
-<h2>Automatic image updates</h2>
+</div>
+@if (Model.Webhooks.Count == 0) { <p class="empty-state">No webhooks configured.</p> }
+
+<div class="section-heading" id="images"><h2>Automatic image updates</h2><span class="badge neutral">@Model.ImagePolicies.Count</span></div>
+<div class="panel-grid">
 @foreach (var x in Model.ImagePolicies)
 {
-    <section><h3>@x.Name</h3><p>@x.Mode · @(x.Enabled ? "Enabled" : "Disabled") · services: @x.Services · last result: @x.LastResult</p>
-    <p>Last check: @(x.LastCheckAt is { } checkedAt ? DateTimeOffset.FromUnixTimeSeconds(checkedAt).ToString("u") : "Never") · next: @DateTimeOffset.FromUnixTimeSeconds(x.NextRunAt).ToString("u")</p>
+    <section class="panel automation-card"><div class="panel-heading"><h3>@x.Name</h3><span class="badge @(x.Enabled ? "" : "neutral")">@(x.Enabled ? "Enabled" : "Disabled")</span></div>
+    <p>@x.Mode · services: @x.Services</p><p class="record-meta">Last result: @x.LastResult · last check: @(x.LastCheckAt is { } checkedAt ? DateTimeOffset.FromUnixTimeSeconds(checkedAt).ToString("u") : "Never")<br />Next: @DateTimeOffset.FromUnixTimeSeconds(x.NextRunAt).ToString("u")</p>
     <details><summary>Checked image identities and available updates</summary><pre>@x.DigestsJson</pre></details>
-    <a href="/automation/images/edit?id=@x.Id">Edit</a>
-    <form method="post" action="/automation/images/@x.Id/check">@Html.AntiForgeryToken()<button>Check now</button></form></section>
+    <div class="toolbar"><a class="button" href="/automation/images/edit?id=@x.Id">Edit</a><form method="post" action="/automation/images/@x.Id/check">@Html.AntiForgeryToken()<button>Check now</button></form></div></section>
 }
-<h2>Recent execution history</h2>
-<table><thead><tr><th>Created (UTC)</th><th>Trigger</th><th>State</th><th>Result</th></tr></thead><tbody>
+</div>
+@if (Model.ImagePolicies.Count == 0) { <p class="empty-state">No image update policies configured.</p> }
+
+<h2 id="history">Recent execution history</h2>
+<section class="panel table-panel"><table><thead><tr><th>Created (UTC)</th><th>Trigger</th><th>State</th><th>Result</th></tr></thead><tbody>
 @foreach (var x in Model.Runs)
-{ <tr><td><a href="/automation/runs/@x.Id">@DateTimeOffset.FromUnixTimeSeconds(x.CreatedAt).ToString("u")</a></td><td>@x.Source</td><td>@x.State</td><td>@x.Code</td></tr> }
-</tbody></table>
+{ <tr><td><a href="/automation/runs/@x.Id">@DateTimeOffset.FromUnixTimeSeconds(x.CreatedAt).ToString("u")</a></td><td>@x.Source</td><td><span class="badge neutral">@x.State</span></td><td>@x.Code</td></tr> }
+@if (Model.Runs.Count == 0) { <tr><td colspan="4" class="muted">No execution history yet.</td></tr> }
+</tbody></table></section>

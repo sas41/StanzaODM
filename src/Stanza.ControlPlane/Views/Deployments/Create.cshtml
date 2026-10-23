@@ -4,14 +4,18 @@
 <p class="muted">One manually authored Compose file, a separate deployment environment file, and supporting files. Nothing is generated or deployed.</p>
 <section class="panel"><form method="post" asp-action="Create">
     <div asp-validation-summary="All" class="validation" role="alert"></div>
-    <label asp-for="Name">Draft name</label><input asp-for="Name" maxlength="100" autocomplete="off" />
-    <label asp-for="TargetAgentId">Target Agent</label><select asp-for="TargetAgentId"><option value="">Unassigned draft</option>@foreach (var agent in Model.Agents) { <option value="@agent.Id">@agent.Hostname · @agent.Id</option> }</select>
+    <div class="form-grid">
+    <div class="field"><label asp-for="Name">Draft name</label><input asp-for="Name" maxlength="100" autocomplete="off" /></div>
+    <div class="field"><label asp-for="TargetAgentId">Target Agent</label><select asp-for="TargetAgentId"><option value="">Unassigned draft</option>@foreach (var agent in Model.Agents) { <option value="@agent.Id">@agent.Hostname · @agent.Id</option> }</select></div>
+    </div>
     <p class="field-help">Only registered, approved Agents you may read can be selected. Unassigned drafts cannot execute operations.</p>
-    <label asp-for="ComposeText">Main Compose file (compose.yaml)</label><textarea asp-for="ComposeText" rows="20" class="code-editor" data-language="compose" spellcheck="false" autocomplete="off"></textarea>
-    <label asp-for="EnvironmentText">Deployment environment (.env)</label><textarea asp-for="EnvironmentText" rows="12" class="code-editor" data-language="env" spellcheck="false" autocomplete="off"></textarea>
+    <div class="editor-columns">
+    <div class="field"><label asp-for="ComposeText">Main Compose file (compose.yaml)</label><textarea asp-for="ComposeText" rows="20" class="code-editor" data-language="compose" spellcheck="false" autocomplete="off"></textarea></div>
+    <div class="field"><label asp-for="EnvironmentText">Deployment environment (.env)</label><textarea asp-for="EnvironmentText" rows="12" class="code-editor" data-language="env" spellcheck="false" autocomplete="off"></textarea></div>
+    </div>
     <p class="field-help">Stored text is never regenerated or reformatted. Save first, then request authoritative Docker Compose validation on the selected Agent.</p>
     <div class="notice warning">These files may contain secrets. Their contents are encrypted with the persisted instance keys. Do not paste credentials into draft names or filenames.</div>
-    <button class="button primary" type="submit">Save draft</button> <a class="button" asp-action="Index">Cancel</a>
+    <div class="form-actions"><button class="button primary" type="submit">Save draft</button> <a class="button" asp-action="Index">Cancel</a></div>
 </form></section>
 <link rel="stylesheet" href="~/css/editor.css" asp-append-version="true" />
 <script src="~/js/editor.js" asp-append-version="true" defer></script>

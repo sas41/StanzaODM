@@ -158,6 +158,7 @@ public sealed class AutomationController(AutomationService automation, Automatio
     [HttpGet("schedules/edit")]
     public async Task<IActionResult> ScheduleEditor(Guid? id, CancellationToken ct)
     {
+        await LoadEditorTargets(ct);
         if (id is null) return View(new ScheduleEditorModel());
         var x = (await automation.ListAsync(Actor, ct)).Schedules.SingleOrDefault(x => x.Id == id);
         return x is null ? Forbid() : View(new ScheduleEditorModel { Id = x.Id, Revision = x.Revision, Name = x.Name, DeploymentId = x.DeploymentId,
@@ -170,6 +171,7 @@ public sealed class AutomationController(AutomationService automation, Automatio
         try
         {
             await authorization.ScheduleAsync(Actor, model.ActionId, model.DeploymentId, ct);
+            await LoadEditorTargets(ct);
             if (!ModelState.IsValid) return View(model);
             await automation.SaveScheduleAsync(Actor, new() { Id = model.Id, Name = model.Name, DeploymentId = model.DeploymentId, ActionId = model.ActionId,
                 Operation = model.Operation, Expression = model.Expression, TimeZone = model.TimeZone, Enabled = model.Enabled, Overlap = model.Overlap, MissedRun = model.MissedRun }, model.Revision, ct);
@@ -197,6 +199,7 @@ public sealed class AutomationController(AutomationService automation, Automatio
     [HttpGet("webhooks/edit")]
     public async Task<IActionResult> WebhookEditor(Guid? id, CancellationToken ct)
     {
+        await LoadEditorTargets(ct);
         if (id is null) return View(new WebhookEditorModel());
         var x = (await automation.ListAsync(Actor, ct)).Webhooks.SingleOrDefault(x => x.Id == id);
         return x is null ? Forbid() : View(new WebhookEditorModel { Id = x.Id, Revision = x.Revision, Name = x.Name, DeploymentId = x.DeploymentId,
@@ -209,6 +212,7 @@ public sealed class AutomationController(AutomationService automation, Automatio
         try
         {
             await authorization.RequireAsync(Actor, "automation.manage", "deployment", model.DeploymentId, ct);
+            await LoadEditorTargets(ct);
             if (!ModelState.IsValid) return View(model);
             var result = await automation.SaveWebhookAsync(Actor, new() { Id = model.Id, Name = model.Name, DeploymentId = model.DeploymentId,
                 ActionId = model.ActionId, Operation = model.Operation, Provider = model.Provider, Events = model.Events, Refs = model.Refs,
@@ -233,6 +237,7 @@ public sealed class AutomationController(AutomationService automation, Automatio
     [HttpGet("images/edit")]
     public async Task<IActionResult> ImageEditor(Guid? id, CancellationToken ct)
     {
+        await LoadEditorTargets(ct);
         if (id is null) return View(new ImagePolicyEditorModel());
         var x = (await automation.ListAsync(Actor, ct)).ImagePolicies.SingleOrDefault(x => x.Id == id);
         return x is null ? Forbid() : View(new ImagePolicyEditorModel { Id = x.Id, Revision = x.Revision, Name = x.Name, DeploymentId = x.DeploymentId,
@@ -245,6 +250,7 @@ public sealed class AutomationController(AutomationService automation, Automatio
         try
         {
             await authorization.RequireAsync(Actor, "automation.manage", "deployment", model.DeploymentId, ct);
+            await LoadEditorTargets(ct);
             if (!ModelState.IsValid) return View(model);
             await automation.SaveImagePolicyAsync(Actor, new() { Id = model.Id, Name = model.Name, DeploymentId = model.DeploymentId, Services = model.Services,
                 Mode = model.Mode, Enabled = model.Enabled, FrequencyMinutes = model.FrequencyMinutes, FailureBackoffMinutes = model.FailureBackoffMinutes }, model.Revision, ct);
@@ -279,6 +285,12 @@ public sealed class AutomationController(AutomationService automation, Automatio
         try { await automation.SaveLimitsAsync(Actor, model, ct); return RedirectToAction(nameof(Index)); }
         catch (AutomationAccessException) { return Forbid(); }
         catch (AutomationException e) { ModelState.AddModelError("", e.Message); return View(model); }
+    }
+
+    private async Task LoadEditorTargets(CancellationToken ct)
+    {
+        ViewData["EditorDeployments"] = await sources.ListDeploymentsAsync(Actor, ct);
+        ViewData["EditorActions"] = (await automation.ListAsync(Actor, ct)).Actions;
     }
 
     private async Task<IActionResult> Mutate(Func<Task<IActionResult>> action)

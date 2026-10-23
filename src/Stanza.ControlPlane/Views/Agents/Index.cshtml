@@ -6,7 +6,7 @@
 {
     <section class="panel"><h2>New enrollment token</h2><p>Copy this token now. It will not be shown again. Its first claim expires at @TempData["EnrollmentExpires"].</p><code>@enrollmentToken</code><p class="field-help">Set Agent__EnrollmentToken when starting the Agent. Keep the token private; it becomes bound to the first verified identity that claims it. Approval is still required.</p></section>
 }
-<section class="panel narrow"><h2>Register a server</h2><form method="post" asp-action="IssueToken"><label for="lifetime">Enrollment lifetime (minutes)</label><input id="lifetime" name="lifetimeMinutes" type="number" value="15" min="1" max="1440" required /><button class="button primary" type="submit">Generate enrollment token</button></form><p class="field-help">Use compose.agent.yaml on the target host. Configure the HTTPS Control Plane origin and token before launch. No inbound Agent port is required.</p></section>
+<section class="panel"><h2>Register a server</h2><form method="post" asp-action="IssueToken" class="inline-form"><div class="field"><label for="lifetime">Enrollment lifetime (minutes)</label><input id="lifetime" name="lifetimeMinutes" type="number" value="15" min="1" max="1440" required /></div><button class="button primary" type="submit">Generate enrollment token</button><p class="field-help">Use compose.agent.yaml on the target host. Configure the HTTPS Control Plane origin and token before launch. No inbound Agent port is required.</p></form></section>
 <section class="panel table-panel"><table><thead><tr><th>Server</th><th>Registration</th><th>Last signed contact</th><th>Actions</th></tr></thead><tbody>
 @foreach (var agent in Model.Agents)
 {
@@ -31,5 +31,7 @@
 @if (Model.Agents.Count == 0) { <tr><td colspan="4" class="muted">No registration requests yet. Start an Agent with an enrollment token to begin.</td></tr> }
 </tbody></table></section>
 <div class="notice warning">Approval enables the authenticated command channel. Last signed contact is not a workload health check. Execution can be disabled in Agent runtime policy; host actions additionally require explicit host namespace configuration.</div>
+<details class="help-disclosure"><summary>Agent setup, transport, and synchronization</summary>
 <p class="field-help">Agents require HTTPS by default. For a trusted-LAN HTTP deployment, set STANZA_ALLOW_INSECURE_HTTP=true on both the Control Plane and Agent; credentials and commands will be unencrypted. Agent identity, cache and runtime files use ./agent_data beside each Agent Compose file, mounted at the fixed internal path /var/lib/stanza-agent. Use a separate installation directory and Compose project for each Agent; never share identity storage. Agents on the same Docker daemon are not a security isolation boundary.</p>
 <p class="field-help">Every startup/reconnect synchronizes the full assigned configuration. Saved changes synchronize at the operational policy status interval; unchanged contents are not resent. Files are cached privately on the Agent, separate from running workload files. Synchronizing does not restart workloads; explicitly deploy to apply changes. Source credentials are supplied only to authorized operations.</p>
+</details>
