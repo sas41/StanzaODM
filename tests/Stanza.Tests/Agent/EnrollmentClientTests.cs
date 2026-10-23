@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using Stanza.Agent;
 using Stanza.Agent.Enrollment;
 using Stanza.Core.Contracts;
@@ -8,6 +9,28 @@ namespace Stanza.Tests.Agent;
 
 public sealed class EnrollmentClientTests
 {
+    [Theory]
+    [InlineData("http://192.0.2.10:8888", false, false)]
+    [InlineData("http://192.0.2.10:8888", true, true)]
+    [InlineData("https://control.example", false, true)]
+    [InlineData("https://control.example", true, true)]
+    [InlineData("http://secret@control.example", true, false)]
+    [InlineData("http://control.example/path", true, false)]
+    [InlineData("http://control.example?token=secret", true, false)]
+    public async Task Transport_is_checked_before_any_enrollment_credential_is_sent(string origin, bool enabled, bool send)
+    {
+        var sent = 0;
+        using var http = new HttpClient(new Handler((_, _) =>
+        {
+            sent++;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Accepted)
+            { Content = new StringContent(JsonSerializer.Serialize(new AgentEnrollmentResponse(1, "pending"), JsonSerializerOptions.Web)) });
+        }));
+        var client = new EnrollmentClient(http, options: Options.Create(new AgentOptions { AllowInsecureHttp = enabled }));
+        Assert.Equal(send ? EnrollmentStatus.Pending : EnrollmentStatus.Unavailable, await client.RegisterAsync(new(origin), Request(), default));
+        Assert.Equal(send ? 1 : 0, sent);
+    }
+
     [Theory]
     [InlineData("pending", EnrollmentStatus.Pending)]
     [InlineData("approved", EnrollmentStatus.Approved)]

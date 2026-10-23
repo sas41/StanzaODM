@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Stanza.Tests.Web;
+using Stanza.Agent.Runtime;
+using Stanza.Tests.Agent;
 
 namespace Stanza.Tests.Build;
 
@@ -25,6 +27,50 @@ public sealed class DockerComposeFactAttribute : FactAttribute
 
 public sealed class ComposeConfigurationTests
 {
+    [DockerComposeFact]
+    public async Task Separate_installation_directories_have_independent_local_storage_and_default_project_names()
+    {
+        using var directory = new AgentTestDirectory();
+        foreach (var instance in new[] { "agent-one", "agent-two" })
+        {
+            var installation = Directory.CreateDirectory(Path.Combine(directory.Path, instance)).FullName;
+            File.Copy(Path.Combine(ArchitectureTests.RepositoryRoot(), "compose.agent.yaml"), Path.Combine(installation, "compose.agent.yaml"));
+            using var rendered = await RenderSettingsAtAsync(installation, null, null, "compose.agent.yaml");
+            Assert.Equal(instance, rendered.RootElement.GetProperty("name").GetString());
+            var services = rendered.RootElement.GetProperty("services");
+            AssertAgentMounts(services.GetProperty("agent"), Path.Combine(installation, "agent_data"));
+            AssertFixedInitialization(services, Path.Combine(installation, "agent_data"));
+        }
+    }
+
+    [DockerComposeFact]
+    public async Task Actual_Compose_merge_preserves_options_and_literal_host_paths_for_binds_configs_and_secrets()
+    {
+        using var directory = new AgentTestDirectory();
+        var dataRoot = Directory.CreateDirectory(Path.Combine(directory.Path, "data")).FullName;
+        var workspace = Directory.CreateDirectory(Path.Combine(dataRoot, "operation-workspaces", "work")).FullName;
+        Directory.CreateDirectory(Path.Combine(workspace, "assets"));
+        await File.WriteAllTextAsync(Path.Combine(workspace, "app.conf"), "configuration\n");
+        await File.WriteAllTextAsync(Path.Combine(workspace, "key.txt"), "test-only-secret\n");
+        const string original = "services:\n  app:\n    image: alpine:3.22\n    volumes:\n      - ./assets:/assets:ro\n      - /srv/external:/external:ro\n      - state:/state\n    configs:\n      - source: app_config\n        target: /etc/app.conf\n    secrets:\n      - app_secret\nconfigs:\n  app_config:\n    file: ./app.conf\nsecrets:\n  app_secret:\n    file: ./key.txt\nvolumes:\n  state: {}\n";
+        var compose = Path.Combine(workspace, "compose.yaml"); await File.WriteAllTextAsync(compose, original);
+        using var canonical = await RenderSettingsAtAsync(workspace, null, null, compose);
+        var hostRoot = "/srv/$installation/agent_data";
+        var overrides = AgentHostPathOverrides.Create(canonical.RootElement, workspace, new(dataRoot, hostRoot));
+        var generated = Path.Combine(directory.Path, "host-paths.json");
+        await File.WriteAllTextAsync(generated, AgentHostPathOverrides.Serialize(overrides));
+        using var merged = await RenderSettingsAtAsync(workspace, null, null, compose, generated);
+        var mounts = merged.RootElement.GetProperty("services").GetProperty("app").GetProperty("volumes").EnumerateArray().ToArray();
+        var managed = Assert.Single(mounts, x => x.GetProperty("target").GetString() == "/assets");
+        Assert.Equal(hostRoot + "/operation-workspaces/work/assets", AgentHostPathOverrides.RenderedPath(managed.GetProperty("source").GetString()!));
+        Assert.True(managed.GetProperty("read_only").GetBoolean());
+        Assert.Contains(mounts, x => x.GetProperty("source").GetString() == "/srv/external");
+        Assert.Contains(mounts, x => x.GetProperty("type").GetString() == "volume" && x.GetProperty("source").GetString() == "state");
+        Assert.Equal(hostRoot + "/operation-workspaces/work/app.conf", AgentHostPathOverrides.RenderedPath(merged.RootElement.GetProperty("configs").GetProperty("app_config").GetProperty("file").GetString()!));
+        Assert.Equal(hostRoot + "/operation-workspaces/work/key.txt", AgentHostPathOverrides.RenderedPath(merged.RootElement.GetProperty("secrets").GetProperty("app_secret").GetProperty("file").GetString()!));
+        Assert.Equal(original, await File.ReadAllTextAsync(compose));
+    }
+
     [DockerComposeFact]
     public async Task Insecure_HTTP_is_default_off_and_requires_explicit_opt_in_on_each_application()
     {
@@ -102,25 +148,28 @@ public sealed class ComposeConfigurationTests
         AssertFixedInitialization(services);
     }
 
-    private static void AssertAgentMounts(JsonElement agent)
+    private static void AssertAgentMounts(JsonElement agent, string? localData = null)
     {
         var mounts = agent.GetProperty("volumes").EnumerateArray().ToArray();
         Assert.Contains(mounts, x => x.GetProperty("source").GetString() == "/var/run/docker.sock" && x.GetProperty("target").GetString() == "/var/run/docker.sock");
-        Assert.Contains(mounts, x => x.GetProperty("source").GetString() == "/var/lib/stanza-agent" && x.GetProperty("target").GetString() == "/var/lib/stanza-agent");
+        Assert.Contains(mounts, x => x.GetProperty("source").GetString() == (localData ?? Path.Combine(ArchitectureTests.RepositoryRoot(), "agent_data")) && x.GetProperty("target").GetString() == "/var/lib/stanza-agent");
         Assert.Equal("/var/lib/stanza-agent", agent.GetProperty("environment").GetProperty("Agent__PersistentDataRoot").GetString());
     }
 
-    private static void AssertFixedInitialization(JsonElement services) =>
+    private static void AssertFixedInitialization(JsonElement services, string? localData = null) =>
         Assert.Contains(services.GetProperty("initialize-agent").GetProperty("volumes").EnumerateArray(),
-            x => x.GetProperty("source").GetString() == "/var/lib/stanza-agent" && x.GetProperty("target").GetString() == "/agent-data");
+            x => x.GetProperty("source").GetString() == (localData ?? Path.Combine(ArchitectureTests.RepositoryRoot(), "agent_data")) && x.GetProperty("target").GetString() == "/agent-data");
 
     private static Task<JsonDocument> RenderAsync(params string[] manifests) => RenderVersionAsync("2026-10-23-115011", manifests);
 
     private static Task<JsonDocument> RenderVersionAsync(string? version, params string[] manifests) => RenderSettingsAsync(version, null, manifests);
 
-    private static async Task<JsonDocument> RenderSettingsAsync(string? version, string? allowHttp, params string[] manifests)
+    private static Task<JsonDocument> RenderSettingsAsync(string? version, string? allowHttp, params string[] manifests) =>
+        RenderSettingsAtAsync(ArchitectureTests.RepositoryRoot(), version, allowHttp, manifests);
+
+    private static async Task<JsonDocument> RenderSettingsAtAsync(string directory, string? version, string? allowHttp, params string[] manifests)
     {
-        var start = new ProcessStartInfo("docker") { WorkingDirectory = ArchitectureTests.RepositoryRoot(),
+        var start = new ProcessStartInfo("docker") { WorkingDirectory = directory,
             UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
         start.ArgumentList.Add("compose");
         foreach (var manifest in manifests) { start.ArgumentList.Add("-f"); start.ArgumentList.Add(manifest); }
@@ -128,8 +177,9 @@ public sealed class ComposeConfigurationTests
         start.Environment["STANZA_CONTROL_PLANE_URL"] = "https://stanza.example.invalid";
         start.Environment["STANZA_ENROLLMENT_TOKEN"] = "validation-only-token-not-an-enrollment-credential";
         start.Environment["STANZA_DOCKER_GID"] = "999";
-        // Storage is deliberately fixed; a stale caller variable must not split initializer/runtime mounts.
+        // Storage is local to the installation; a stale variable must not split initializer/runtime mounts.
         start.Environment["STANZA_AGENT_DATA_ROOT"] = "/tmp/opencode/must-not-be-used";
+        start.Environment.Remove("COMPOSE_PROJECT_NAME");
         start.Environment["STANZA_BIND_ADDRESS"] = "127.0.0.1";
         start.Environment["STANZA_HTTP_PORT"] = "8080";
         if (version is null) start.Environment.Remove("STANZA_VERSION");

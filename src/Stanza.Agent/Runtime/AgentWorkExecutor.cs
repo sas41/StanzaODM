@@ -19,7 +19,8 @@ public sealed class HostExecutionOptions
 
 /// <summary>Executes immutable, authenticated operation snapshots. Outputs are sensitive; diagnostics are codes only.</summary>
 public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptions> options,
-    IOptions<DockerRuntimeOptions> dockerOptions, IOptions<HostExecutionOptions> hostOptions) : IAgentWorkExecutor, IReportingAgentWorkExecutor
+    IOptions<DockerRuntimeOptions> dockerOptions, IOptions<HostExecutionOptions> hostOptions,
+    IAgentHostPathResolver? hostPaths = null) : IAgentWorkExecutor, IReportingAgentWorkExecutor
 {
     public event Func<Guid, string, Task>? Progress;
     private async Task ReportAsync(Guid id, string stage)
@@ -466,6 +467,17 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         }
         if (request.Operation == "deploy")
         {
+            System.Text.Json.Nodes.JsonObject? mountOverrides = null;
+            if (hostPaths is not null && AgentHostPathOverrides.NeedsResolution(config.RootElement, context.Directory, options.Value.PersistentDataRoot))
+            {
+                // Only daemon-consumed filesystem paths are mapped. Build contexts/env files remain
+                // readable at their original Agent paths, and authored Compose is never rewritten.
+                AgentHostPathMap paths;
+                try { paths = await hostPaths.ResolveAsync(options.Value.PersistentDataRoot, context.Environment, context.Token); }
+                catch (Exception error) when (error is IOException or JsonException or KeyNotFoundException or InvalidOperationException)
+                { throw new WorkFailure("agent_data_mount_unavailable"); }
+                mountOverrides = AgentHostPathOverrides.Create(config.RootElement, context.Directory, paths);
+            }
             await ReportAsync(request.Id, "Building");
             if (services.EnumerateObject().Any(s => s.Value.TryGetProperty("build", out _)))
                 await DockerAsync(context, [.. prefix, "build"]);
@@ -497,6 +509,14 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
                 var path = Path.Combine(context.Secrets, "pinned-images.json");
                 var overrides = pinned.ToDictionary(p => p.Key, p => new { image = p.Value }, StringComparer.Ordinal);
                 await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new { services = overrides }), context.Token);
+                if (OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
+                File.SetUnixFileMode(path, PrivateStorage.FileMode);
+                prefix.AddRange(["--file", path]);
+            }
+            if (mountOverrides is { Count: > 0 })
+            {
+                var path = Path.Combine(context.Secrets, "host-paths.json");
+                await File.WriteAllTextAsync(path, AgentHostPathOverrides.Serialize(mountOverrides), context.Token);
                 if (OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
                 File.SetUnixFileMode(path, PrivateStorage.FileMode);
                 prefix.AddRange(["--file", path]);
@@ -728,6 +748,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         static void Check(string workspace, string? value, string? relativeBase = null)
         {
             if (string.IsNullOrWhiteSpace(value) || value.Contains(':')) throw new WorkFailure("compose_path_outside_workspace");
+            value = AgentHostPathOverrides.RenderedPath(value);
             var path = Path.GetFullPath(value, relativeBase ?? workspace);
             if (path != workspace && !path.StartsWith(workspace + "/", StringComparison.Ordinal))
                 throw new WorkFailure("compose_path_outside_workspace");
@@ -740,7 +761,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
                 var context = build.TryGetProperty("context", out var path) ? path.GetString() : workspace;
                 Check(workspace, context);
                 if (build.TryGetProperty("dockerfile", out var dockerfile))
-                    Check(workspace, dockerfile.GetString(), Path.GetFullPath(context!, workspace));
+                    Check(workspace, dockerfile.GetString(), Path.GetFullPath(AgentHostPathOverrides.RenderedPath(context!), workspace));
                 if (build.TryGetProperty("additional_contexts", out var additional))
                     foreach (var item in additional.EnumerateObject())
                     {

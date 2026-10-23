@@ -1,16 +1,21 @@
 using System.Net.WebSockets;
+using System.Net;
+using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Hosting;
+using Microsoft.AspNetCore.RateLimiting;
 using Stanza.Agent;
 using Stanza.Agent.Enrollment;
 using Stanza.Agent.Runtime;
 using Stanza.Agent.Transport;
 using Stanza.ControlPlane.Agents;
 using Stanza.ControlPlane.Configuration;
+using Stanza.ControlPlane.Controllers;
 using Stanza.ControlPlane.Deployments;
 using Stanza.ControlPlane.Security;
 using Stanza.ControlPlane.Transport;
@@ -22,6 +27,73 @@ namespace Stanza.Tests.Transport;
 
 public sealed class AgentTransportTests
 {
+    [Fact]
+    public async Task Production_HTTP_agent_enrolls_waits_for_approval_syncs_executes_and_disconnects_on_revocation()
+    {
+        await using var fixture = await ServerFixture.CreateAsync("Production", allowInsecureHttp: true);
+        using var root = new AgentTestDirectory(); using var identity = AgentIdentity.LoadOrCreate(root.Path);
+        var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = fixture.Origin,
+            EnrollmentToken = fixture.Credential, AllowInsecureHttp = true });
+        Assert.True(new AgentOptionsValidator(fixture.Environment).Validate(null, options.Value).Succeeded);
+        using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false });
+        var enrollment = new EnrollmentClient(http, fixture.Store.Clock, options, fixture.Environment);
+        AgentEnrollmentRequest Proof() => identity.CreateEnrollmentRequest(fixture.Credential, "http-agent", fixture.Store.Clock.GetUtcNow());
+        Assert.Equal(EnrollmentStatus.Pending, await enrollment.RegisterAsync(new(fixture.Origin), Proof(), default));
+        var pending = Assert.Single(await fixture.Store.ListAsync());
+        Assert.Equal(AgentEnrollmentProtocol.Pending, pending.Status);
+        Assert.False(fixture.Broker.IsConnected(pending.Id));
+        using (var unapproved = fixture.Socket(identity))
+            await Assert.ThrowsAsync<WebSocketException>(() => unapproved.ConnectAsync(fixture.ChannelUri, default));
+        await fixture.Store.SetStatusAsync(pending.Id, AgentEnrollmentProtocol.Approved);
+        Assert.Equal(EnrollmentStatus.Approved, await enrollment.RegisterAsync(new(fixture.Origin), Proof(), default));
+        var executor = new RecordingExecutor(); var state = new AgentState();
+        var channel = new AgentCommandChannel(options, state, executor, fixture.Store.Clock, environment: fixture.Environment);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var running = channel.RunAsync(identity, timeout.Token);
+        await AgentTestWait.UntilAsync(() => state.Snapshot.Ready && fixture.Broker.ConfigurationSyncedAt(pending.Id) is not null);
+        Assert.True(File.Exists(Path.Combine(root.Path, "configuration-cache", "agent.json")));
+        var work = AgentWorkExecutorTests.Request();
+        var result = await fixture.Broker.DispatchAsync(pending.Id, work, timeout.Token);
+        Assert.True(result.Succeeded); Assert.Equal(work.Id, Assert.Single(executor.Requests).Id);
+        await fixture.Store.SetStatusAsync(pending.Id, AgentEnrollmentProtocol.Revoked);
+        // The server deliberately checks revocation every five seconds. Wait for channel exit
+        // with a deadline longer than that interval, but shorter than the test's cancellation.
+        await IgnoreConnectionCloseAsync(running.WaitAsync(TimeSpan.FromSeconds(12)));
+        Assert.False(fixture.Broker.IsConnected(pending.Id));
+        Assert.False(state.Snapshot.CanExecuteWork);
+    }
+
+    [Fact]
+    public async Task Production_HTTP_enrollment_is_refused_before_registration_when_CP_opt_in_is_off()
+    {
+        await using var fixture = await ServerFixture.CreateAsync("Production");
+        using var root = new AgentTestDirectory(); using var identity = AgentIdentity.LoadOrCreate(root.Path);
+        using var http = new HttpClient();
+        var request = identity.CreateEnrollmentRequest(fixture.Credential, "blocked-http-agent", fixture.Store.Clock.GetUtcNow());
+        using var response = await http.PostAsJsonAsync(new Uri(new Uri(fixture.Origin), AgentEnrollmentProtocol.Endpoint), request);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.DoesNotContain(fixture.Credential, await response.Content.ReadAsStringAsync());
+        Assert.Empty(await fixture.Store.ListAsync());
+    }
+
+    [Fact]
+    public async Task Agent_refuses_cleartext_without_its_own_opt_in_even_when_CP_allows_it()
+    {
+        await using var fixture = await ServerFixture.CreateAsync("Production", allowInsecureHttp: true);
+        using var root = new AgentTestDirectory(); using var identity = AgentIdentity.LoadOrCreate(root.Path);
+        var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = fixture.Origin,
+            EnrollmentToken = fixture.Credential });
+        Assert.True(new AgentOptionsValidator(fixture.Environment).Validate(null, options.Value).Failed);
+        using var http = new HttpClient();
+        var enrollment = new EnrollmentClient(http, fixture.Store.Clock, options, fixture.Environment);
+        Assert.Equal(EnrollmentStatus.Unavailable, await enrollment.RegisterAsync(new(fixture.Origin),
+            identity.CreateEnrollmentRequest(fixture.Credential, "blocked-agent", fixture.Store.Clock.GetUtcNow()), default));
+        await Assert.ThrowsAsync<IOException>(() => new AgentCommandChannel(options, new AgentState(), new RecordingExecutor(), fixture.Store.Clock)
+            .RunAsync(identity, default));
+        Assert.Empty(await fixture.Store.ListAsync());
+        Assert.Empty(fixture.Broker.ConnectedAgentIds);
+    }
+
     [Fact]
     public async Task Authenticated_channel_syncs_at_boot_on_change_and_in_full_after_reconnect_without_executing_work()
     {
@@ -257,11 +329,12 @@ public sealed class AgentTransportTests
         public EnrollmentTestStore Store { get; }
         public string Credential { get; }
         public string Origin => app.Urls.Single();
+        public IHostEnvironment Environment => app.Environment;
         public Uri ChannelUri => new(new UriBuilder(Origin) { Scheme = "ws", Path = "/api/agent-channel" }.ToString());
         public AgentCommandBroker Broker => app.Services.GetRequiredService<AgentCommandBroker>();
         private ServerFixture(WebApplication application, EnrollmentTestStore store, string credential)
         { app = application; Store = store; Credential = credential; }
-        public static async Task<ServerFixture> CreateAsync(string environment = "Development")
+        public static async Task<ServerFixture> CreateAsync(string environment = "Development", bool allowInsecureHttp = false)
         {
             var store = await EnrollmentTestStore.CreateAsync();
             var credential = (await store.IssueAsync()).Token;
@@ -272,8 +345,13 @@ public sealed class AgentTransportTests
             builder.Services.AddSingleton(store.Protection);
             builder.Services.AddScoped(_ => store.CreateContext());
             builder.Services.AddScoped<AgentAdministrationService>();
+            builder.Services.AddSingleton(new HttpTransportPolicy(allowInsecureHttp));
             AgentTransportExtensions.AddStanzaAgentTransport(builder.Services);
-            var app = builder.Build(); app.UseWebSockets(); AgentTransportExtensions.MapStanzaAgentTransport(app);
+            builder.Services.AddControllers().AddApplicationPart(typeof(AgentEnrollmentController).Assembly);
+            builder.Services.AddRateLimiter(options => options.AddFixedWindowLimiter("enrollment", limiter =>
+            { limiter.PermitLimit = 100; limiter.Window = TimeSpan.FromMinutes(1); limiter.QueueLimit = 0; }));
+            var app = builder.Build(); app.UseRouting(); app.UseRateLimiter(); app.UseWebSockets();
+            app.MapControllers(); AgentTransportExtensions.MapStanzaAgentTransport(app);
             await app.StartAsync();
             return new(app, store, credential);
         }

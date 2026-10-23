@@ -21,6 +21,8 @@ public sealed class GitIgnoreTests(IgnoreRepository repository) : IClassFixture<
     [InlineData("certificates/agent.key", true)]
     [InlineData("custom/keys/key-123.xml", true)]
     [InlineData("data/control-plane/keys/private.xml", true)]
+    [InlineData("agent_data/identity.pk8", true)]
+    [InlineData("instances/agent-one/agent_data/configuration-cache/agent.env", true)]
     [InlineData("src/Stanza.ControlPlane/data/control-plane/keys/private.xml", true)]
     [InlineData("compose.override.yaml", true)]
     [InlineData("compose.production.override.yml", true)]

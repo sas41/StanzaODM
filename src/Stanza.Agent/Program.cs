@@ -27,6 +27,7 @@ public sealed class AgentEntryPoint
             .Validate(DockerRuntimeOptions.IsValid, "Agent Docker configuration is invalid.").ValidateOnStart();
         builder.Services.AddSingleton<IProcessRunner, ProcessRunner>();
         builder.Services.AddSingleton<IContainerRuntime, DockerCliRuntime>();
+        builder.Services.AddSingleton<IAgentHostPathResolver, DockerAgentHostPathResolver>();
         builder.Services.AddSingleton<IAgentWorkExecutor, AgentWorkExecutor>();
         builder.Services.AddSingleton<IAgentCommandChannel, AgentCommandChannel>();
         builder.Services.AddSingleton<AgentTerminalManager>();

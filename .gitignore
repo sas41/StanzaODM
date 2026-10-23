@@ -39,6 +39,7 @@ docker-compose.override.yml
 docker-compose.override.yaml
 
 # Runtime state, local databases, and diagnostics
+**/agent_data/
 /data/
 /src/Stanza.ControlPlane/data/
 /src/Stanza.Agent/data/

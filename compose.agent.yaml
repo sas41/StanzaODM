@@ -7,12 +7,14 @@
 # The Agent opens only outbound management connections; no host ports are published.
 # Docker socket access is effectively privileged host access. Host actions require the separate opt-in
 # compose.agent.privileged.yaml override; the ordinary Agent remains non-root without host namespaces.
-# All Agent state uses the fixed dedicated host directory /var/lib/stanza-agent, mounted at
-# the SAME path inside the Agent so workload bind mounts resolve on the host Docker daemon.
-# Do not run multiple Agents against this directory, or delete/move an existing identity.
+# All Agent state is in ./agent_data beside this file; the internal path is fixed.
+# Use a separate installation directory and Compose project per Agent, e.g. -p agent-one.
+# Do not share an agent_data directory or identity between running Agents.
+# Workload bind paths are translated using this Agent container's Docker mount metadata.
+# Keep Docker's default container hostname so the Agent can inspect its own container ID.
+# Agents sharing a Docker daemon are NOT a security boundary and can have workload conflicts.
 # Trusted-LAN HTTP requires STANZA_ALLOW_INSECURE_HTTP=true on BOTH CP and Agent deployments.
 # WARNING: HTTP exposes enrollment credentials, deployment secrets and Docker commands to interception.
-name: stanza-agent
 services:
   initialize-agent:
     image: alpine:3.22
@@ -61,7 +63,7 @@ services:
         mkdir -p /agent-data/operation-workspaces
         chown 1654:1654 /agent-data/operation-workspaces
     volumes:
-      - /var/lib/stanza-agent:/agent-data
+      - ./agent_data:/agent-data
     restart: "no"
 
   agent:
@@ -76,7 +78,7 @@ services:
     group_add:
       - "${STANZA_DOCKER_GID:?Set STANZA_DOCKER_GID to the host Docker socket group ID}"
     volumes:
-      - /var/lib/stanza-agent:/var/lib/stanza-agent
+      - ./agent_data:/var/lib/stanza-agent
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       initialize-agent:
