@@ -294,12 +294,13 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
         var invocation = await InvocationAsync(actor, id, ct);
         var p = invocation.Plan.Parameters?.SingleOrDefault(p => p.Name == name) ?? throw new AutomationException("Input unavailable.");
         if (page is < 0 or > 199 || search?.Length > 256) throw new AutomationException("Invalid choice search.");
-        var all = await (inputs ?? throw new AutomationException("Input discovery unavailable.")).ValuesAsync(invocation.Definition.OwnerId, invocation.Plan, p, refresh, ct);
+        var choices = await (inputs ?? throw new AutomationException("Input discovery unavailable.")).ChoicesAsync(invocation.Definition.OwnerId, invocation.Plan, p, refresh, ct);
+        var all = choices.Select(x => x.Name).ToArray();
         await ValidateTriggerAsync(actor, id, null, "", ct);
         var filtered = all.Where(x => x.Contains(search ?? "", StringComparison.OrdinalIgnoreCase)).ToArray();
         var selected = invocation.Values.GetValueOrDefault(name);
         return new(filtered.Skip(page * 50).Take(50).ToArray(), search ?? "", page, filtered.Length > (page + 1) * 50, selected,
-            selected is not null && all.Contains(selected, StringComparer.Ordinal));
+            selected is not null && all.Contains(selected, StringComparer.Ordinal)) { Labels = choices.ToDictionary(x => x.Name, x => x.Label) };
     }
 
     public async Task<AutomationRun> RunScheduleAsync(Guid actor, Guid id, CancellationToken ct = default)
@@ -425,6 +426,9 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
         await using var transaction = db.Database.CurrentTransaction is null ? await db.Database.BeginTransactionAsync(ct) : null;
         await SecurityWriteGuard.LockAsync(db, ct);
         await db.Set<AutomationQueueGuard>().Where(x => x.Id == 1).ExecuteUpdateAsync(u => u.SetProperty(x => x.Revision, x => x.Revision + 1), ct);
+        var targetDeployments = plan.Steps.Where(x => x.DeploymentId.HasValue).Select(x => x.DeploymentId!.Value).Concat(deployment.HasValue ? [deployment.Value] : []).Distinct().ToArray();
+        if (state == "queued" && await db.Set<Deployments.DeploymentLock>().AnyAsync(x => targetDeployments.Contains(x.DeploymentId) && x.ExpiresAt > Now, ct))
+            throw new AutomationException("An action target deployment is locked. Wait for expiry or ask its owner or an administrator to unlock it.");
         var limits = await LimitsAsync(ct);
         if (state == "queued" && limits.MaximumQueuedRuns > 0 && await db.Set<AutomationRun>().CountAsync(x => x.State == "queued", ct) >= limits.MaximumQueuedRuns)
             throw new AutomationException("The automation queue limit has been reached.");
@@ -478,7 +482,7 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
         try { await authorization.RequireAsync(actor, permission, type, id, ct); return true; }
         catch (AutomationAccessException) { return false; }
     }
-    private async Task<bool> CanReadRun(Guid actor, AutomationRun run, CancellationToken ct) => run.ActionId is { } a
+    internal async Task<bool> CanReadRun(Guid actor, AutomationRun run, CancellationToken ct) => run.ActionId is { } a
         ? await Allowed(actor, "action.read", "action", a, ct) || await Allowed(actor, "action.execute", "action", a, ct)
         : await Allowed(actor, "automation.read", "deployment", run.DeploymentId, ct);
 

@@ -8,6 +8,7 @@ public static class PolicyFields
     public static IReadOnlyList<PolicyGroup> Groups { get; } =
     [
         new("operations", "Operations", [
+            new(nameof(OperationalPolicy.MaximumDeploymentLockHours), "Maximum deployment lock (hours)", "Longest deployment lock users may create. Default: 168 hours (7 days). 0: no configured maximum. Changing this does not shorten existing locks."),
             new(nameof(OperationalPolicy.OperationTimeoutSeconds), "Operation timeout (seconds)", "Global deadline for the whole operation on every Agent. Default: 3,600 seconds (1 hour). 0: no timeout. Cancellation cannot undo changes already made."),
             new(nameof(OperationalPolicy.MaximumParallelOperations), "Concurrent operations", "Maximum operations running across the instance. Each Agent still runs one mutating operation at a time. Default: 4. 0: unlimited."),
             new(nameof(OperationalPolicy.AllowHostActions), "Allow host actions", "Permit authorized host commands. Also requires an explicitly privileged Agent deployment; this switch cannot grant host permissions.")]),

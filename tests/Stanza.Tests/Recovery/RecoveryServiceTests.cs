@@ -24,6 +24,43 @@ public sealed class RecoveryServiceTests
     internal const string Password = "the-account-password-123";
 
     [Theory]
+    [InlineData(false)][InlineData(true)]
+    public async Task PreOperationsExperienceBackupsRestoreWithoutDroppingRowsAndAcquireNewNullableTimingColumns(bool legacyActions)
+    {
+        await using var source = await RecoveryFixture.CreateAsync();
+        var root = await source.Accounts.BootstrapAsync("root", Password); source.Protector.Protect("create-key");
+        var operation = Guid.NewGuid();
+        source.Db.Add(new Stanza.ControlPlane.Operations.OperationEntity { Id = operation, State = "Succeeded", ProtectedRequest = "old-encrypted-request", CompletedAt = 123 });
+        await source.Db.SaveChangesAsync();
+        var archive = Decode(await source.Service.BackupAsync(root.Id, Passphrase));
+        foreach (var name in new[] { "DeploymentLocks", "OutgoingDeliveries" }) archive["Tables"]!.AsArray().Remove(Table(archive, name));
+        foreach (var name in new[] { "Operations", "AutomationRuns" })
+        {
+            var table = Table(archive, name);
+            var index = table["Columns"]!.AsArray().Select((x, i) => (x, i)).Single(x => x.x!["Name"]!.GetValue<string>() == "StartedAt").i;
+            table["Columns"]!.AsArray().RemoveAt(index);
+            foreach (var row in table["Rows"]!.AsArray()) row!.AsArray().RemoveAt(index);
+        }
+        if (legacyActions)
+        {
+            var actions = Table(archive, "AutomationActions");
+            for (var i = actions["Columns"]!.AsArray().Count - 1; i >= 0; i--)
+                if (actions["Columns"]![i]!["Name"]!.GetValue<string>() is "ScopeDeploymentId" or "NormalizedName") actions["Columns"]!.AsArray().RemoveAt(i);
+        }
+        var service = typeof(RecoveryService);
+        var ordered = (List<ITable>)service.GetMethod("OrderedTables", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(source.Service, null)!;
+        ordered = ordered.Where(x => x.Name is not ("DeploymentLocks" or "OutgoingDeliveries")).ToList();
+        archive["SchemaFingerprint"] = (string)service.GetMethod("FingerprintSchema", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(source.Service, [ordered, legacyActions, true])!;
+        await using var target = await RecoveryFixture.CreateAsync(); await DatabaseUpgrader.UpgradeAsync(target.Db);
+        await target.Service.RestoreAsync(Encode(archive), Passphrase);
+        var restored = await target.Db.Set<Stanza.ControlPlane.Operations.OperationEntity>().SingleAsync();
+        Assert.Equal(operation, restored.Id); Assert.Null(restored.StartedAt); Assert.Equal("old-encrypted-request", restored.ProtectedRequest);
+        Assert.Empty(await target.Db.Set<Stanza.ControlPlane.Deployments.DeploymentLock>().ToListAsync());
+        Assert.Empty(await target.Db.Set<Stanza.ControlPlane.Automation.OutgoingDelivery>().ToListAsync());
+        Assert.NotNull(await target.Accounts.AuthenticateAsync("root", Password));
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task PreScopeBackupsRestoreThenMigrateScopesAndDuplicateNamesUsingRestoredEncryptionKeys(bool beforeOutputStorage)
@@ -49,7 +86,7 @@ public sealed class RecoveryServiceTests
         var service = typeof(RecoveryService);
         var ordered = (List<ITable>)service.GetMethod("OrderedTables", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(source.Service, null)!;
         if (beforeOutputStorage) ordered = ordered.Where(x => x.Name != "OperationOutput").ToList();
-        archive["SchemaFingerprint"] = (string)service.GetMethod("FingerprintSchema", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(source.Service, [ordered, true])!;
+        archive["SchemaFingerprint"] = (string)service.GetMethod("FingerprintSchema", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(source.Service, [ordered, true, false])!;
         await using var target = await RecoveryFixture.CreateAsync();
         await DatabaseUpgrader.UpgradeAsync(target.Db);
         await target.Service.RestoreAsync(Encode(archive), Passphrase);
@@ -59,7 +96,7 @@ public sealed class RecoveryServiceTests
         Assert.Equal(new[] { first.Id, second.Id }.Order(), saved.Select(x => x.Id).Order());
         Assert.Equal(new[] { "Deploy", "Deploy (2)" }, saved.Select(x => x.Name).Order());
         Assert.All(saved, action => { Assert.Equal(deployment, action.ScopeDeploymentId); Assert.True(action.Enabled); });
-        Assert.Equal("2", (await target.Db.Settings.AsNoTracking().SingleAsync(x => x.Key == "schema-version")).Value);
+        Assert.Equal(DatabaseUpgrader.CurrentVersion.ToString(), (await target.Db.Settings.AsNoTracking().SingleAsync(x => x.Key == "schema-version")).Value);
     }
 
     [Fact]

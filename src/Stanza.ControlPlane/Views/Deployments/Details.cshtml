@@ -8,6 +8,23 @@
 <p>Saved revision: <strong>@Model.Draft.Revision</strong> · Successfully deployed revision: <strong>@(Model.DeployedRevision?.ToString() ?? "None / unknown")</strong>
 @if (Model.DeployedRevision.HasValue && Model.DeployedRevision != Model.Draft.Revision) { <span class="notice warning">Saved changes are not deployed.</span> }</p>
 <p class="field-help">Saving configuration never changes running workloads. Validation uses Docker Compose through the durable operation queue and does not rewrite files.</p>
+@if (ViewData["DeploymentLock"] is Stanza.ControlPlane.Deployments.DeploymentLockView deploymentLock)
+{
+    <section class="panel"><h2>Deployment lock</h2>
+    @if (deploymentLock.Current is { } currentLock)
+    {
+        <p class="notice warning">Locked by <strong>@currentLock.Username</strong> until @DateTimeOffset.FromUnixTimeSeconds(currentLock.ExpiresAt).ToString("u"). @currentLock.Description</p>
+        @if (deploymentLock.CanUnlock) { <form method="post" action="/deployments/@Model.Draft.Id/unlock">@Html.AntiForgeryToken()<button>Unlock deployment</button></form> }
+    }
+    else if (deploymentLock.CanLock)
+    {
+        <form method="post" action="/deployments/@Model.Draft.Id/lock">@Html.AntiForgeryToken()
+        <label>Duration (hours, maximum @(deploymentLock.MaximumHours == 0 ? "unlimited" : deploymentLock.MaximumHours.ToString()))<input name="hours" type="number" min="1" max="@(deploymentLock.MaximumHours > 0 ? deploymentLock.MaximumHours.ToString() : null)" value="1" required /></label>
+        <label>Description (optional)<input name="description" maxlength="1000" /></label><button>Lock deployment</button></form>
+    }
+    else { <p>Not locked.</p> }
+    <p class="field-help">Locks block all new operations and action triggers, including the lock owner, cron and webhooks. Already queued work waits for expiry or unlock; work already executing is not interrupted. Draft editing remains available. Only the lock owner or an administrator can unlock early.</p></section>
+}
 <div class="workspace balanced"><div>
 @if (Model.Runtime is { } runtime)
 {

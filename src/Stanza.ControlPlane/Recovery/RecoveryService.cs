@@ -194,7 +194,7 @@ public sealed class RecoveryService(StanzaDbContext db, IConfiguration configura
         var actual = Convert.ToInt64(await count.ExecuteScalarAsync(token));
         if (actual == 0) return;
         if (table.Name == "Settings" && table.Schema is null && actual == 1 &&
-            await db.Settings.AsNoTracking().AnyAsync(x => x.Key == "schema-version" && x.Value == "2", token)) return;
+            await db.Settings.AsNoTracking().AnyAsync(x => x.Key == "schema-version" && x.Value == DatabaseUpgrader.CurrentVersion.ToString(), token)) return;
         var store = StoreObjectIdentifier.Table(table.Name, table.Schema);
         var defaults = db.GetService<IDesignTimeModel>().Model.GetEntityTypes()
             .Where(x => x.GetTableName() == table.Name && x.GetSchema() == table.Schema)
@@ -246,6 +246,7 @@ public sealed class RecoveryService(StanzaDbContext db, IConfiguration configura
 
     private void Validate(RecoveryArchive archive, List<ITable> tables)
     {
+        UpgradeOperationsArchive(archive, tables);
         var legacyTables = archive.Tables?.Any(x => x.Name == "OperationOutput") == true ? tables : tables.Where(x => x.Name != "OperationOutput").ToList();
         if (archive.Tables is not null && archive.Tables.Count == legacyTables.Count && archive.SchemaFingerprint == FingerprintSchema(legacyTables, true))
         {
@@ -324,6 +325,38 @@ public sealed class RecoveryService(StanzaDbContext db, IConfiguration configura
         Columns = table.Columns.OrderBy(x => x.Name, StringComparer.Ordinal).Select(x => new RecoveryColumn { Name = x.Name, StoreType = x.StoreType, Nullable = x.IsNullable }).ToList()
     };
 
+    private void UpgradeOperationsArchive(RecoveryArchive archive, List<ITable> tables)
+    {
+        if (archive.Tables is null) return;
+        var oldTables = tables.Where(x => x.Name is not ("DeploymentLocks" or "OutgoingDeliveries") &&
+            (x.Name != "OperationOutput" || archive.Tables.Any(s => s.Name == "OperationOutput"))).ToList();
+        if (archive.Tables.Count != oldTables.Count) return;
+        foreach (var legacyActions in new[] { false, true })
+        {
+            if (archive.SchemaFingerprint != FingerprintSchema(oldTables, legacyActions, legacyOperations: true)) continue;
+            foreach (var table in oldTables.Where(x => x.Name is "Operations" or "AutomationRuns"))
+            {
+                var saved = archive.Tables.Single(x => x.Name == table.Name && x.Schema == table.Schema);
+                var trusted = Describe(table);
+                var original = trusted.Columns.Where(x => x.Name != "StartedAt").ToArray();
+                if (saved.Columns is null || saved.Rows is null || saved.Columns.Count != original.Length ||
+                    !saved.Columns.Zip(original).All(x => x.First is not null && x.First.Name == x.Second.Name && x.First.StoreType == x.Second.StoreType && x.First.Nullable == x.Second.Nullable))
+                    throw new RecoveryOperationException("Invalid legacy operation schema.");
+                var names = saved.Columns.Select(x => x.Name).ToArray();
+                saved.Rows = saved.Rows.Select(row =>
+                {
+                    if (row is null || row.Length != names.Length) throw new RecoveryOperationException("Invalid legacy operation row.");
+                    return trusted.Columns.Select(x => x.Name == "StartedAt" ? RecoveryCell.From(DBNull.Value) : row[Array.IndexOf(names, x.Name)]).ToArray();
+                }).ToList();
+                saved.Columns = trusted.Columns;
+            }
+            foreach (var table in tables.Where(x => x.Name is "DeploymentLocks" or "OutgoingDeliveries")) archive.Tables.Add(Describe(table));
+            var upgradedTables = tables.Where(x => x.Name != "OperationOutput" || archive.Tables.Any(s => s.Name == "OperationOutput")).ToList();
+            archive.SchemaFingerprint = FingerprintSchema(upgradedTables, legacyActions);
+            return;
+        }
+    }
+
     private void UpgradeActionArchive(RecoveryArchive archive, List<ITable> tables)
     {
         var candidates = archive.Tables.Where(x => x.Name == "AutomationActions").ToArray();
@@ -365,14 +398,15 @@ public sealed class RecoveryService(StanzaDbContext db, IConfiguration configura
     }
 
     private string Fingerprint(List<ITable> tables) => FingerprintSchema(tables, false);
-    private string FingerprintSchema(List<ITable> tables, bool legacyActions)
+    private string FingerprintSchema(List<ITable> tables, bool legacyActions, bool legacyOperations = false)
     {
         // Canonical relational structure, including constraints, not a version string chosen
         // by an archive author. Provider store types deliberately prevent cross-provider imports.
         var fullModel = db.GetService<IDesignTimeModel>().Model.GetRelationalModel();
         var schema = tables.Select(table => fullModel.FindTable(table.Name, table.Schema)!).Select(t => new
         {
-            t.Name, t.Schema, Columns = Describe(t).Columns.Where(c => !legacyActions || t.Name != "AutomationActions" || c.Name is not ("ScopeDeploymentId" or "NormalizedName")).ToArray(),
+            t.Name, t.Schema, Columns = Describe(t).Columns.Where(c => (!legacyActions || t.Name != "AutomationActions" || c.Name is not ("ScopeDeploymentId" or "NormalizedName")) &&
+                (!legacyOperations || t.Name is not ("Operations" or "AutomationRuns") || c.Name != "StartedAt")).ToArray(),
             Keys = t.UniqueConstraints.OrderBy(x => x.Name, StringComparer.Ordinal).Select(x => new { x.Name, Columns = x.Columns.Select(c => c.Name).ToArray() }).ToArray(),
             ForeignKeys = t.ForeignKeyConstraints.OrderBy(x => x.Name, StringComparer.Ordinal).Select(x => new { x.Name, Columns = x.Columns.Select(c => c.Name).ToArray(), Principal = x.PrincipalTable.Name, x.PrincipalTable.Schema, PrincipalColumns = x.PrincipalColumns.Select(c => c.Name).ToArray(), x.OnDeleteAction }).ToArray(),
             Indexes = t.Indexes.Where(x => !legacyActions || t.Name != "AutomationActions" || x.Name is not ("UX_Action_GlobalName" or "UX_Action_ScopedName")).OrderBy(x => x.Name, StringComparer.Ordinal).Select(x => new { x.Name, x.IsUnique, Columns = x.Columns.Select(c => c.Name).ToArray() }).ToArray(),

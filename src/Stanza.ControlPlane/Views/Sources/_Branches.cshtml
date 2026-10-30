@@ -8,8 +8,8 @@ else if (Model.Page is { } page)
     @if (page.SelectedMissing) { <p role="alert">The saved reference “@(page.Selected)” was not returned by the remote. It may have been deleted, be an exact commit, or fall outside the bounded listing. Choose an existing reference or verify the commit before executing.</p> }
     <label>Remote branches and tags
         <select data-branch-choice aria-label="Remote branches and tags">
-            <option value="@(page.Selected)" selected>@(page.Selected) (saved@(page.SelectedMissing ? "; not in listing" : ""))</option>
-            @foreach (var reference in page.References.Where(x => x != page.Selected)) { <option value="@reference">@reference</option> }
+            @if (!page.References.Contains(page.Selected)) { <option value="@(page.Selected)" selected>@(page.Details.GetValueOrDefault(page.Selected)?.Label ?? page.Selected) (saved@(page.SelectedMissing ? "; not in listing" : ""))</option> }
+            @foreach (var reference in page.References) { <option value="@reference" selected="@(reference == page.Selected)">@(page.Details.GetValueOrDefault(reference)?.Label ?? reference)@(reference == page.Selected ? " (saved)" : "")</option> }
         </select>
     </label>
     @if (page.References.Count == 0) { <p>No remote references match this search. The saved selection is preserved.</p> }

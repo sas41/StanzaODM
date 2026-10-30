@@ -187,16 +187,16 @@ public sealed class AutomationHttpTests
         Assert.Contains("denied", denied.Headers.Location?.ToString());
     }
 
-    private static async Task Login(HttpClient client, string username)
+    internal static async Task Login(HttpClient client, string username)
     {
         var csrf = await Token(client, "/account/login");
         Assert.Equal(HttpStatusCode.Redirect, (await client.PostAsync("/account/login", Form(("__RequestVerificationToken", csrf), ("Username", username), ("Password", "a-secure-password-123")))).StatusCode);
     }
-    private static async Task<string> Token(HttpClient client, string path)
+    internal static async Task<string> Token(HttpClient client, string path)
     {
         var html = await client.GetStringAsync(path);
         var match = Regex.Match(html, "name=\"__RequestVerificationToken\"[^>]*value=\"([^\"]+)\""); Assert.True(match.Success, html);
         return WebUtility.HtmlDecode(match.Groups[1].Value);
     }
-    private static FormUrlEncodedContent Form(params (string Key, string Value)[] values) => new(values.Select(x => new KeyValuePair<string, string>(x.Key, x.Value)));
+    internal static FormUrlEncodedContent Form(params (string Key, string Value)[] values) => new(values.Select(x => new KeyValuePair<string, string>(x.Key, x.Value)));
 }

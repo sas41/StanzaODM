@@ -17,7 +17,9 @@
 @if (Model.Run.ReconciledBy is { } reconciler) { <p>Externally reconciled by @reconciler. No automatic replay occurred.</p> }
 <p><a href="/automation/runs/@Model.Run.Id">Refresh</a> · <a href="/automation">Back</a></p>
 </div>
-<section class="panel" data-action-output="@Model.Run.Id"><h2>Live execution feed</h2>
+<section class="panel" data-action-output="@Model.Run.Id" data-initial-state="@Model.Run.State"><h2>Live execution feed</h2>
+<label class="check-field"><input type="checkbox" data-completion-sound checked /> Completion sound (this browser)</label>
+<button type="button" data-test-sound>Enable / test sound</button><span data-sound-status class="field-help">Browsers may require a click here before allowing sound. Keep this page open.</span>
 <p data-feed-status>Connecting to live step output. Output access is checked separately from permission to run an action.</p>
 <label class="check-field"><input type="checkbox" data-feed-follow checked /> Follow output</label>
 <div data-feed-operations></div></section>

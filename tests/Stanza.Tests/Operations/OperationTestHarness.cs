@@ -53,6 +53,7 @@ internal sealed class OperationTestHarness : IAsyncDisposable
         registrations.AddMemoryCache(); registrations.AddScoped<ActionInputService>(); registrations.AddScoped<DeploymentActionOverview>();
         registrations.AddScoped<ISourceSnapshotProvider>(services => services.GetRequiredService<SourceService>());
         registrations.AddScoped<OperationService>();
+        registrations.AddScoped<OperationsOverviewService>(); registrations.AddScoped<DeploymentLockService>();
         registrations.AddScoped<OperationOutputStore>();
         harness.Services = registrations.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true, ValidateScopes = true });
         await harness.InScope(async services =>

@@ -28,6 +28,7 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
                 await db.Set<OperationEntity>().Where(x => (x.State == "Running" || x.State == "CancellationRequested") && x.LeaseUntil < now)
                     .ExecuteUpdateAsync(update => update.SetProperty(x => x.State, "Unknown").SetProperty(x => x.Code, "worker_interrupted").SetProperty(x => x.CompletedAt, now), stoppingToken);
                 var queue = db.Set<OperationEntity>().AsNoTracking().Where(x => x.State == "Queued");
+                queue = queue.Where(x => x.DeploymentId == null || !db.Set<Deployments.DeploymentLock>().Any(l => l.DeploymentId == x.DeploymentId && l.ExpiresAt > now));
                 if (dispatcher is IAgentConnectionCatalog catalog) { var connected = catalog.ConnectedAgentIds; queue = queue.Where(x => connected.Contains(x.AgentId)); }
                 var candidates = await queue
                     .OrderBy(x => x.CreatedAt).Take(100).ToListAsync(stoppingToken);
@@ -64,11 +65,13 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
         await SecurityWriteGuard.LockAsync(db, ct);
         var row = await db.Set<OperationEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id && x.State == "Queued", ct);
         if (row is null) return false;
+        if (row.DeploymentId is { } lockedDeployment && await Deployments.DeploymentLockService.IsLockedAsync(db, lockedDeployment, clock.GetUtcNow().ToUnixTimeSeconds(), ct)) return false;
         if (await db.Set<OperationEntity>().AnyAsync(x => x.AgentId == row.AgentId && (x.State == "Running" || x.State == "CancellationRequested"), ct)) return false;
         if (row.DeploymentId is { } deployment && await db.Set<OperationEntity>().AnyAsync(x => x.DeploymentId == deployment && (x.State == "Running" || x.State == "CancellationRequested"), ct)) return false;
         if (row.DeploymentId is { } uncertainDeployment && row.Kind is not ("status" or "logs") && await db.Set<OperationEntity>().AnyAsync(x => x.DeploymentId == uncertainDeployment && x.State == "Unknown", ct)) return false;
         var changed = await db.Set<OperationEntity>().Where(x => x.Id == id && x.State == "Queued").ExecuteUpdateAsync(update => update
             .SetProperty(x => x.State, "Running").SetProperty(x => x.WorkerId, workerId)
+                .SetProperty(x => x.StartedAt, clock.GetUtcNow().ToUnixTimeSeconds())
                 .SetProperty(x => x.LeaseUntil, clock.GetUtcNow().AddSeconds(60).ToUnixTimeSeconds()), ct);
         await transaction.CommitAsync(ct);
         return changed == 1;

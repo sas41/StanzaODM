@@ -17,5 +17,8 @@ public sealed record GitSourceInput(string Url, string Reference, string Destina
 public sealed record DeploymentSourceSummary(Guid DeploymentId, string Name, Guid? TargetAgentId,
     IReadOnlyList<GitSourceSummary> Git, IReadOnlyList<Guid> RegistryCredentialIds, bool CanManage);
 public sealed record BranchPage(IReadOnlyList<string> References, string Selected, bool SelectedMissing,
-    int Page, bool HasMore, string Search);
+    int Page, bool HasMore, string Search)
+{
+    public IReadOnlyDictionary<string, Stanza.Core.Contracts.GitReference> Details { get; init; } = new Dictionary<string, Stanza.Core.Contracts.GitReference>();
+}
 public sealed record SourceAgentSummary(Guid Id, string Name);

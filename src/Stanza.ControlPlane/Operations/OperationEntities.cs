@@ -21,6 +21,7 @@ public sealed class OperationEntity
     public Guid? ParentAppliedOperationId { get; set; }
     public string? Code { get; set; }
     public long CreatedAt { get; set; }
+    public long? StartedAt { get; set; }
     public long? CompletedAt { get; set; }
     public long LeaseUntil { get; set; }
     public Guid? WorkerId { get; set; }

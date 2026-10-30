@@ -35,6 +35,7 @@ public sealed class ControlPlaneEntryPoint
         builder.Services.AddScoped<InstanceSettingsService>();
         builder.Services.AddScoped<AgentAdministrationService>();
         builder.Services.AddScoped<DeploymentDraftService>();
+        builder.Services.AddScoped<DeploymentLockService>();
         builder.Services.AddScoped<OperationalPolicyService>();
         builder.Services.AddScoped<AgentPolicyService>();
         builder.Services.AddSingleton<InstanceMaintenance>();
@@ -42,6 +43,8 @@ public sealed class ControlPlaneEntryPoint
         builder.Services.AddStanzaRecovery();
         builder.Services.AddScoped<IImageDigestProbe, AgentImageDigestProbe>();
         builder.Services.AddStanzaAutomation();
+        builder.Services.AddScoped<OutgoingWebhookService>();
+        builder.Services.AddHostedService<OutgoingWebhookWorker>();
         builder.Services.AddStanzaPortability();
         builder.Services.AddStanzaTerminals();
         builder.Services.AddStanzaAgentTerminalBridge();
@@ -54,6 +57,7 @@ public sealed class ControlPlaneEntryPoint
         builder.Services.AddScoped<IDeploymentWorkspaceReservations>(provider => provider.GetRequiredService<DeploymentEditorAdapters>());
         builder.Services.AddScoped<IDeploymentRevisionStatusProvider>(provider => provider.GetRequiredService<DeploymentEditorAdapters>());
         builder.Services.AddScoped<OperationService>();
+        builder.Services.AddScoped<OperationsOverviewService>();
         builder.Services.AddScoped<OperationOutputStore>();
         builder.Services.AddScoped<ActionRunOutputFeed>();
         builder.Services.AddScoped<DeploymentRuntimeStatusService>();

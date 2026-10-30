@@ -16,6 +16,7 @@ public sealed record OperationalPolicy
     [Range(0, int.MaxValue)] public int EnrollmentRequestsPerMinute { get; set; } = 120;
     [Range(0, 604800)] public int OperationTimeoutSeconds { get; set; } = 3600;
     [Range(0, int.MaxValue)] public int MaximumParallelOperations { get; set; } = 4;
+    [Range(0, int.MaxValue)] public int MaximumDeploymentLockHours { get; set; } = 168;
     [Range(0, int.MaxValue)] public int MaximumTextBytes { get; set; } = 4 * 1024 * 1024;
     [Range(0, int.MaxValue)] public int MaximumUploadBytes { get; set; } = 16 * 1024 * 1024;
     [Range(0, int.MaxValue)] public int MaximumWorkspaceBytes { get; set; } = 64 * 1024 * 1024;

@@ -78,8 +78,9 @@ public sealed class AutomationScheduler(StanzaDbContext db, AutomationService au
             .ExecuteUpdateAsync(u => u.SetProperty(x => x.NextRunAt, next).SetProperty(x => x.Revision, x => x.Revision + 1), ct) != 1) return;
         await db.Set<AutomationQueueGuard>().Where(x => x.Id == 1).ExecuteUpdateAsync(u => u.SetProperty(x => x.Revision, x => x.Revision + 1), ct);
         var overlap = await db.Set<AutomationRun>().AnyAsync(x => x.DefinitionId == policy.Id && (x.State == "running" || x.State == "queued"), ct);
+        var locked = await Deployments.DeploymentLockService.IsLockedAsync(db, policy.DeploymentId, automation.Now, ct);
         await automation.QueueAsync(policy.OwnerId, policy.DeploymentId, null, policy.Id, "image-policy", $"image:{policy.Id:N}:{policy.NextRunAt}",
-            "image-check", state: overlap ? "skipped" : "queued", code: overlap ? "overlap" : "", ct: ct);
+            "image-check", state: locked || overlap ? "skipped" : "queued", code: locked ? "deployment-locked" : overlap ? "overlap" : "", ct: ct);
         await transaction.CommitAsync(ct);
     }
 

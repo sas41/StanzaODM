@@ -37,14 +37,22 @@ public sealed record AgentWorkRequest(Guid Id, Guid DeploymentId, string Operati
     AgentExecution? Execution = null, IReadOnlyList<AgentGitSource>? Sources = null,
     IReadOnlyList<AgentRegistryCredential>? Registries = null, AgentRuntimePolicy? Policy = null,
     IReadOnlyDictionary<string, string>? ImageOverrides = null, string? ImageRepository = null,
-    IReadOnlyDictionary<string, string>? SourceOverrides = null)
+    IReadOnlyDictionary<string, string>? SourceOverrides = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)] bool IncludeGitMetadata = false)
 {
     public override string ToString() => $"AgentWorkRequest {{ Id = {Id}, DeploymentId = {DeploymentId}, Operation = {Operation}, Contents = [REDACTED] }}";
 }
 public sealed record AgentWorkResponse(Guid Id, bool Succeeded, string Code, string? Output = null,
-    IReadOnlyDictionary<string, string>? ResolvedSources = null, IReadOnlyDictionary<string, string>? ResolvedImages = null)
+    IReadOnlyDictionary<string, string>? ResolvedSources = null, IReadOnlyDictionary<string, string>? ResolvedImages = null,
+    IReadOnlyList<GitReference>? GitReferences = null)
 {
     public override string ToString() => $"AgentWorkResponse {{ Id = {Id}, Succeeded = {Succeeded}, Code = {Code}, Output = [REDACTED] }}";
+}
+public sealed record GitReference(string Name, string? Commit = null, long? CommittedAt = null, string? Author = null)
+{
+    public string Label => Name + (Commit is null ? "" : " · " + Commit[..Math.Min(8, Commit.Length)]) +
+        (CommittedAt is { } date ? " · " + DateTimeOffset.FromUnixTimeSeconds(date).ToString("u") : "") +
+        (string.IsNullOrEmpty(Author) ? "" : " · " + Author);
 }
 public sealed record AgentWireMessage(string Type, Guid Id, AgentWorkRequest? Request = null,
     AgentWorkResponse? Response = null, string? Data = null,

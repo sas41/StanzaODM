@@ -1,0 +1,10 @@
+@model Stanza.ControlPlane.Automation.OutgoingEditor
+<form method="post" action="/settings/notifications">@Html.AntiForgeryToken()
+<input name="Id" value="@Model.Id" type="hidden" /><input name="Revision" value="@Model.Revision" type="hidden" />
+<label>Name<input name="Name" value="@Model.Name" maxlength="100" required /></label>
+<label>Provider<select name="Provider">@foreach (var provider in Stanza.ControlPlane.Automation.OutgoingTemplates.Defaults.Keys) { <option value="@provider" selected="@(provider == Model.Provider)">@provider</option> }</select></label>
+<label>HTTPS endpoint (blank keeps existing)<input type="password" name="Url" maxlength="4096" autocomplete="new-password" /></label>
+<label>JSON payload template (blank uses the selected provider's default)<textarea name="Template" rows="6" maxlength="16384" spellcheck="false">@Model.Template</textarea></label>
+@foreach (var item in new[] { ("Enabled", Model.Enabled), ("Started", Model.Started), ("Succeeded", Model.Succeeded), ("Failed", Model.Failed) })
+{ <label class="check-field"><input name="@item.Item1" type="checkbox" value="true" checked="@item.Item2" />@item.Item1</label><input name="@item.Item1" type="hidden" value="false" /> }
+<button>Save channel</button></form>

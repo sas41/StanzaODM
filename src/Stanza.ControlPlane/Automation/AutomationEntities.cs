@@ -111,6 +111,7 @@ public sealed class AutomationRun
     public string State { get; set; } = "queued";
     public string Code { get; set; } = "";
     public long CreatedAt { get; set; }
+    public long? StartedAt { get; set; }
     public long? CompletedAt { get; set; }
     public long LeaseUntil { get; set; }
     public Guid? LeaseOwner { get; set; }

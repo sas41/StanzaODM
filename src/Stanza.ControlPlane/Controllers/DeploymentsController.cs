@@ -17,7 +17,7 @@ namespace Stanza.ControlPlane.Controllers;
 [DisableRequestSizeLimit]
 [RequestFormLimits(ValueLengthLimit = int.MaxValue, MultipartBodyLengthLimit = long.MaxValue)]
 public sealed class DeploymentsController(DeploymentDraftService drafts, IOperationService? operations = null,
-    DeploymentRuntimeStatusService? runtimeStatus = null, Automation.AutomationService? automation = null, SourceService? sources = null) : Controller
+    DeploymentRuntimeStatusService? runtimeStatus = null, Automation.AutomationService? automation = null, SourceService? sources = null, DeploymentLockService? locks = null) : Controller
 {
     private Guid ActorId => Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : Guid.Empty;
 
@@ -63,11 +63,32 @@ public sealed class DeploymentsController(DeploymentDraftService drafts, IOperat
         try
         {
             var view = await drafts.ReadAsync(ActorId, id, revision, ct);
+            if (locks is not null) ViewData["DeploymentLock"] = await locks.ReadAsync(ActorId, id, ct);
             if (runtimeStatus is not null) view = view with { Runtime = await runtimeStatus.ReadAsync(ActorId, id, ct) };
             return View(view);
         }
         catch (DeploymentDraftAccessException) { return Forbid(); }
         catch (DeploymentDraftException error) { TempData["Error"] = error.Message; return RedirectToAction(nameof(Index)); }
+    }
+
+    [HttpPost("{id:guid}/lock"), ValidateAntiForgeryToken]
+    public async Task<IActionResult> Lock(Guid id, int hours, string? description, CancellationToken ct)
+    {
+        if (locks is null) return NotFound();
+        try { await locks.LockAsync(ActorId, id, hours, description, ct); }
+        catch (DeploymentDraftAccessException) { return Forbid(); }
+        catch (DeploymentDraftException e) { TempData["Error"] = e.Message; }
+        return RedirectToAction(nameof(Details), new { id });
+    }
+
+    [HttpPost("{id:guid}/unlock"), ValidateAntiForgeryToken]
+    public async Task<IActionResult> Unlock(Guid id, CancellationToken ct)
+    {
+        if (locks is null) return NotFound();
+        try { await locks.UnlockAsync(ActorId, id, ct); }
+        catch (DeploymentDraftAccessException) { return Forbid(); }
+        catch (DeploymentDraftException e) { TempData["Error"] = e.Message; }
+        return RedirectToAction(nameof(Details), new { id });
     }
 
     [HttpGet("{id:guid}/edit")]

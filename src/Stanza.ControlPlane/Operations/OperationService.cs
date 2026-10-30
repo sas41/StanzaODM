@@ -60,6 +60,8 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         if (submission.DeploymentId is { } deploymentId)
         {
             await AuthorizeAsync(submission.ActorId, deploymentId, submission.Kind, token);
+            if (await DeploymentLockService.IsLockedAsync(db, deploymentId, clock.GetUtcNow().ToUnixTimeSeconds(), token))
+                throw new OperationException("This deployment is locked. Wait for expiry or ask its owner or an administrator to unlock it.");
             var snapshot = await drafts.SnapshotForExecutionAsync(submission.ActorId, deploymentId, ct: token);
             var runtime = await db.Set<DeploymentRuntimeEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.DeploymentId == deploymentId, token);
             revision = ControlsExistingContainers(submission.Kind) ? runtime?.Revision ?? 0 : snapshot.Revision;
@@ -140,9 +142,20 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
     {
         var query = db.Set<OperationEntity>().AsNoTracking();
         if (deploymentId.HasValue) query = query.Where(x => x.DeploymentId == deploymentId);
-        var rows = await query.OrderByDescending(x => x.CreatedAt).Take(500).ToListAsync(ct);
+        // Never truncate active work behind a history limit or before authorization filtering.
+        var rows = await query.OrderByDescending(x => x.CreatedAt).ThenBy(x => x.Id).Select(x => new OperationEntity {
+            Id = x.Id, ActorId = x.ActorId, AgentId = x.AgentId, DeploymentId = x.DeploymentId, Kind = x.Kind,
+            State = x.State, Trigger = x.Trigger, Code = x.Code, CreatedAt = x.CreatedAt, StartedAt = x.StartedAt, CompletedAt = x.CompletedAt
+        }).ToListAsync(ct);
         var result = new List<OperationSummary>();
-        foreach (var row in rows) if (await CanReadAsync(actor, row, ct)) result.Add(Summary(row));
+        var history = 0;
+        foreach (var row in rows)
+        {
+            if (Terminal(row.State) && history >= 500) continue;
+            if (!await CanReadAsync(actor, row, ct)) continue;
+            result.Add(Summary(row));
+            if (Terminal(row.State)) history++;
+        }
         return result;
     }
     public async Task<OperationDetail> DetailAsync(Guid actor, Guid id, CancellationToken ct = default)
@@ -239,7 +252,7 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
     }
     internal AgentWorkRequest Request(OperationEntity row) => JsonSerializer.Deserialize<AgentWorkRequest>(Protector(row.Id).Unprotect(row.ProtectedRequest)) ?? throw new OperationException("Invalid operation snapshot.");
     internal string ProtectResponse(Guid id, AgentWorkResponse response) => Protector(id).Protect(JsonSerializer.Serialize(response));
-    internal static OperationSummary Summary(OperationEntity row) => new(row.Id, row.ActorId, row.DeploymentId, row.AgentId, row.Kind, row.State, row.Trigger, row.CreatedAt, row.CompletedAt, row.Code);
+    internal static OperationSummary Summary(OperationEntity row) => new(row.Id, row.ActorId, row.DeploymentId, row.AgentId, row.Kind, row.State, row.Trigger, row.CreatedAt, row.CompletedAt, row.Code) { StartedAt = row.StartedAt };
     private IDataProtector Protector(Guid id) => protection.CreateProtector("Stanza.Operation.v1", id.ToString("N"));
     private Task<OperationEntity> RequiredAsync(Guid id, CancellationToken ct) => RequiredCoreAsync(id, ct);
     private async Task<OperationEntity> RequiredCoreAsync(Guid id, CancellationToken ct) => await db.Set<OperationEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct) ?? throw new OperationException("Operation not found.");

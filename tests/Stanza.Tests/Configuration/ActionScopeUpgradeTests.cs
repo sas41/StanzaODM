@@ -38,7 +38,7 @@ public sealed class ActionScopeUpgradeTests
         Assert.False(saved[5].Enabled); Assert.True(saved[0].Enabled);
         Assert.All(saved, x => Assert.Equal(encrypted[x.Id], x.ProtectedSteps));
         Assert.Equal(records[1].Id, (await db.Set<AutomationSchedule>().SingleAsync()).ActionId);
-        Assert.Equal("2", (await db.Settings.SingleAsync(x => x.Key == "schema-version")).Value);
+        Assert.Equal(DatabaseUpgrader.CurrentVersion.ToString(), (await db.Settings.SingleAsync(x => x.Key == "schema-version")).Value);
     }
 
     [Fact]

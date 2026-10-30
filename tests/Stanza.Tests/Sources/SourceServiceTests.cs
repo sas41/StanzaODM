@@ -212,6 +212,18 @@ public sealed class SourceServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Branch_browser_sorts_by_commit_date_includes_metadata_and_searches_only_names()
+    {
+        var source = await Source(null); dispatcher.Response = "[\"main\",\"feature/latest\"]";
+        dispatcher.Metadata = [new("main", new('a', 40), 100, "Alice"), new("feature/latest", new('b', 40), 200, "Bob")];
+        var page = await service.BranchesAsync(root, deployment, source.Id);
+        Assert.Equal(new[] { "feature/latest", "main" }, page.References); Assert.Contains("bbbbbbbb", page.Details["feature/latest"].Label);
+        Assert.Contains("Bob", page.Details["feature/latest"].Label); Assert.True(dispatcher.Last!.IncludeGitMetadata);
+        Assert.Empty((await service.BranchesAsync(root, deployment, source.Id, "Bob")).References);
+        Assert.Equal(new[] { "feature/latest" }, (await service.BranchesAsync(root, deployment, source.Id, "latest")).References);
+    }
+
+    [Fact]
     public async Task Branch_checks_require_agent_read_approved_target_and_current_credential_use()
     {
         var git = await GitCredential(); var source = await Source(git.Id);
@@ -278,6 +290,7 @@ public sealed class SourceServiceTests : IAsyncLifetime
         public AgentWorkRequest? Last { get; private set; }
         public Guid Agent { get; private set; }
         public string Response { get; set; } = "[\"refs/heads/main\"]";
+        public IReadOnlyList<GitReference>? Metadata { get; set; }
         public bool Succeeded { get; set; } = true;
         public bool Offline { get; set; }
         public bool IsConnected(Guid id) => !Offline;
@@ -285,7 +298,7 @@ public sealed class SourceServiceTests : IAsyncLifetime
         {
             if (Offline) throw new AgentUnavailableException();
             Agent = id; Last = request;
-            return Task.FromResult(new AgentWorkResponse(request.Id, Succeeded, Succeeded ? "ok" : "failed", Response));
+            return Task.FromResult(new AgentWorkResponse(request.Id, Succeeded, Succeeded ? "ok" : "failed", Response, GitReferences: Metadata));
         }
     }
 }

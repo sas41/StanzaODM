@@ -175,6 +175,24 @@ public sealed class AgentWorkExecutorTests
     }
 
     [Fact]
+    public async Task MetadataDiscoveryUsesShallowTipFetchWithoutCheckoutAndReturnsStructuredSortedReferences()
+    {
+        using var directory = new AgentTestDirectory();
+        var runner = new FakeRunner { Result = r => new(0, r.Arguments.Contains("for-each-ref")
+            ? $"refs/heads/main\t{new string('a', 40)}\t100\tAlice\nrefs/heads/recent\t{new string('b', 40)}\t200\tBob\n"
+            : r.Arguments.Contains("ls-remote") ? $"{new string('a', 40)}\trefs/heads/main\n{new string('b', 40)}\trefs/heads/recent\n" : "", "", false, false) };
+        var request = Request("git-action-branches") with { IncludeGitMetadata = true, Sources = [new("https://git.example/repo", "main", "source", "alice", "secret-password")] };
+        var result = await Executor(directory.Path, runner).ExecuteAsync(request);
+        Assert.True(result.Succeeded, result.Code);
+        Assert.Equal(["recent", "main"], JsonSerializer.Deserialize<string[]>(result.Output!)!);
+        Assert.Equal(2, result.GitReferences!.Count); Assert.Equal("Bob", result.GitReferences[0].Author);
+        Assert.Contains(runner.Requests, r => r.Arguments.Contains("--bare"));
+        Assert.Contains(runner.Requests, r => r.Arguments.Contains("--depth=1") && r.Arguments.Contains("+refs/heads/*:refs/heads/*"));
+        Assert.DoesNotContain(runner.Requests, r => r.Arguments.Contains("checkout"));
+        Assert.All(runner.Requests, r => Assert.DoesNotContain("secret-password", string.Join(' ', r.Arguments)));
+    }
+
+    [Fact]
     public async Task GitChecksOutPinnedCommitAndReturnsResolvedIdentity()
     {
         using var directory = new AgentTestDirectory(); var commit = new string('a', 40);

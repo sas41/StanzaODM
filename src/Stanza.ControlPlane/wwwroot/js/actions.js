@@ -36,13 +36,13 @@
                     if (!append) select.replaceChildren(new Option("Select…", ""));
                     for (const value of data.values) {
                         if (typeof value !== "string") continue;
-                        const option = new Option(value, value);
+                        const option = new Option(data.labels?.[value] || value, value);
                         option.selected = value === choice.dataset.selected;
                         select.add(option);
                     }
                     if (!append && !search.value && data.selectedAvailable && data.selected === choice.dataset.selected &&
                         !Array.from(select.options).some(o => o.value === data.selected)) {
-                        const option = new Option(data.selected, data.selected); option.selected = true; select.add(option);
+                        const option = new Option(data.labels?.[data.selected] || data.selected, data.selected); option.selected = true; select.add(option);
                     }
                     more.hidden = !data.hasMore;
                     message.textContent = data.values.length === 0 ? "No matching values." : "";

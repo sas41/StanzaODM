@@ -6,10 +6,10 @@ using Stanza.ControlPlane.Operations;
 namespace Stanza.ControlPlane.Controllers;
 
 [Authorize, Route("operations"), ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
-public sealed class OperationsController(OperationService operations) : Controller
+public sealed class OperationsController(OperationService operations, OperationsOverviewService overview) : Controller
 {
     private Guid Actor => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-    [HttpGet("")] public async Task<IActionResult> Index(Guid? deploymentId, CancellationToken ct) => View(await operations.ListAsync(Actor, deploymentId, ct));
+    [HttpGet("")] public async Task<IActionResult> Index(Guid? deploymentId, CancellationToken ct) => View(await overview.ListAsync(Actor, deploymentId, ct));
     [HttpGet("{id:guid}")] public async Task<IActionResult> Details(Guid id, CancellationToken ct)
     {
         try { return View(await operations.DetailAsync(Actor, id, ct)); } catch (OperationException) { return Forbid(); }

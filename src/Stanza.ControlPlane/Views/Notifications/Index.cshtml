@@ -1,0 +1,19 @@
+@model Stanza.ControlPlane.Automation.OutgoingPage
+@using Stanza.ControlPlane.Automation
+@{ ViewData["Title"] = "Outgoing webhook channels"; }
+<h1>Outgoing webhook channels</h1><p><a href="/settings">Back to settings</a></p>
+<p>Instance-wide action notifications, managed by administrators. No action parameters, credentials or command output are sent. Endpoints are encrypted and never displayed. Blank URL on edit keeps the existing endpoint.</p>
+<p>Discord, Teams and Slack use their webhook URLs. Telegram uses an HTTPS Bot API endpoint (for example https://api.telegram.org/botTOKEN/sendMessage) or a compatible gateway; replace chat_id in the template. Signal requires an HTTPS gateway compatible with the example payload. Provider gateway formats may require template adjustments.</p>
+<p>Templates are JSON. Tokens inside string values: {message}, {action}, {deployment}, {event}, {state}, {source}, {run}. Values are safely JSON-escaped. Messages are sent at least once with up to five attempts; a crash after acceptance may cause a duplicate. Failed includes cancelled, denied, skipped and uncertain outcomes. Channels apply to runs created after the channel was added. Disabling/deleting a channel stops pending sends.</p>
+<details><summary>Default provider templates (copy and customize)</summary>@foreach (var template in OutgoingTemplates.Defaults) { <h3>@template.Key</h3><pre>@template.Value</pre> }</details>
+@foreach (var channel in Model.Configuration.Channels)
+{
+    <section class="panel"><h2>@channel.Name · @channel.Provider</h2>
+    <partial name="_Editor" model="@(new OutgoingEditor(channel.Id, Model.Configuration.Revision, channel.Name, channel.Provider, null, channel.Template, channel.Enabled, channel.Started, channel.Succeeded, channel.Failed))" />
+    <form method="post" action="/settings/notifications/@channel.Id/delete">@Html.AntiForgeryToken()<input name="revision" value="@Model.Configuration.Revision" type="hidden" /><button class="danger">Delete channel</button></form></section>
+}
+<section class="panel"><h2>Add channel</h2><partial name="_Editor" model="@(new OutgoingEditor(Revision: Model.Configuration.Revision))" /></section>
+<section class="panel"><h2>Recent deliveries</h2><table><thead><tr><th>Channel</th><th>Run</th><th>Event</th><th>State</th><th>Attempts</th><th>Result</th></tr></thead><tbody>
+@foreach (var delivery in Model.Deliveries)
+{ <tr><td>@(Model.Configuration.Channels.FirstOrDefault(x => x.Id == delivery.ChannelId)?.Name ?? "Deleted channel")</td><td><a href="/automation/runs/@delivery.RunId">@delivery.RunId</a></td><td>@delivery.Event</td><td>@delivery.State</td><td>@delivery.Attempts</td><td>@delivery.Result</td></tr> }
+</tbody></table><a href="/settings/notifications">Refresh delivery status</a></section>

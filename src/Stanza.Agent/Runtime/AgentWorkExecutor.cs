@@ -134,7 +134,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             Directory.Delete(secretDirectory, true);
             secretDirectory = null;
             var result = new AgentWorkResponse(request.Id, true, "succeeded", output, resolvedSources,
-                resolvedImages.Count == 0 ? null : resolvedImages);
+                resolvedImages.Count == 0 ? null : resolvedImages, context.GitReferences.Count == 0 ? null : context.GitReferences);
             await WriteLedgerAsync(ledgerPath, new(hash, result), true, CancellationToken.None);
             return result;
         }
@@ -241,7 +241,10 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     private static extern int Close(int handle);
 
     private sealed record WorkContext(AgentWorkRequest Request, AgentRuntimePolicy Policy, string Directory,
-        string Secrets, Dictionary<string, string> Environment, Dictionary<string, string> ResolvedImages, CancellationToken Token);
+        string Secrets, Dictionary<string, string> Environment, Dictionary<string, string> ResolvedImages, CancellationToken Token)
+    {
+        public List<GitReference> GitReferences { get; } = [];
+    }
 
     public static string SnapshotPath(string root, string relative)
     {
@@ -478,6 +481,22 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         return arguments;
     }
 
+    public static IReadOnlyList<GitReference> ParseGitReferences(string listing)
+    {
+        var result = new List<GitReference>();
+        foreach (var line in listing.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = line.TrimEnd('\r').Split('\t', 4);
+            if (parts.Length != 4 || parts[1].Length != 40 || !parts[1].All(Uri.IsHexDigit)) throw new ArgumentException("Invalid Git reference metadata.");
+            var name = parts[0].StartsWith("refs/heads/", StringComparison.Ordinal) ? parts[0][11..] : parts[0];
+            if (!Core.Automation.ActionInputRules.IsBranch(name)) throw new ArgumentException("Invalid Git reference name.");
+            long? date = long.TryParse(parts[2], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var seconds) && seconds is >= -62135596800 and <= 253402300799 ? seconds : null;
+            result.Add(new(name, parts[1], date, new string(parts[3].Where(c => !char.IsControl(c)).Take(256).ToArray())));
+        }
+        if (result.Count > 10000) throw new ArgumentException("Git reference limit exceeded.");
+        return result.OrderByDescending(x => x.CommittedAt).ThenBy(x => x.Name, StringComparer.Ordinal).ToArray();
+    }
+
     private async Task<string?> RunOperationAsync(WorkContext context)
     {
         var request = context.Request;
@@ -509,6 +528,19 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
                 .Where(parts => parts.Length == 2 && (parts[1].StartsWith("refs/heads/", StringComparison.Ordinal) || parts[1].StartsWith("refs/tags/", StringComparison.Ordinal)))
                 .Select(parts => (parts[1].StartsWith("refs/heads/", StringComparison.Ordinal) ? parts[1][11..] : parts[1]).TrimEnd('\r')).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Take(10001).ToArray();
             if (branches.Length > 10000) throw new WorkFailure("git_reference_limit");
+            if (request.IncludeGitMetadata && branches.Length > 0)
+            {
+                // ls-remote exposes hashes but not commit dates/authors. Fetch only branch tips,
+                // without checkout or repository hooks, into the operation's private scratch area.
+                var repository = PrivateStorage.EnsureDirectory(Path.Combine(context.Secrets, "references"));
+                await GitAsync(context, source, repository, ["init", "--bare", "--quiet"]);
+                var refspecs = request.Operation == "git-action-branches" ? new[] { "+refs/heads/*:refs/heads/*" }
+                    : new[] { "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*" };
+                await GitAsync(context, source, repository, ["fetch", "--quiet", "--depth=1", "--filter=blob:none", "--no-tags", "--", source.Url, .. refspecs]);
+                var listing = await GitAsync(context, source, repository, ["for-each-ref", "--count=10001", "--sort=-committerdate", "--format=%(refname)%09%(objectname)%09%(committerdate:unix)%09%(authorname)", "refs/heads/", "refs/tags/"]);
+                context.GitReferences.AddRange(ParseGitReferences(listing));
+                return JsonSerializer.Serialize(context.GitReferences.Select(x => x.Name));
+            }
             return JsonSerializer.Serialize(branches);
         }
         if (request.Operation == "registry-check")

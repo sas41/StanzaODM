@@ -88,7 +88,8 @@ public sealed class DeploymentActionIntegrationTests
         var commit = new string('a', 40); var digest = "sha256:" + new string('b', 64);
         h.Dispatcher.Handler = (_, request, _) => Task.FromResult(request.Operation switch
         {
-            "git-action-branches" => new(request.Id, true, "ok", JsonSerializer.Serialize(new[] { "main", "feature/qa" })),
+            "git-action-branches" => new(request.Id, true, "ok", JsonSerializer.Serialize(new[] { "main", "feature/qa" }),
+                GitReferences: [new("main", new('c', 40), 100, "Alice"), new("feature/qa", new('d', 40), 200, "Bob")]),
             "registry-tags" => new(request.Id, true, "ok", JsonSerializer.Serialize(Enumerable.Range(0, 75).Select(i => "v" + i).ToArray())),
             "resolve-action-inputs" => new AgentWorkResponse(request.Id, true, "ok", ResolvedSources: new Dictionary<string, string> { ["sources/app"] = commit },
                 ResolvedImages: new Dictionary<string, string> { ["app"] = digest }),
@@ -102,6 +103,10 @@ public sealed class DeploymentActionIntegrationTests
         {
             var service = s.GetRequiredService<AutomationService>();
             var page = await service.ChoicesAsync(h.User, action.Id, "version", "", 0, false, default);
+            var branches = await service.ChoicesAsync(h.User, action.Id, "branch", "", 0, false, default);
+            Assert.Equal(["feature/qa", "main"], branches.Values); Assert.Contains("dddddddd", branches.Labels["feature/qa"]);
+            Assert.Empty((await service.ChoicesAsync(h.User, action.Id, "branch", "Bob", 0, false, default)).Values); // search remains name-only
+            Assert.Equal(new[] { "main" }, (await service.ChoicesAsync(h.User, action.Id, "branch", "mai", 0, false, default)).Values);
             Assert.Equal(50, page.Values.Count); Assert.True(page.HasMore);
             Assert.Equal(25, (await service.ChoicesAsync(h.User, action.Id, "version", "", 1, false, default)).Values.Count);
             Assert.Single((await service.ChoicesAsync(h.User, action.Id, "version", "v74", 0, false, default)).Values);

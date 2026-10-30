@@ -243,12 +243,13 @@ public sealed class SourceService(StanzaDbContext db, AccessService access, IDat
             SourceValidation.Url(row.Url); SourceValidation.Reference(row.Reference);
             var secret = row.CredentialId.HasValue ? Secret(await GitCredential(actorId, row.CredentialId.Value, row.Url, ct)) : null;
             var response = await Dispatch(draft.TargetAgentId.Value, new(Guid.NewGuid(), deploymentId, "git-branches", [], [],
-                Sources: [new(row.Url, row.Reference, row.Destination, secret?.Username, secret?.Password)]), ct);
-            return (row.Reference, References(response));
+                Sources: [new(row.Url, row.Reference, row.Destination, secret?.Username, secret?.Password)], IncludeGitMetadata: true), ct);
+            return (row.Reference, Details: GitReferenceListing.Read(response));
         }, ct);
-        var filtered = result.Item2.Where(x => x.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
+        var filtered = result.Details.Where(x => x.Name.Contains(query, StringComparison.OrdinalIgnoreCase)).Select(x => x.Name).ToArray();
         return new(filtered.Skip(page * 50).Take(50).ToArray(), result.Reference,
-            !IsSelectedPresent(result.Item2, result.Reference), page, filtered.Length > (page + 1) * 50, query);
+            !IsSelectedPresent(result.Details.Select(x => x.Name).ToArray(), result.Reference), page, filtered.Length > (page + 1) * 50, query)
+            { Details = result.Details.ToDictionary(x => x.Name) };
     }
 
     public Task TestCredentialAsync(Guid actorId, Guid id, Guid targetAgentId, CancellationToken ct = default) =>
@@ -278,18 +279,6 @@ public sealed class SourceService(StanzaDbContext db, AccessService access, IDat
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new SourceException("The Agent connection check timed out. Retry or check the endpoint."); }
     }
 
-    private static string[] References(AgentWorkResponse response)
-    {
-        if (response.Output is null || response.Output.Length > 1024 * 1024) throw new SourceException("The Agent returned an invalid or oversized reference listing.");
-        try
-        {
-            var refs = JsonSerializer.Deserialize<string[]>(response.Output) ?? [];
-            if (refs.Length > 10000) throw new SourceException("The remote has too many references; use an explicit branch/tag/commit.");
-            foreach (var reference in refs) SourceValidation.Reference(reference);
-            return refs.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
-        }
-        catch (JsonException) { throw new SourceException("The Agent returned an invalid reference listing."); }
-    }
     private static bool IsSelectedPresent(string[] refs, string current) =>
         refs.Contains(current, StringComparer.Ordinal) || refs.Contains("refs/heads/" + current, StringComparer.Ordinal) ||
         refs.Contains("refs/tags/" + current, StringComparer.Ordinal);

@@ -12,7 +12,9 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
 
     public async Task<bool> ExecuteNextAsync(CancellationToken ct = default)
     {
-        var candidates = await db.Set<AutomationRun>().AsNoTracking().Where(x => x.State == "queued").OrderBy(x => x.CreatedAt).Take(100).ToListAsync(ct);
+        var candidates = await db.Set<AutomationRun>().AsNoTracking().Where(x => x.State == "queued" &&
+            (x.DeploymentId == null || !db.Set<Deployments.DeploymentLock>().Any(l => l.DeploymentId == x.DeploymentId && l.ExpiresAt > automation.Now)))
+            .OrderBy(x => x.CreatedAt).ThenBy(x => x.Id).ToListAsync(ct);
         foreach (var run in candidates)
         {
             if (!await ClaimAsync(run, ct)) continue;
@@ -24,8 +26,12 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
     public async Task<bool> ClaimAsync(AutomationRun run, CancellationToken ct = default)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await Security.SecurityWriteGuard.LockAsync(db, ct);
+        var targets = run.Operation == "image-check" ? new[] { run.DeploymentId ?? Guid.Empty } : automation.Unprotect<ActionPlan>(run.ProtectedPlan).Steps.Where(x => x.DeploymentId.HasValue).Select(x => x.DeploymentId!.Value).ToArray();
+        if (await db.Set<Deployments.DeploymentLock>().AnyAsync(x => targets.Contains(x.DeploymentId) && x.ExpiresAt > automation.Now, ct)) return false;
         if (await db.Set<AutomationRun>().Where(x => x.Id == run.Id && x.State == "queued")
             .ExecuteUpdateAsync(u => u.SetProperty(x => x.State, "running").SetProperty(x => x.LeaseOwner, workerId)
+                .SetProperty(x => x.StartedAt, automation.Now)
                 .SetProperty(x => x.LeaseUntil, automation.Now + 120), ct) != 1) return false;
         if (run.ActionId is { } actionId)
         {

@@ -80,7 +80,7 @@ public sealed class UiBrowserTests
         var routes = new[] { "/", "/agents", "/deployments", "/deployments/create", $"/deployments/{deployment}", $"/deployments/{deployment}/edit", $"/deployments/{deployment}/file",
             "/sources", $"/sources/{deployment}", $"/sources/{deployment}/edit", "/credentials", "/credentials/create", "/automation", "/automation/actions/edit",
             $"/automation/actions/edit?id={action}", $"/automation/actions/{action}/access", $"/automation/runs/{run}", "/automation/schedules/edit", "/automation/webhooks/edit", "/automation/images/edit", "/automation/limits",
-            "/operations", $"/operations/{operation}", "/settings", $"/agents/{agent}/policy", $"/agents/{agent}/environment", "/users", "/users/create", $"/users/{qa}/access", "/groups", "/audit", "/portability", "/recovery", "/account/password" };
+            "/operations", $"/operations/{operation}", "/settings", "/settings/notifications", $"/agents/{agent}/policy", $"/agents/{agent}/environment", "/users", "/users/create", $"/users/{qa}/access", "/groups", "/audit", "/portability", "/recovery", "/account/password" };
         foreach (var size in new[] { (1920, 1080), (1366, 768), (390, 844) })
         {
             await browser.ResizeAsync(size.Item1, size.Item2);

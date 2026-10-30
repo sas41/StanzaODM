@@ -1,4 +1,12 @@
-@model IReadOnlyList<Stanza.ControlPlane.Operations.OperationSummary>
+@model IReadOnlyList<Stanza.ControlPlane.Operations.OperationsRow>
 @{ ViewData["Title"] = "Operations"; }
 <h1>Operations</h1><p class="muted">Durable operations capture an immutable configuration revision. Uncertain outcomes are never automatically retried.</p>
-<section class="panel table-panel"><table><thead><tr><th>Operation</th><th>State</th><th>Trigger</th><th>Created</th></tr></thead><tbody>@foreach (var item in Model) { <tr><td><a href="/operations/@item.Id">@item.Kind</a></td><td>@item.State · @item.Code</td><td>@item.Trigger</td><td>@DateTimeOffset.FromUnixTimeSeconds(item.CreatedAt).ToString("u")</td></tr> }</tbody></table></section>
+<p>All authorized queued/running work and the most recent 500 completed operations. Action run rows include work waiting before an operation exists; step operations are listed separately. Duration excludes queue time; older records without a start timestamp show “—”. <a href="">Refresh</a></p>
+<section class="panel table-panel"><table><thead><tr><th>Operation</th><th>Action Name</th><th>Agent</th><th>Deployment</th><th>Trigger source</th><th>State</th><th>Created</th><th>Started</th><th>Completed</th><th>Duration</th></tr></thead><tbody>
+@foreach (var item in Model)
+{
+    <tr><td><a href="@item.Url">@item.Kind</a></td><td>@if (item.ActionRunId is { } actionRun && item.ActionName != "—") { <a href="/automation/runs/@actionRun">@item.ActionName</a> } else { @item.ActionName }</td><td>@item.Agent</td><td>@item.Deployment</td><td>@item.Trigger</td><td>@item.State · @item.Code</td>
+    <td>@DateTimeOffset.FromUnixTimeSeconds(item.CreatedAt).ToString("u")</td><td>@(item.StartedAt is { } start ? DateTimeOffset.FromUnixTimeSeconds(start).ToString("u") : "—")</td>
+    <td>@(item.CompletedAt is { } end ? DateTimeOffset.FromUnixTimeSeconds(end).ToString("u") : "—")</td><td>@item.Duration(DateTimeOffset.UtcNow.ToUnixTimeSeconds())</td></tr>
+}
+</tbody></table></section>
