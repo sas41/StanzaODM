@@ -19,8 +19,10 @@ public sealed class AgentChannelProtocolException() : IOException("Incompatible 
 public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentState state,
     IAgentWorkExecutor executor, TimeProvider clock, AgentTerminalManager? terminals = null,
     IContainerRuntime? runtime = null, IOptions<DockerRuntimeOptions>? dockerOptions = null,
-    IOptions<HostExecutionOptions>? hostOptions = null, IHostEnvironment? environment = null) : IAgentCommandChannel
+    IOptions<HostExecutionOptions>? hostOptions = null, IHostEnvironment? environment = null,
+    AgentJobStore? jobs = null) : IAgentCommandChannel
 {
+    private readonly AgentJobStore jobStore = jobs ?? new(options, executor, clock);
     // Wire JSON is never embedded in HTML. Avoid expanding '+' in bounded base64 terminal payloads.
     private static readonly JsonSerializerOptions TerminalJson = new(JsonSerializerDefaults.Web)
     { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
@@ -38,10 +40,12 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
         using var send = new SemaphoreSlim(1, 1);
         Task? work = null;
+        var attachedOperations = new HashSet<Guid>();
         var outputAcknowledgements = new ConcurrentDictionary<(Guid Id, long Sequence), TaskCompletionSource>();
         var terminalManager = terminals ?? new AgentTerminalManager();
         // Per-connection state: an interrupted replication always starts again with a full snapshot.
         var configuration = new AgentConfigurationCache(options);
+        var disconnectReason = "remote_close";
         async Task SendAsync(AgentWireMessage message)
         {
             var bytes = JsonSerializer.SerializeToUtf8Bytes(message, message.Type.StartsWith("terminal.", StringComparison.Ordinal) ? TerminalJson : JsonSerializerOptions.Web);
@@ -58,30 +62,41 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
             }
             finally { send.Release(); }
         }
-        async Task ExecuteAsync(AgentWorkRequest request)
+        async Task ReplayAsync(Guid id, long after)
         {
-            async Task Report(Guid id, string stage) => await SendAsync(new("work.progress", id, Data: stage));
-            async Task Output(Guid id, AgentOutputChunk chunk)
+            string? phase = null;
+            while (!lifetime.IsCancellationRequested)
             {
-                var acknowledgement = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                var key = (id, chunk.Sequence);
-                if (!outputAcknowledgements.TryAdd(key, acknowledgement)) throw new IOException("Duplicate output sequence.");
-                try
+                var snapshot = await jobStore.InspectAsync(id);
+                if (!snapshot.Found) { await SendAsync(new("work.response", id, Response: new(id, false, "job_not_found"))); return; }
+                if (after > snapshot.LastSequence) throw new IOException("Requested replay cursor exceeds durable Agent output.");
+                if (phase != snapshot.Phase && snapshot.Phase != "Accepted")
+                { phase = snapshot.Phase; await SendAsync(new("work.progress", id, Data: phase)); }
+                var chunks = await jobStore.ReadOutputAsync(id, after);
+                foreach (var chunk in chunks)
                 {
-                    await SendAsync(new("work.output", id, Output: chunk));
-                    await acknowledgement.Task.WaitAsync(TimeSpan.FromSeconds(30), lifetime.Token);
+                    var acknowledgement = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var key = (id, chunk.Sequence);
+                    if (!outputAcknowledgements.TryAdd(key, acknowledgement)) throw new IOException("Duplicate output sequence.");
+                    try
+                    {
+                        await SendAsync(new("work.output", id, Output: chunk));
+                        await acknowledgement.Task.WaitAsync(TimeSpan.FromSeconds(30), lifetime.Token);
+                        await jobStore.AcknowledgeAsync(id, chunk.Sequence);
+                        after = chunk.Sequence;
+                    }
+                    finally { outputAcknowledgements.TryRemove(key, out _); }
                 }
-                finally { outputAcknowledgements.TryRemove(key, out _); }
+                if (!snapshot.Active && after >= snapshot.LastSequence)
+                { await SendAsync(new("work.response", id, Response: snapshot.Response ?? new(id, false, "uncertain"))); return; }
+                if (chunks.Count == 0) await Task.Delay(TimeSpan.FromMilliseconds(50), lifetime.Token);
             }
-            var reporter = executor as IReportingAgentWorkExecutor;
-            if (reporter is not null) { reporter.Progress += Report; reporter.Output += Output; }
+        }
+        async Task PumpAsync(Guid id, long after)
+        {
             try
-            {
-                var response = await executor.ExecuteAsync(request, lifetime.Token);
-                await SendAsync(new("work.response", response.Id, Response: response));
-            }
-            catch (Exception) { lifetime.Cancel(); socket.Abort(); }
-            finally { if (reporter is not null) { reporter.Progress -= Report; reporter.Output -= Output; } }
+            { await ReplayAsync(id, after); }
+            catch (Exception error) { disconnectReason = "output_transport_" + Describe(error); lifetime.Cancel(); socket.Abort(); }
         }
         try
         {
@@ -139,15 +154,40 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
                 }
                 else if (message.Type == "work.request" && message.Request is { } request && request.Id == message.Id)
                 {
+                    attachedOperations.Add(request.Id);
                     // No unbounded buffering and no concurrent mutating commands on this Agent.
                     if (work is { IsCompleted: false })
                         await SendAsync(new("work.response", request.Id, Response: new(request.Id, false, "agent_busy")));
-                    else work = ExecuteAsync(request);
+                    else
+                    {
+                        var rejected = await jobStore.StartAsync(request);
+                        if (rejected is not null) await SendAsync(new("work.response", request.Id, Response: rejected));
+                        else work = PumpAsync(request.Id, 0);
+                    }
                 }
+                else if (message.Type == "work.attach" && long.TryParse(message.Data, out var after) && after >= 0)
+                {
+                    attachedOperations.Add(message.Id);
+                    if (work is { IsCompleted: false }) await SendAsync(new("work.response", message.Id, Response: new(message.Id, false, "agent_busy")));
+                    else work = PumpAsync(message.Id, after);
+                }
+                else if (message.Type == "work.inspect")
+                {
+                    var inspection = await jobStore.InspectAsync(message.Id);
+                    await SendAsync(new("work.inspection", message.Id, Job: inspection with { Response = inspection.Response is { } result ? result with { Output = null } : null }));
+                }
+                else if (message.Type == "work.cancel" && message.Data is "user" or "deadline" or "authorization_revoked")
+                    await jobStore.CancelAsync(message.Id, message.Data);
+                else if (message.Type == "work.revoke") await jobStore.CancelAllAsync("authorization_revoked");
                 else if (message.Type is "terminal.open" or "terminal.input" or "terminal.resize" or "terminal.close")
                     await terminalManager.HandleAsync(message, SendAsync, lifetime.Token);
                 else if (message.Type != "pong") throw new IOException("Unsupported Agent channel message.");
             }
+        }
+        catch (Exception error)
+        {
+            if (disconnectReason == "remote_close") disconnectReason = Describe(error);
+            throw;
         }
         finally
         {
@@ -156,8 +196,14 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
             socket.Abort();
             await terminalManager.CloseAllAsync();
             if (work is not null) await work;
+            if (token.IsCancellationRequested) await jobStore.CancelAllAsync("shutdown");
+            await jobStore.RecordDisconnectAsync(token.IsCancellationRequested ? "shutdown" : disconnectReason, (int?)socket.CloseStatus, attachedOperations);
         }
     }
+
+    private static string Describe(Exception error) => error is WebSocketException webSocket
+        ? $"WebSocketException:{webSocket.WebSocketErrorCode}" + (webSocket.InnerException is System.Net.Sockets.SocketException socket ? $":{socket.SocketErrorCode}" : "")
+        : error.GetType().Name;
 
     public static async Task<AgentWireMessage?> ReceiveAsync(WebSocket socket, CancellationToken token)
     {

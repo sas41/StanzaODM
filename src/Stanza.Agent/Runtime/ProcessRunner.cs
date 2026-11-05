@@ -17,8 +17,12 @@ public sealed record ProcessResult(int ExitCode, string StandardOutput, string S
 
 public interface IProcessRunner
 {
+    // Completion, including cancellation/failure, must follow local child cleanup. A cleanup
+    // failure is explicitly distinguished so callers cannot infer stopped-process evidence.
     Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default);
 }
+
+public sealed class ProcessTerminationException() : IOException("The runtime process could not be terminated within its cleanup limit.");
 
 public sealed class ProcessRunner(TimeProvider timeProvider) : IProcessRunner
 {
@@ -118,7 +122,7 @@ public sealed class ProcessRunner(TimeProvider timeProvider) : IProcessRunner
             timedOut = timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested;
             Kill();
             try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5)); }
-            catch (TimeoutException) { throw new IOException("The runtime process could not be terminated within its cleanup limit."); }
+            catch (TimeoutException) { throw new ProcessTerminationException(); }
             try { await drains; }
             catch (OperationCanceledException) when (linked.IsCancellationRequested) { }
             try { await input; }
@@ -128,6 +132,10 @@ public sealed class ProcessRunner(TimeProvider timeProvider) : IProcessRunner
         finally
         {
             Kill();
+            // A returned/failed invocation must not leave a local child alive. Daemon-side apply
+            // remains uncertain and is handled separately by phase-aware recovery.
+            try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (TimeoutException) { throw new ProcessTerminationException(); }
             if (!drains.IsCompleted) await linked.CancelAsync();
             try { await drains; } catch (Exception) when (linked.IsCancellationRequested) { }
         }

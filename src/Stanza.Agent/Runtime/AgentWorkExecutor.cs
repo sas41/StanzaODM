@@ -25,6 +25,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     public event Func<Guid, string, Task>? Progress;
     public event Func<Guid, AgentOutputChunk, Task>? Output;
     private long outputSequence;
+    private bool applyStarted;
     private readonly SemaphoreSlim outputGate = new(1, 1);
     private async Task EmitAsync(Guid id, string stream, string text)
     {
@@ -45,9 +46,10 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     }
     private async Task ReportAsync(Guid id, string stage)
     {
+        if (stage == "Applying") applyStarted = true;
         if (Progress is not { } progress) return;
         foreach (Func<Guid, string, Task> handler in progress.GetInvocationList())
-            try { await handler(id, stage); } catch (Exception) { /* Diagnostics never change the result of workload execution. */ }
+            await handler(id, stage);
     }
     private readonly SemaphoreSlim execution = new(1, 1);
     private sealed record Ledger(string Hash, AgentWorkResponse? Response);
@@ -58,6 +60,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     {
         await execution.WaitAsync(token);
         outputSequence = 0;
+        applyStarted = false;
         string? secretDirectory = null;
         string? ledgerPath = null;
         string? hash = null;
@@ -134,7 +137,8 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             Directory.Delete(secretDirectory, true);
             secretDirectory = null;
             var result = new AgentWorkResponse(request.Id, true, "succeeded", output, resolvedSources,
-                resolvedImages.Count == 0 ? null : resolvedImages, context.GitReferences.Count == 0 ? null : context.GitReferences);
+                resolvedImages.Count == 0 ? null : resolvedImages, context.GitReferences.Count == 0 ? null : context.GitReferences,
+                ExecutionStopped: true, ApplyStarted: applyStarted);
             await WriteLedgerAsync(ledgerPath, new(hash, result), true, CancellationToken.None);
             return result;
         }
@@ -151,12 +155,16 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             var code = resultProduced ? "uncertain" : ex switch
             {
                 WorkFailure failure => failure.Code,
+                ProcessTerminationException => "uncertain",
+                OperationCanceledException when request.Operation == "deploy" && !applyStarted => "interrupted_before_apply",
                 OperationCanceledException => "uncertain",
                 ArgumentException => "invalid_snapshot",
                 JsonException or KeyNotFoundException or InvalidOperationException => "invalid_runtime_response",
                 _ => "runtime_unavailable"
             };
-            var result = new AgentWorkResponse(request.Id, false, code, ResolvedSources: resolvedSources);
+            var result = new AgentWorkResponse(request.Id, false, code, ResolvedSources: resolvedSources,
+                ExecutionStopped: ex is not ProcessTerminationException,
+                CancellationReason: operationTimeout.IsCancellationRequested ? "deadline" : null, ApplyStarted: applyStarted);
             // A cancelled or interrupted process is ambiguous. The started ledger remains and will never rerun it.
             if (started && ledgerPath is not null && hash is not null && code != "uncertain")
             {
@@ -225,7 +233,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         finally { File.Delete(temporary); }
     }
 
-    private static void FlushDirectory(string directory)
+    internal static void FlushDirectory(string directory)
     {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Durable execution requires Linux storage.");
         var handle = Open(directory, 0x10000); // O_RDONLY | O_DIRECTORY
@@ -500,7 +508,11 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     private async Task<string?> RunOperationAsync(WorkContext context)
     {
         var request = context.Request;
-        if (ControlsExisting(request.Operation)) return await ExistingContainersAsync(context);
+        if (ControlsExisting(request.Operation))
+        {
+            if (request.Operation is not ("status" or "logs")) await ReportAsync(request.Id, "Applying");
+            return await ExistingContainersAsync(context);
+        }
         if (request.Operation == "resolve-action-inputs")
         {
             foreach (var item in request.ImageOverrides ?? new Dictionary<string, string>())
@@ -550,6 +562,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             await RegistryCheckAsync(context, request.Registries[0]);
             return null;
         }
+        if (request.Operation is "host-exec" or "container-exec") await ReportAsync(request.Id, "Applying");
         if (request.Operation == "host-exec") return await HostExecAsync(context);
         if (request.Operation == "container-exec") return await ContainerExecAsync(context);
         var prefix = ComposeArguments(context);
@@ -687,6 +700,8 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             "logs" => ["logs", "--no-color", "--timestamps", "--tail", "200"],
             _ => throw new WorkFailure("unsupported_operation")
         };
+        if (request.Operation == "build") await ReportAsync(request.Id, "Building");
+        if (request.Operation == "pull") await ReportAsync(request.Id, "Pulling");
         var result = await DockerAsync(context, [.. prefix, .. operation]);
         return request.Operation is "logs" or "status" ? result : null;
     }

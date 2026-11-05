@@ -99,7 +99,7 @@ public static class AgentTransportExtensions
     }
 }
 
-public sealed class AgentCommandBroker : IAgentCommandDispatcher, IAgentWorkProgressSource, IAgentWorkOutputSource, IAgentConnectionCatalog
+public sealed class AgentCommandBroker(IServiceScopeFactory? scopes = null) : IAgentCommandDispatcher, IAgentJobDispatcher, IAgentWorkProgressSource, IAgentWorkOutputSource, IAgentConnectionCatalog
 {
     public event Func<Guid, AgentOutputChunk, Task>? Output;
     private async Task OutputAsync(Guid id, AgentOutputChunk chunk)
@@ -116,6 +116,7 @@ public sealed class AgentCommandBroker : IAgentCommandDispatcher, IAgentWorkProg
     private readonly ConcurrentDictionary<Guid, AgentCommandSession> sessions = new();
     public IReadOnlyList<Guid> ConnectedAgentIds => sessions.Where(pair => pair.Value.Connected).Select(pair => pair.Key).ToArray();
     public bool IsConnected(Guid agentId) => sessions.TryGetValue(agentId, out var session) && session.Connected;
+    public void Disconnect(Guid agentId) { if (sessions.TryGetValue(agentId, out var session)) session.Dispose(); }
     public AgentCapabilities? Capabilities(Guid agentId) => sessions.TryGetValue(agentId, out var session) && session.Connected ? session.Capabilities : null;
     public DateTimeOffset? ConfigurationSyncedAt(Guid agentId) => sessions.TryGetValue(agentId, out var session) && session.Connected ? session.ConfigurationSyncedAt : null;
     public bool ConfigurationPending(Guid agentId) => sessions.TryGetValue(agentId, out var session) && session.Connected && session.ConfigurationPending;
@@ -125,7 +126,19 @@ public sealed class AgentCommandBroker : IAgentCommandDispatcher, IAgentWorkProg
             ? session.OpenTerminalAsync(deploymentId, execution, policy, token) : throw new AgentUnavailableException();
     public AgentCommandSession? Reserve(Guid agentId)
     {
-        var session = new AgentCommandSession(ReportAsync, OutputAsync);
+        var session = new AgentCommandSession(ReportAsync, OutputAsync, async id =>
+        {
+            if (scopes is null) return 0;
+            await using var scope = scopes.CreateAsyncScope();
+            return await new Operations.OperationOutputStore(scope.ServiceProvider.GetRequiredService<StanzaDbContext>(),
+                scope.ServiceProvider.GetRequiredService<Microsoft.AspNetCore.DataProtection.IDataProtectionProvider>()).LastSequenceAsync(id);
+        }, async diagnostic =>
+        {
+            if (scopes is null) return;
+            await using var scope = scopes.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<StanzaDbContext>();
+            diagnostic.AgentId = agentId; db.Add(diagnostic); await db.SaveChangesAsync();
+        });
         return sessions.TryAdd(agentId, session) ? session : null;
     }
     public void Release(Guid agentId, AgentCommandSession session)
@@ -133,9 +146,36 @@ public sealed class AgentCommandBroker : IAgentCommandDispatcher, IAgentWorkProg
         sessions.TryRemove(new KeyValuePair<Guid, AgentCommandSession>(agentId, session));
         session.Dispose();
     }
-    public Task<AgentWorkResponse> DispatchAsync(Guid agentId, AgentWorkRequest request, CancellationToken token = default) =>
+    public Task<AgentJobInspection> InspectAsync(Guid agentId, Guid operationId, CancellationToken token = default) =>
         sessions.TryGetValue(agentId, out var session) && session.Connected
-            ? session.DispatchAsync(request, token) : throw new AgentUnavailableException();
+            ? session.InspectAsync(operationId, token) : throw new AgentUnavailableException();
+    public Task CancelAsync(Guid agentId, Guid operationId, string reason, CancellationToken token = default) =>
+        sessions.TryGetValue(agentId, out var session) && session.Connected
+            ? session.CancelAsync(operationId, reason, token) : Task.CompletedTask;
+    public Task<AgentWorkResponse> AttachAsync(Guid agentId, Guid operationId, CancellationToken token = default) =>
+        ExchangeAsync(agentId, operationId, null, token);
+    public Task<AgentWorkResponse> DispatchAsync(Guid agentId, AgentWorkRequest request, CancellationToken token = default) =>
+        ExchangeAsync(agentId, request.Id, request, token);
+    private async Task<AgentWorkResponse> ExchangeAsync(Guid agentId, Guid id, AgentWorkRequest? request, CancellationToken token)
+    {
+        if (!IsConnected(agentId)) throw new AgentUnavailableException();
+        var first = true;
+        try
+        {
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                if (!sessions.TryGetValue(agentId, out var session) || !session.Connected)
+                { await Task.Delay(250, token); continue; }
+                var response = await session.ExchangeAsync(id, first ? request : null, token);
+                first = false;
+                if (response.Code != "uncertain" || session.Connected || session.FailureReason is "authorization_revoked" or "protocol_error") return response;
+                // Only attach by ID after a possibly delivered request. Never resend executable work.
+                await Task.Delay(250, token);
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { return new(id, false, "uncertain"); }
+    }
 }
 
 public sealed class AgentCommandSession : IDisposable
@@ -144,8 +184,16 @@ public sealed class AgentCommandSession : IDisposable
     private readonly ConcurrentDictionary<Guid, int> progressCount = new();
     private readonly Func<Guid, AgentOutputChunk, Task>? output;
     private readonly ConcurrentDictionary<Guid, long> outputSequences = new();
-    public AgentCommandSession(Func<Guid, string, Task>? report = null, Func<Guid, AgentOutputChunk, Task>? output = null)
-    { this.report = report; this.output = output; }
+    private readonly Func<Guid, Task<long>>? cursor;
+    private readonly Func<Operations.AgentDisconnectEntity, Task>? diagnostic;
+    private readonly ConcurrentDictionary<Guid, TaskCompletionSource<AgentJobInspection>> inspections = new();
+    private readonly ConcurrentDictionary<Guid, string> phases = new();
+    private readonly ConcurrentDictionary<Guid, long> evidenceSequences = new();
+    private long lastHeartbeat;
+    public string? FailureReason { get; private set; }
+    public AgentCommandSession(Func<Guid, string, Task>? report = null, Func<Guid, AgentOutputChunk, Task>? output = null,
+        Func<Guid, Task<long>>? cursor = null, Func<Operations.AgentDisconnectEntity, Task>? diagnostic = null)
+    { this.report = report; this.output = output; this.cursor = cursor; this.diagnostic = diagnostic; }
     // Wire JSON is never embedded in HTML; base64 must not inflate beyond its declared frame bound.
     private static readonly JsonSerializerOptions TerminalJson = new(JsonSerializerDefaults.Web)
     { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
@@ -192,32 +240,47 @@ public sealed class AgentCommandSession : IDisposable
         catch { await session.CloseAsync(CancellationToken.None); throw; }
     }
 
-    public async Task<AgentWorkResponse> DispatchAsync(AgentWorkRequest request, CancellationToken token)
+    public Task<AgentWorkResponse> DispatchAsync(AgentWorkRequest request, CancellationToken token) => ExchangeAsync(request.Id, request, token);
+    public Task CancelAsync(Guid id, string reason, CancellationToken token) => SendAsync(new("work.cancel", id, Data: reason), token);
+    public async Task<AgentJobInspection> InspectAsync(Guid id, CancellationToken token)
     {
-        if (request.Id == Guid.Empty) return new(request.Id, false, "invalid_request");
-        if (!await execution.WaitAsync(0, token)) return new(request.Id, false, "agent_busy");
+        var completion = new TaskCompletionSource<AgentJobInspection>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!inspections.TryAdd(id, completion)) throw new IOException("Inspection already in progress.");
+        try
+        {
+            await SendAsync(new("work.inspect", id), token);
+            return await completion.Task.WaitAsync(TimeSpan.FromSeconds(15), token);
+        }
+        finally { inspections.TryRemove(id, out _); }
+    }
+    public async Task<AgentWorkResponse> ExchangeAsync(Guid id, AgentWorkRequest? request, CancellationToken token)
+    {
+        if (id == Guid.Empty) return new(id, false, "invalid_request");
+        if (!await execution.WaitAsync(0, token)) return new(id, false, "agent_busy");
         var completion = new TaskCompletionSource<AgentWorkResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
         var attempted = false;
         try
         {
             if (!Connected) throw new AgentUnavailableException();
-            if (!pending.TryAdd(request.Id, completion)) return new(request.Id, false, "duplicate_pending_request");
-            var seconds = request.Policy?.TimeoutSeconds ?? 3600;
-            using var timeout = new CancellationTokenSource(seconds == 0 ? Timeout.InfiniteTimeSpan : TimeSpan.FromSeconds(seconds + 30));
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token, timeout.Token);
+            if (!pending.TryAdd(id, completion)) return new(id, false, "duplicate_pending_request");
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
+            var after = cursor is null ? 0 : await cursor(id);
+            outputSequences[id] = after;
+            evidenceSequences[id] = after;
             attempted = true;
-            await SendAsync(new("work.request", request.Id, request), linked.Token);
+            await SendAsync(request is not null ? new("work.request", id, request) : new("work.attach", id, Data: after.ToString(System.Globalization.CultureInfo.InvariantCulture)), linked.Token);
             var response = await completion.Task.WaitAsync(linked.Token);
+            if (Connected) evidenceSequences.TryRemove(id, out _);
             return response;
         }
         catch (Exception ex) when (attempted && ex is OperationCanceledException or WebSocketException or IOException)
         {
             // Once a send is attempted, a missing acknowledgement is not evidence that execution did not occur.
-            // Cancel the entire channel so the Agent cancels its active process; do not permit queued work to race it.
+            // Only the transport is disposed; the Agent owns the job lifetime.
             Dispose();
-            return new(request.Id, false, "uncertain");
+            return new(id, false, "uncertain");
         }
-        finally { pending.TryRemove(request.Id, out _); progressCount.TryRemove(request.Id, out _); outputSequences.TryRemove(request.Id, out _); execution.Release(); }
+        finally { pending.TryRemove(id, out _); progressCount.TryRemove(id, out _); outputSequences.TryRemove(id, out _); execution.Release(); }
     }
 
     public async Task RunAsync(WebSocket connectedSocket, Func<CancellationToken, Task<bool>> validate, CancellationToken token,
@@ -235,6 +298,7 @@ public sealed class AgentCommandSession : IDisposable
             {
                 var message = await AgentSocketFrames.ReceiveAsync(socket, linked.Token);
                 if (message is null) break;
+                Interlocked.Exchange(ref lastHeartbeat, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
                 if (message.Type == "configuration.request")
                 {
                     if (synchronize is null || synchronization is not null || message.Id != Guid.Empty || message.Data is not null)
@@ -247,6 +311,10 @@ public sealed class AgentCommandSession : IDisposable
                         throw new IOException("Invalid configuration acknowledgement.");
                     appliedConfiguration = message.Data;
                     Interlocked.Exchange(ref configurationSyncedAt, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                }
+                else if (message.Type == "work.inspection" && message.Job is { } job && job.Id == message.Id)
+                {
+                    if (inspections.TryGetValue(message.Id, out var inspection)) inspection.TrySetResult(job);
                 }
                 else if (message.Type == "work.response" && message.Response is { } response && response.Id == message.Id)
                 {
@@ -262,14 +330,20 @@ public sealed class AgentCommandSession : IDisposable
                     var previous = outputSequences.GetValueOrDefault(message.Id);
                     if (chunk.Sequence != previous + 1 || chunk.Stream is not ("stdout" or "stderr" or "system") || chunk.Text.Length is < 1 or > 16384)
                         throw new IOException("Invalid operation output.");
-                    if (output is not null) await output(message.Id, chunk);
+                    if (output is not null)
+                    {
+                        try { await output(message.Id, chunk); }
+                        catch (Exception error) { FailureReason = "output_persistence_" + error.GetType().Name; throw; }
+                    }
                     outputSequences[message.Id] = chunk.Sequence;
+                    evidenceSequences[message.Id] = chunk.Sequence;
                     await SendAsync(new("work.output.applied", message.Id, Data: chunk.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)), linked.Token);
                 }
                 else if (message.Type == "work.progress")
                 {
                     if (!pending.ContainsKey(message.Id)) continue;
                     if (message.Data is not ("Validating" or "Preparing" or "Building" or "Pulling" or "Applying" or "Checking") || progressCount.AddOrUpdate(message.Id, 1, (_, count) => count + 1) > 32) throw new IOException("Invalid operation progress.");
+                    phases[message.Id] = message.Data;
                     if (report is not null) await report(message.Id, message.Data);
                 }
                 else if (message.Type == "capabilities")
@@ -296,11 +370,26 @@ public sealed class AgentCommandSession : IDisposable
                 else if (message.Type != "pong") throw new IOException("Unsupported Agent message.");
             }
         }
-        catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or IOException or JsonException or FormatException) { }
+        catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or IOException or JsonException or FormatException)
+        {
+            FailureReason ??= ex switch
+            {
+                WebSocketException webSocket => $"WebSocketException:{webSocket.WebSocketErrorCode}" +
+                    (webSocket.InnerException is System.Net.Sockets.SocketException socketError ? $":{socketError.SocketErrorCode}" : ""),
+                JsonException or FormatException or IOException => "protocol_error",
+                OperationCanceledException => token.IsCancellationRequested ? "shutdown" : "transport_timeout_or_close",
+                _ => ex.GetType().Name
+            };
+        }
         finally
         {
+            var diagnostics = evidenceSequences.Select(pair => new Operations.AgentDisconnectEntity { Id = Guid.NewGuid(), OperationId = pair.Key,
+                At = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), Reason = FailureReason ?? (token.IsCancellationRequested ? "shutdown" : "remote_close"),
+                CloseStatus = (int?)socket.CloseStatus, Phase = phases.GetValueOrDefault(pair.Key) ?? "unknown",
+                LastHeartbeat = Interlocked.Read(ref lastHeartbeat), AcknowledgedSequence = pair.Value }).ToArray();
             linked.Cancel();
             Dispose();
+            if (diagnostic is not null) foreach (var item in diagnostics) await diagnostic(item);
             try { await monitor; } catch (OperationCanceledException) { }
             if (synchronization is not null) await synchronization;
         }
@@ -308,8 +397,9 @@ public sealed class AgentCommandSession : IDisposable
         {
             try { await synchronize!(SendAsync, hash => expectedConfiguration = hash, linked.Token); }
             catch (OperationCanceledException) when (linked.IsCancellationRequested) { }
-            catch (Exception)
+            catch (Exception ex)
             {
+                FailureReason = "configuration_" + ex.GetType().Name;
                 // Close on failed replication. Reconnect retries a full snapshot, never a partial delta.
                 Dispose();
             }
@@ -323,11 +413,16 @@ public sealed class AgentCommandSession : IDisposable
             while (!token.IsCancellationRequested)
             {
                 await Task.Delay(TimeSpan.FromSeconds(5), token);
-                if (!await validate(token)) { Dispose(); return; }
+                if (!await validate(token))
+                {
+                    FailureReason = "authorization_revoked";
+                    await SendAsync(new("work.revoke", Guid.Empty), token);
+                    Dispose(); return;
+                }
                 await SendAsync(new("ping", Guid.NewGuid()), token);
             }
         }
-        catch (Exception) when (!token.IsCancellationRequested) { Dispose(); }
+        catch (Exception ex) when (!token.IsCancellationRequested) { FailureReason = "heartbeat_" + ex.GetType().Name; Dispose(); }
     }
 
     private async Task SendAsync(AgentWireMessage message, CancellationToken token)
@@ -354,6 +449,7 @@ public sealed class AgentCommandSession : IDisposable
         Capabilities = null;
         foreach (var terminal in terminals.Values) terminal.Complete();
         foreach (var pair in pending) pair.Value.TrySetResult(new(pair.Key, false, "uncertain"));
+        foreach (var pair in inspections) pair.Value.TrySetException(new AgentUnavailableException());
     }
 }
 

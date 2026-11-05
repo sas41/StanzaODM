@@ -17,6 +17,10 @@ namespace Stanza.ControlPlane.Operations;
 public sealed class OperationException(string message) : Exception(message);
 public sealed record OperationDetail(OperationSummary Summary, string? Output, bool OutputAllowed = true)
 {
+    public string? Phase { get; init; }
+    public string? CancellationReason { get; init; }
+    public Guid? BlockingOperationId { get; init; }
+    public IReadOnlyList<AgentDisconnectEntity> Disconnects { get; init; } = [];
     public override string ToString() => $"OperationDetail {{ Id = {Summary.Id}, Output = [REDACTED] }}";
 }
 
@@ -165,7 +169,11 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         var allowed = await CanReadOutputAsync(actor, row, ct);
         var output = row.ProtectedResponse is not null && allowed
             ? JsonSerializer.Deserialize<AgentWorkResponse>(Protector(id).Unprotect(row.ProtectedResponse))?.Output : null;
-        return new(Summary(row), output, allowed);
+        var blocking = row.State == "Queued" && row.DeploymentId is { } target
+            ? await db.Set<OperationEntity>().Where(x => x.DeploymentId == target && x.Id != id && (x.State == "Unknown" || x.State == "Running" || x.State == "CancellationRequested"))
+                .OrderBy(x => x.CreatedAt).Select(x => (Guid?)x.Id).FirstOrDefaultAsync(ct) : null;
+        return new(Summary(row), output, allowed) { Phase = row.Stage, CancellationReason = row.CancellationReason, BlockingOperationId = blocking,
+            Disconnects = await db.Set<AgentDisconnectEntity>().AsNoTracking().Where(x => x.OperationId == id).OrderByDescending(x => x.At).Take(20).ToListAsync(ct) };
     }
 
     public async Task<bool> CanReadOutputAsync(Guid actor, Guid id, CancellationToken ct = default)
@@ -189,11 +197,12 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         var row = await RequiredAsync(operationId, token);
         if (row.DeploymentId is { } deployment) await RequireAsync(actorId, "operations.cancel", "deployment", deployment, token);
         else await RequireAsync(actorId, "host.execute", "agent", row.AgentId, token);
-        if (Terminal(row.State)) throw new OperationException("The operation has already finished.");
+        if (Terminal(row.State) && row.State != "Unknown") throw new OperationException("The operation has already finished.");
         var queued = row.State == "Queued";
         await db.Set<OperationEntity>().Where(x => x.Id == row.Id).ExecuteUpdateAsync(update => update
-            .SetProperty(x => x.State, queued ? "Cancelled" : "CancellationRequested")
-            .SetProperty(x => x.CompletedAt, queued ? clock.GetUtcNow().ToUnixTimeSeconds() : (long?)null), token);
+            .SetProperty(x => x.State, queued ? "Cancelled" : row.State == "Unknown" ? "Unknown" : "CancellationRequested")
+            .SetProperty(x => x.CancellationReason, "user")
+            .SetProperty(x => x.CompletedAt, queued ? clock.GetUtcNow().ToUnixTimeSeconds() : row.State == "Unknown" ? row.CompletedAt : null), token);
         await transaction.CommitAsync(token);
         await audit.WriteAsync(actorId, "operation.cancel", operationId.ToString(), queued ? "cancelled_before_dispatch" : "requested", token);
     }
@@ -204,12 +213,7 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         var row = await RequiredAsync(id, ct);
         if (row.DeploymentId is not { } deployment || row.State != "Unknown") throw new OperationException("Only uncertain deployment operations can be reconciled.");
         await RequireAsync(actor, "operations.cancel", "deployment", deployment, ct);
-        var uncertaintyAt = row.CompletedAt ?? clock.GetUtcNow().ToUnixTimeSeconds();
-        if (!await db.Set<OperationEntity>().AnyAsync(x => x.DeploymentId == deployment && x.AgentId == row.AgentId && x.Kind == "status" && x.State == "Succeeded" && x.CreatedAt >= uncertaintyAt && x.CompletedAt >= uncertaintyAt, ct))
-            throw new OperationException("Run a fresh successful status inspection on the same Agent before acknowledging an uncertain outcome.");
-        await db.Set<OperationEntity>().Where(x => x.Id == id && x.State == "Unknown").ExecuteUpdateAsync(update => update.SetProperty(x => x.State, "Failed").SetProperty(x => x.Code, "reconciled_not_retried"), ct);
-        await transaction.CommitAsync(ct);
-        await audit.WriteAsync(actor, "operation.reconciled", id.ToString(), "not_retried", ct);
+        throw new OperationException("Use Inspect and reconcile to establish Agent execution evidence and reconcile the associated automation run atomically. Status alone cannot prove work stopped.");
     }
     internal async Task AuthorizeExecutionAsync(OperationEntity row, CancellationToken ct)
     {
@@ -249,6 +253,25 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         if (row.Kind == "host-exec" && !(await policies.GetAsync(ct)).Policy.AllowHostActions) throw new OperationException("Host actions have been disabled.");
         if (!await db.Set<AgentEntity>().AnyAsync(x => x.Id == row.AgentId && x.Status == "approved", ct)) throw new OperationException("Agent approval has been revoked.");
         if (automationGuard is not null) await automationGuard.AuthorizeAsync(row.ActorId, row.Trigger, row.Kind, row.DeploymentId, row.AgentId, ct);
+    }
+    internal async Task AuthorizeContinuationAsync(OperationEntity row, CancellationToken ct)
+    {
+        // Check authority for already accepted work without requiring a live Control Plane lease,
+        // changing its immutable snapshot, or dispatching it again.
+        if (row.DeploymentId is { } deployment)
+        {
+            await AuthorizeAsync(row.ActorId, deployment, row.Kind, ct);
+            await RequireAsync(row.ActorId, "agent.read", "agent", row.AgentId, ct);
+            if (row.RequiresMovePermission) await RequireAsync(row.ActorId, "deployment.move", "deployment", deployment, ct);
+        }
+        else await RequireAsync(row.ActorId, "host.execute", "agent", row.AgentId, ct);
+        if (!(await agentPolicies.RuntimeAsync(row.AgentId, ct)).ExecutionEnabled ||
+            !await db.Set<AgentEntity>().AnyAsync(x => x.Id == row.AgentId && x.Status == "approved", ct))
+            throw new OperationException("Execution authorization was revoked.");
+        if (row.Kind == "host-exec" && !(await policies.GetAsync(ct)).Policy.AllowHostActions)
+            throw new OperationException("Host execution authorization was revoked.");
+        if (automationGuard is not null)
+            await automationGuard.AuthorizeAsync(row.ActorId, row.Trigger, row.Kind, row.DeploymentId, row.AgentId, ct, continuation: true);
     }
     internal AgentWorkRequest Request(OperationEntity row) => JsonSerializer.Deserialize<AgentWorkRequest>(Protector(row.Id).Unprotect(row.ProtectedRequest)) ?? throw new OperationException("Invalid operation snapshot.");
     internal string ProtectResponse(Guid id, AgentWorkResponse response) => Protector(id).Protect(JsonSerializer.Serialize(response));

@@ -29,6 +29,7 @@ public sealed class AgentEntryPoint
         builder.Services.AddSingleton<IContainerRuntime, DockerCliRuntime>();
         builder.Services.AddSingleton<IAgentHostPathResolver, DockerAgentHostPathResolver>();
         builder.Services.AddSingleton<IAgentWorkExecutor, AgentWorkExecutor>();
+        builder.Services.AddSingleton<AgentJobStore>();
         builder.Services.AddSingleton<IAgentCommandChannel, AgentCommandChannel>();
         builder.Services.AddSingleton<AgentTerminalManager>();
         builder.Services.Configure<HostExecutionOptions>(builder.Configuration.GetSection("Agent:HostExecution"));

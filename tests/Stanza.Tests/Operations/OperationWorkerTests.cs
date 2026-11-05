@@ -215,8 +215,23 @@ public sealed class OperationWorkerTests
         Assert.Equal("worker_interrupted", unknown.Code); Assert.NotNull(unknown.CompletedAt); Assert.Empty(h.Dispatcher.Requests);
     }
 
+    [Theory]
+    [InlineData("job_not_found", false)]
+    [InlineData("request_id_conflict", false)]
+    [InlineData("runtime_failed", true)]
+    public async Task MissingAcceptedJobOrFailedApplyKeepsTheDeploymentBlocked(string code, bool applyStarted)
+    {
+        await using var h = await OperationTestHarness.CreateAsync();
+        h.Dispatcher.Handler = (_, request, _) => Task.FromResult(new AgentWorkResponse(request.Id, false, code, ExecutionStopped: true, ApplyStarted: applyStarted));
+        var original = await h.EnqueueAsync(); await h.StartWorkerAsync(); await h.WaitStateAsync(original.Id, "Unknown");
+        var blocked = await h.EnqueueAsync(); await h.NextTickAsync();
+        Assert.Equal("Queued", (await h.RowAsync(blocked.Id)).State);
+        Assert.Equal(original.Id, (await h.DetailAsync(blocked.Id)).BlockingOperationId);
+        Assert.Single(h.Dispatcher.Requests); await h.CancelAsync(blocked.Id);
+    }
+
     [Fact]
-    public async Task Fresh_status_on_same_agent_allows_explicit_reconciliation_without_replaying_uncertain_work()
+    public async Task Fresh_status_alone_cannot_prove_execution_stopped_or_release_uncertain_work()
     {
         await using var h = await OperationTestHarness.CreateAsync();
         var unknown = await h.EnqueueAsync();
@@ -224,9 +239,9 @@ public sealed class OperationWorkerTests
         await Assert.ThrowsAsync<OperationException>(() => h.ReconcileAsync(unknown.Id));
         h.Clock.Advance(TimeSpan.FromSeconds(1));
         var status = await h.EnqueueAsync("status"); await h.StartWorkerAsync(); await h.WaitStateAsync(status.Id, "Succeeded");
-        await h.ReconcileAsync(unknown.Id);
+        await Assert.ThrowsAsync<OperationException>(() => h.ReconcileAsync(unknown.Id));
         var row = await h.RowAsync(unknown.Id);
-        Assert.Equal("Failed", row.State); Assert.Equal("reconciled_not_retried", row.Code);
+        Assert.Equal("Unknown", row.State);
         Assert.Equal(status.Id, Assert.Single(h.Dispatcher.Requests).Request.Id);
     }
 

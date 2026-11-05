@@ -46,10 +46,11 @@ public sealed class OperationsController(OperationService operations, Operations
         return RedirectToAction(nameof(Details), new { id });
     }
     [HttpPost("{id:guid}/reconcile"), ValidateAntiForgeryToken]
-    public async Task<IActionResult> Reconcile(Guid id, bool acknowledged, CancellationToken ct)
+    public async Task<IActionResult> Reconcile(Guid id, bool acknowledged, [FromServices] OperationRecoveryService recovery, CancellationToken ct)
     {
-        if (!acknowledged) return BadRequest();
-        try { await operations.ReconcileAsync(Actor, id, ct); } catch (OperationException error) { TempData["Error"] = error.Message; }
+        try { TempData["Success"] = await recovery.InspectOperationAsync(Actor, id, acknowledged, ct); }
+        catch (Exception error) when (error is OperationException or Transport.AgentUnavailableException or IOException or TimeoutException)
+        { TempData["Error"] = error.Message; }
         return RedirectToAction(nameof(Details), new { id });
     }
 }

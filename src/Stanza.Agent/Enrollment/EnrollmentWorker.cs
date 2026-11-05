@@ -9,7 +9,7 @@ public sealed class EnrollmentWorker(
     AgentState state,
     TimeProvider timeProvider,
     ILogger<EnrollmentWorker> logger,
-    IAgentCommandChannel? channel = null) : BackgroundService
+    IAgentCommandChannel? channel = null, Stanza.Agent.Runtime.AgentJobStore? jobs = null) : BackgroundService
 {
     public static TimeSpan RetryDelay(int consecutiveFailures) =>
         TimeSpan.FromSeconds(Math.Min(60, Math.Pow(2, Math.Clamp(consecutiveFailures, 1, 6))));
@@ -64,6 +64,8 @@ public sealed class EnrollmentWorker(
                     }
                     if (status is EnrollmentStatus.Rejected or EnrollmentStatus.Revoked or EnrollmentStatus.Incompatible)
                     {
+                        if (status is EnrollmentStatus.Rejected or EnrollmentStatus.Revoked && jobs is not null)
+                            await jobs.CancelAllAsync("authorization_revoked");
                         logger.LogWarning("Agent enrollment halted with status {EnrollmentStatus}; execution remains unavailable.", status);
                         await Task.Delay(Timeout.InfiniteTimeSpan, timeProvider, stoppingToken);
                         return;

@@ -43,12 +43,17 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
                 var cutoff = clock.GetUtcNow().AddDays(-policy.LogRetentionDays).ToUnixTimeSeconds();
                 if (policy.LogRetentionDays > 0)
                 {
-                    await db.Set<OperationOutputEntity>().Where(x => db.Set<OperationEntity>().Any(o => o.Id == x.OperationId && o.CompletedAt < cutoff)).ExecuteDeleteAsync(stoppingToken);
-                    await db.Set<OperationEntity>().Where(x => x.CompletedAt < cutoff && x.ProtectedResponse != null)
+                    await db.Set<OperationOutputEntity>().Where(x => db.Set<OperationEntity>().Any(o => o.Id == x.OperationId && o.State != "Unknown" && o.CompletedAt < cutoff)).ExecuteDeleteAsync(stoppingToken);
+                    await db.Set<OperationEntity>().Where(x => x.State != "Unknown" && x.CompletedAt < cutoff && x.ProtectedResponse != null)
                         .ExecuteUpdateAsync(update => update.SetProperty(x => x.ProtectedResponse, (string?)null), stoppingToken);
                 }
                 var auditCutoff = clock.GetUtcNow().AddDays(-policy.AuditRetentionDays).ToUnixTimeSeconds();
-                if (policy.AuditRetentionDays > 0) await db.Set<AuditEvent>().Where(x => x.At < auditCutoff).ExecuteDeleteAsync(stoppingToken);
+                if (policy.AuditRetentionDays > 0)
+                {
+                    await db.Set<AuditEvent>().Where(x => x.At < auditCutoff).ExecuteDeleteAsync(stoppingToken);
+                    await db.Set<AgentDisconnectEntity>().Where(x => x.At < auditCutoff && !db.Set<OperationEntity>().Any(o => o.Id == x.OperationId && o.State == "Unknown"))
+                        .ExecuteDeleteAsync(stoppingToken);
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             catch (Exception) { logger.LogError("The operation worker could not advance its durable queue."); }
@@ -118,10 +123,12 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
             await operations.AuthorizeExecutionAsync(row, stoppingToken);
             var request = operations.Request(row);
             var seconds = request.Policy?.TimeoutSeconds ?? 3600;
-            if (seconds > 0) cancel.CancelAfter(TimeSpan.FromSeconds(seconds + 15));
+            // The Agent owns the deadline. Shutdown only detaches this waiter.
             dispatched = true;
             var response = await dispatcher.DispatchAsync(row.AgentId, request, cancel.Token);
-            state = response.Code == "agent_busy" ? "Queued" : response.Code == "uncertain" ? "Unknown" : response.Succeeded ? "Succeeded" : response.Code == "cancelled" ? "Cancelled" : "Failed";
+            if (response.CancellationReason is { } reason)
+                await db.Set<OperationEntity>().Where(x => x.Id == id).ExecuteUpdateAsync(u => u.SetProperty(x => x.CancellationReason, reason), stoppingToken);
+            state = response.Code == "agent_busy" ? "Queued" : response.Code is "uncertain" or "job_not_found" or "request_id_conflict" || !response.Succeeded && response.ApplyStarted ? "Unknown" : response.Succeeded ? "Succeeded" : response.Code == "cancelled" ? "Cancelled" : "Failed";
             code = response.Code.Length <= 100 && response.Code.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-' or '.') ? response.Code : "agent_result";
             responseText = operations.ProtectResponse(id, response);
             appliedMetadata = operations.ProtectResponse(id, response with { Output = null });
@@ -155,9 +162,21 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
         while (!cancel.IsCancellationRequested)
         {
             await Task.Delay(TimeSpan.FromSeconds(1), clock, cancel.Token);
+            try { await CheckAsync(); }
+            catch (OperationCanceledException) when (cancel.IsCancellationRequested || stoppingToken.IsCancellationRequested) { return; }
+            catch (Exception error)
+            {
+                // Persistence/transport failure is not an authorization decision or a cancellation.
+                // Keep retrying; failure to renew the lease retains an Unknown lock, never unlocks it.
+                logger.LogWarning("Cancellation/authorization monitoring for {OperationId} could not complete ({ErrorType}).", id, error.GetType().Name);
+            }
+        }
+        async Task CheckAsync()
+        {
             await using var scope = scopes.CreateAsyncScope();
             var db = scope.ServiceProvider.GetRequiredService<StanzaDbContext>();
-            var requested = await db.Set<OperationEntity>().AnyAsync(x => x.Id == id && x.State == "CancellationRequested", stoppingToken);
+            var requested = await db.Set<OperationEntity>().AnyAsync(x => x.Id == id && (x.State == "CancellationRequested" || x.CancellationReason == "user"), stoppingToken);
+            var reason = requested ? "user" : null;
             try
             {
                 var row = await db.Set<OperationEntity>().AsNoTracking().SingleAsync(x => x.Id == id, stoppingToken);
@@ -165,8 +184,20 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
                 await db.Set<OperationEntity>().Where(x => x.Id == id && x.WorkerId == workerId && (x.State == "Running" || x.State == "CancellationRequested"))
                     .ExecuteUpdateAsync(update => update.SetProperty(x => x.LeaseUntil, clock.GetUtcNow().AddSeconds(60).ToUnixTimeSeconds()), stoppingToken);
             }
-            catch (Exception) when (!stoppingToken.IsCancellationRequested) { requested = true; }
-            if (requested) await cancel.CancelAsync();
+            catch (Exception error) when (!stoppingToken.IsCancellationRequested && error is OperationException or Automation.AutomationAccessException)
+            { requested = true; reason ??= "authorization_revoked"; }
+            if (requested)
+            {
+                var row = await db.Set<OperationEntity>().AsNoTracking().SingleAsync(x => x.Id == id, stoppingToken);
+                await db.Set<OperationEntity>().Where(x => x.Id == id)
+                    .ExecuteUpdateAsync(u => u.SetProperty(x => x.CancellationReason, reason), stoppingToken);
+                if (dispatcher is IAgentJobDispatcher jobs)
+                {
+                    await jobs.CancelAsync(row.AgentId, id, reason!, stoppingToken);
+                    // Await process cleanup and its durable result, not a transport cancellation.
+                }
+                else await cancel.CancelAsync();
+            }
         }
     }
 

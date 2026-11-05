@@ -57,6 +57,7 @@ public sealed class ControlPlaneEntryPoint
         builder.Services.AddScoped<IDeploymentWorkspaceReservations>(provider => provider.GetRequiredService<DeploymentEditorAdapters>());
         builder.Services.AddScoped<IDeploymentRevisionStatusProvider>(provider => provider.GetRequiredService<DeploymentEditorAdapters>());
         builder.Services.AddScoped<OperationService>();
+        builder.Services.AddScoped<OperationRecoveryService>();
         builder.Services.AddScoped<OperationsOverviewService>();
         builder.Services.AddScoped<OperationOutputStore>();
         builder.Services.AddScoped<ActionRunOutputFeed>();
@@ -64,6 +65,7 @@ public sealed class ControlPlaneEntryPoint
         builder.Services.AddScoped<IOperationService>(provider => provider.GetRequiredService<OperationService>());
         builder.Services.AddStanzaAgentTransport();
         builder.Services.AddHostedService<OperationWorker>();
+        builder.Services.AddHostedService<OperationRecoveryWorker>();
         builder.Services.AddStanzaLiveStatus();
         builder.Services.AddDataProtection().SetApplicationName("Stanza.ControlPlane");
         builder.Services.AddOptions<KeyManagementOptions>().Configure<IConfiguration, ILoggerFactory>((options, configuration, logging) =>

@@ -9,6 +9,9 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Hosting;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
+using Stanza.ControlPlane.Operations;
+using Stanza.ControlPlane.Persistence;
 using Stanza.Agent;
 using Stanza.Agent.Enrollment;
 using Stanza.Agent.Runtime;
@@ -47,6 +50,7 @@ public sealed class AgentTransportTests
             var dispatch = fixture.Broker.DispatchAsync(agent, request, timeout.Token);
             await executor.Recorded.Task.WaitAsync(timeout.Token);
             Assert.False(dispatch.IsCompleted);
+            await AgentTestWait.UntilAsync(() => chunks.Count == 20);
             Assert.Equal(20, chunks.Count);
             Assert.Equal(81920, chunks.Sum(x => x.Text.Length));
             Assert.Equal(Enumerable.Range(1, 20).Select(x => (long)x), chunks.Select(x => x.Sequence));
@@ -71,6 +75,143 @@ public sealed class AgentTransportTests
             await Complete.Task.WaitAsync(token);
             return new(request.Id, false, "runtime_failed");
         }
+    }
+
+    [Theory]
+    [InlineData("Building", false)]
+    [InlineData("Applying", false)]
+    [InlineData("Checking", true)]
+    public async Task DisconnectReattachesWithoutCancellingOrReexecutingAndReplaysOutputAndFinalResult(string phase, bool completeOffline)
+    {
+        await using var fixture = await ServerFixture.CreateAsync();
+        using var root = new AgentTestDirectory(); using var identity = AgentIdentity.LoadOrCreate(root.Path);
+        var agent = await fixture.RegisterAsync(identity, true);
+        var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = fixture.Origin,
+            EnrollmentToken = fixture.Credential, AllowInsecureHttp = true });
+        var executor = new ReconnectExecutor(phase); var state = new AgentState();
+        await using var jobs = new AgentJobStore(options, executor, TimeProvider.System);
+        var channel = new AgentCommandChannel(options, state, executor, fixture.Store.Clock, jobs: jobs);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var running = channel.RunAsync(identity, timeout.Token);
+        await AgentTestWait.UntilAsync(() => state.Snapshot.Ready);
+        var chunks = new System.Collections.Concurrent.ConcurrentDictionary<long, AgentOutputChunk>();
+        fixture.Broker.Output += (_, chunk) => { chunks[chunk.Sequence] = chunk; return Task.CompletedTask; };
+        var request = AgentWorkExecutorTests.Request("deploy");
+        var dispatch = fixture.Broker.DispatchAsync(agent, request, timeout.Token);
+        await executor.Started.Task.WaitAsync(timeout.Token);
+        fixture.Broker.Disconnect(agent);
+        await IgnoreConnectionCloseAsync(running);
+        Assert.False(executor.Cancelled); Assert.False(dispatch.IsCompleted);
+        if (completeOffline) executor.Complete.TrySetResult();
+        await AgentTestWait.UntilAsync(() => !fixture.Broker.IsConnected(agent));
+        running = ReconnectAsync();
+        async Task ReconnectAsync()
+        {
+            // A disconnected session is unavailable immediately, but its durable diagnostics may
+            // still be committing before the server releases the identity reservation.
+            while (!timeout.IsCancellationRequested)
+            {
+                try { await channel.RunAsync(identity, timeout.Token); return; }
+                catch (WebSocketException) when (!timeout.IsCancellationRequested) { await Task.Delay(100, timeout.Token); }
+            }
+        }
+        try
+        {
+            await AgentTestWait.UntilAsync(() => state.Snapshot.Ready);
+            executor.Complete.TrySetResult();
+            var result = await dispatch.WaitAsync(timeout.Token);
+            Assert.True(result.Succeeded); Assert.Equal(1, executor.Executions); Assert.False(executor.Cancelled);
+            Assert.Equal(new long[] { 1, 2 }, chunks.Keys.Order());
+            var inspected = await fixture.Broker.InspectAsync(agent, request.Id, timeout.Token);
+            Assert.False(inspected.Active); Assert.True(inspected.Stopped); Assert.Equal(phase, inspected.Phase);
+            Assert.Equal(phase != "Building", inspected.ApplyStarted);
+            Assert.Equal(2, inspected.AcknowledgedSequence);
+            var diagnostics = await File.ReadAllTextAsync(Path.Combine(root.Path, "jobs-v1", "disconnects.jsonl"));
+            Assert.Contains("\"Reason\":", diagnostics); Assert.Contains("\"CloseStatus\":", diagnostics);
+        }
+        finally { executor.Complete.TrySetResult(); timeout.Cancel(); await IgnoreConnectionCloseAsync(running); }
+    }
+    private sealed class ReconnectExecutor(string phase) : IAgentWorkExecutor, IReportingAgentWorkExecutor
+    {
+        public event Func<Guid, string, Task>? Progress;
+        public event Func<Guid, AgentOutputChunk, Task>? Output;
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Complete { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int Executions; public bool Cancelled;
+        public async Task<AgentWorkResponse> ExecuteAsync(AgentWorkRequest request, CancellationToken token = default)
+        {
+            Interlocked.Increment(ref Executions);
+            try
+            {
+                if (Progress is { } report)
+                {
+                    if (phase == "Checking") await report(request.Id, "Applying");
+                    await report(request.Id, phase);
+                }
+                if (Output is { } output) await output(request.Id, new(1, "stdout", "before disconnect\n"));
+                Started.TrySetResult();
+                await Complete.Task.WaitAsync(token);
+                if (Output is { } final) await final(request.Id, new(2, "stderr", "completed while detached\n"));
+                return new(request.Id, true, "succeeded", ExecutionStopped: true);
+            }
+            catch (OperationCanceledException) { Cancelled = true; throw; }
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OutputPersistenceOrAcknowledgementFailureDoesNotStopExecutionAndReconnectUsesDurableCursor(bool persistedBeforeDisconnect)
+    {
+        await using var fixture = await ServerFixture.CreateAsync();
+        using var root = new AgentTestDirectory(); using var identity = AgentIdentity.LoadOrCreate(root.Path);
+        var agent = await fixture.RegisterAsync(identity, true); var request = AgentWorkExecutorTests.Request("deploy");
+        await using (var db = fixture.Store.CreateContext())
+        { db.Add(new OperationEntity { Id = request.Id, AgentId = agent }); await db.SaveChangesAsync(); }
+        var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = fixture.Origin,
+            EnrollmentToken = fixture.Credential, AllowInsecureHttp = true });
+        var executor = new ReconnectExecutor("Building"); var state = new AgentState();
+        await using var jobs = new AgentJobStore(options, executor, TimeProvider.System);
+        var channel = new AgentCommandChannel(options, state, executor, fixture.Store.Clock, jobs: jobs);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var running = channel.RunAsync(identity, timeout.Token);
+        await AgentTestWait.UntilAsync(() => state.Snapshot.Ready);
+        var failOnce = 1; var seen = new System.Collections.Concurrent.ConcurrentQueue<long>();
+        fixture.Broker.Output += async (id, chunk) =>
+        {
+            seen.Enqueue(chunk.Sequence);
+            var fail = Interlocked.Exchange(ref failOnce, 0) == 1;
+            await using var db = fixture.Store.CreateContext(); var store = new OperationOutputStore(db, fixture.Store.Protection);
+            if (!fail || persistedBeforeDisconnect) await store.AppendAsync(id, chunk);
+            if (fail) throw new IOException("simulated output persistence/acknowledgement interruption");
+        };
+        var dispatch = fixture.Broker.DispatchAsync(agent, request, timeout.Token);
+        await executor.Started.Task.WaitAsync(timeout.Token);
+        await IgnoreConnectionCloseAsync(running);
+        // The job completes while the transport has failed and no output is acknowledged.
+        executor.Complete.TrySetResult();
+        await AgentTestWait.UntilAsync(async () => !(await jobs.InspectAsync(request.Id)).Active);
+        Assert.False(executor.Cancelled); Assert.Equal(1, executor.Executions);
+        async Task ReconnectAsync()
+        {
+            while (!timeout.IsCancellationRequested)
+            {
+                try { await channel.RunAsync(identity, timeout.Token); return; }
+                catch (WebSocketException) when (!timeout.IsCancellationRequested) { await Task.Delay(100, timeout.Token); }
+            }
+        }
+        running = ReconnectAsync();
+        try
+        {
+            Assert.True((await dispatch.WaitAsync(timeout.Token)).Succeeded);
+            await using var db = fixture.Store.CreateContext(); var store = new OperationOutputStore(db, fixture.Store.Protection);
+            Assert.Equal(new long[] { 1, 2 }, (await store.ReadAsync(request.Id, 0)).Select(x => x.Sequence));
+            Assert.Equal(persistedBeforeDisconnect ? 1 : 2, seen.Count(x => x == 1));
+            Assert.Equal(2, (await jobs.InspectAsync(request.Id)).AcknowledgedSequence);
+            await AgentTestWait.UntilAsync(async () => await db.Set<AgentDisconnectEntity>().AnyAsync(x => x.OperationId == request.Id));
+            Assert.StartsWith("output_persistence_", (await db.Set<AgentDisconnectEntity>().SingleAsync(x => x.OperationId == request.Id)).Reason);
+        }
+        finally { timeout.Cancel(); await IgnoreConnectionCloseAsync(running); }
     }
 
     [Fact]

@@ -26,7 +26,7 @@ internal sealed class OperationTestHarness : IAsyncDisposable
     private OperationWorker? worker;
     public ServiceProvider Services { get; private set; } = null!;
     public OperationTestClock Clock { get; } = new();
-    public OperationTestDispatcher Dispatcher { get; } = new();
+    public OperationTestDispatcher Dispatcher { get; private set; } = new();
     public IDataProtectionProvider Protection { get; } = new EphemeralDataProtectionProvider();
     public Guid Root { get; private set; }
     public Guid User { get; private set; }
@@ -35,9 +35,10 @@ internal sealed class OperationTestHarness : IAsyncDisposable
     public const string Password = "a-secure-password-123";
     public const string GitUrl = "https://git.example.test/team/app.git";
 
-    public static async Task<OperationTestHarness> CreateAsync()
+    public static async Task<OperationTestHarness> CreateAsync(bool recoverable = false)
     {
         var harness = new OperationTestHarness();
+        if (recoverable) harness.Dispatcher = new RecoverableOperationTestDispatcher();
         Directory.CreateDirectory(harness.directory);
         var registrations = new ServiceCollection();
         registrations.AddSingleton<TimeProvider>(harness.Clock);
@@ -53,6 +54,7 @@ internal sealed class OperationTestHarness : IAsyncDisposable
         registrations.AddMemoryCache(); registrations.AddScoped<ActionInputService>(); registrations.AddScoped<DeploymentActionOverview>();
         registrations.AddScoped<ISourceSnapshotProvider>(services => services.GetRequiredService<SourceService>());
         registrations.AddScoped<OperationService>();
+        registrations.AddScoped<OperationRecoveryService>();
         registrations.AddScoped<OperationsOverviewService>(); registrations.AddScoped<DeploymentLockService>();
         registrations.AddScoped<OperationOutputStore>();
         harness.Services = registrations.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true, ValidateScopes = true });
@@ -158,6 +160,7 @@ internal sealed class OperationTestHarness : IAsyncDisposable
     {
         // Let continuations finish installing their timers before advancing the controlled clock.
         await Task.Delay(20);
+        await UntilAsync(() => Task.FromResult(Clock.PendingTimerCount > 0), "The worker did not install its next timer.");
         Clock.Advance(TimeSpan.FromSeconds(1));
         await Task.Yield();
     }
@@ -174,7 +177,7 @@ internal sealed class OperationTestHarness : IAsyncDisposable
     }
 }
 
-internal sealed class OperationTestDispatcher : IAgentCommandDispatcher, IAgentWorkOutputSource
+internal class OperationTestDispatcher : IAgentCommandDispatcher, IAgentWorkOutputSource
 {
     public event Func<Guid, AgentOutputChunk, Task>? Output;
     public async Task EmitAsync(Guid id, AgentOutputChunk chunk)
@@ -199,6 +202,23 @@ internal sealed class OperationTestDispatcher : IAgentCommandDispatcher, IAgentW
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         while (dispatched.Count < count) await arrivals.WaitAsync(timeout.Token);
     }
+}
+
+internal sealed class RecoverableOperationTestDispatcher : OperationTestDispatcher, IAgentJobDispatcher
+{
+    public Dictionary<Guid, AgentJobInspection> Jobs { get; } = [];
+    public List<Guid> Attached { get; } = [];
+    public List<(Guid Id, string Reason)> Cancelled { get; } = [];
+    public Func<Guid, CancellationToken, Task<AgentWorkResponse>>? OnAttach { get; set; }
+    public Task<AgentJobInspection> InspectAsync(Guid agentId, Guid operationId, CancellationToken token = default) =>
+        Task.FromResult(Jobs.GetValueOrDefault(operationId) ?? new(operationId, false, false, false, "Unavailable", false, 0, 0, null));
+    public Task<AgentWorkResponse> AttachAsync(Guid agentId, Guid operationId, CancellationToken token = default)
+    {
+        Attached.Add(operationId);
+        return OnAttach?.Invoke(operationId, token) ?? Task.FromResult(Jobs[operationId].Response!);
+    }
+    public Task CancelAsync(Guid agentId, Guid operationId, string reason, CancellationToken token = default)
+    { Cancelled.Add((operationId, reason)); return Task.CompletedTask; }
 }
 
 internal sealed class OperationTestClock : TimeProvider

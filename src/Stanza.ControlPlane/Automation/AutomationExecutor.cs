@@ -41,6 +41,8 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
             {
                 if (action.Concurrency == "reject")
                 {
+                    await db.Set<AutomationRun>().Where(x => x.Id == run.Id)
+                        .ExecuteUpdateAsync(u => u.SetProperty(x => x.BlockingRunId, action.ActiveRunId), ct);
                     await FinishAsync(run, "skipped", "action-concurrency", ct);
                     await transaction.CommitAsync(ct);
                 }
@@ -197,7 +199,8 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
         catch
         {
             linked.Cancel();
-            try { await operations.CancelAsync(ExecutionActor(run), operationId, CancellationToken.None); } catch { /* Revoked identity is not elevated for cancellation. */ }
+            if (!ct.IsCancellationRequested)
+                try { await operations.CancelAsync(ExecutionActor(run), operationId, CancellationToken.None); } catch { /* Revoked identity is not elevated for cancellation. */ }
             try { await wait; } catch { /* Observe the cancelled wait. */ }
             if (timeout.IsCancellationRequested && !ct.IsCancellationRequested) throw new AutomationTimeoutException();
             throw;

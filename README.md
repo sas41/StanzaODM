@@ -44,6 +44,10 @@ docker compose logs --tail=100 initialize-agent agent
 
 Keep the database/Control Plane named volumes (including encryption keys and database credentials) and `./agent_data`. Do not use `down -v` as a troubleshooting step. Docker socket access grants substantial host control.
 
+Execution-resilience upgrades use Agent channel protocol 4 and additive database schema version 4. Upgrade the Control Plane and Agents to matching releases, retaining all existing volumes, encryption keys, identity files and request ledgers. Drain active work before recreating an Agent: jobs survive network disconnects and Control Plane restarts, not destruction of the Agent process. An incompatible Agent fails closed until upgraded; no data reset is required.
+
+Accepted jobs persist phase checkpoints, redacted output, final results and disconnect diagnostics under `./agent_data/jobs-v1`. The original `request-ledger` remains authoritative and is never cleared to permit a retry. The Control Plane also retains disconnect diagnostics in PostgreSQL, visible on operation details. Use **Inspect and reconcile** on an uncertain operation or automation run: it checks execution evidence, refreshes container status and resolves both locks together. Active work, missing evidence and unfinished journals after an Agent crash keep locks held. A failed/interrupted apply requires explicit acknowledgement of inspected side effects; a confirmed interruption before apply can be retried as a new run. Timeouts never unlock unresolved work.
+
 ### Additional Agents
 
 Copy `compose.agent.yaml` and `example.env` into a **separate installation directory** per Agent, configure its own name/token and the CP URL/socket GID, then run `docker compose -f compose.agent.yaml up -d` there. Each gets its own `./agent_data`; the internal path stays `/var/lib/stanza-agent`. Use unique folder/project names (`-p` can select a project name), keep Docker's default container hostname, and never copy/share a running Agent's identity. Friendly names are labels, not replacements for cryptographic IDs.

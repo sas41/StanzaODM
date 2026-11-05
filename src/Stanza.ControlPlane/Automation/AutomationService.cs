@@ -327,17 +327,27 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
     {
         var run = await db.Set<AutomationRun>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct) ?? throw new AutomationException("Run is unavailable.");
         if (!await CanReadRun(actor, run, ct)) throw new AutomationAccessException();
+        if (run.State == "queued")
+            run.BlockingRunId = run.ActionId is { } action
+                ? await db.Set<ActionDefinition>().Where(x => x.Id == action).Select(x => x.ActiveRunId).SingleOrDefaultAsync(ct)
+                : await db.Set<ImageUpdatePolicy>().Where(x => x.Id == run.DefinitionId).Select(x => x.ActiveRunId).SingleOrDefaultAsync(ct);
         return new(run, await db.Set<AutomationStepRun>().AsNoTracking().Where(x => x.RunId == id).OrderBy(x => x.Index).ToListAsync(ct));
     }
 
     public async Task CancelRunAsync(Guid actor, Guid id, CancellationToken ct = default)
     {
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await SecurityWriteGuard.LockAsync(db, ct);
         var run = (await ReadRunAsync(actor, id, ct)).Run;
         if (run.ActionId is { } action) await authorization.RequireAsync(actor, "action.execute", "action", action, ct);
         else if (run.DeploymentId is { } deployment) await authorization.RequireAsync(actor, "operations.cancel", "deployment", deployment, ct);
-        await db.Set<AutomationRun>().Where(x => x.Id == id && (x.State == "queued" || x.State == "running"))
+        await db.Set<AutomationRun>().Where(x => x.Id == id && (x.State == "queued" || x.State == "running" || x.State == "uncertain"))
             .ExecuteUpdateAsync(u => u.SetProperty(x => x.CancelRequested, true), ct);
+        var trigger = "automation:" + id.ToString("N");
+        await db.Set<Operations.OperationEntity>().Where(x => x.Trigger == trigger && (x.State == "Running" || x.State == "Unknown" || x.State == "CancellationRequested"))
+            .ExecuteUpdateAsync(u => u.SetProperty(x => x.CancellationReason, "user"), ct);
         await RecordAuditAsync(actor, "automation.cancel", id.ToString(), "requested", ct);
+        await transaction.CommitAsync(ct);
     }
 
     public async Task ReconcileRunAsync(Guid actor, Guid id, bool confirmedStopped, CancellationToken ct = default)
@@ -347,15 +357,7 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
         if (run.ActionId is { } action) await authorization.RequireAsync(actor, "action.manage", "action", action, ct);
         if (run.DeploymentId is { } deployment) await authorization.RequireAsync(actor, "operations.cancel", "deployment", deployment, ct);
         if (run.Operation != "image-check") await authorization.PlanAsync(actor, Unprotect<ActionPlan>(run.ProtectedPlan), ct);
-        await using var transaction = await db.Database.BeginTransactionAsync(ct);
-        if (await db.Set<AutomationRun>().Where(x => x.Id == id && x.State == "uncertain")
-            .ExecuteUpdateAsync(u => u.SetProperty(x => x.State, "reconciled").SetProperty(x => x.ReconciledBy, actor)
-                .SetProperty(x => x.ReconciledAt, Now).SetProperty(x => x.Code, "externally-reconciled-not-retried"), ct) != 1)
-            throw new AutomationException("Run changed. Reload before reconciling.");
-        await db.Set<ActionDefinition>().Where(x => x.ActiveRunId == id).ExecuteUpdateAsync(u => u.SetProperty(x => x.ActiveRunId, (Guid?)null), ct);
-        await db.Set<ImageUpdatePolicy>().Where(x => x.ActiveRunId == id).ExecuteUpdateAsync(u => u.SetProperty(x => x.ActiveRunId, (Guid?)null), ct);
-        await RecordAuditAsync(actor, "automation.reconciled", id.ToString(), "external-confirmation-no-replay", ct);
-        await transaction.CommitAsync(ct);
+        throw new AutomationException("Use Inspect and reconcile. An operator checkbox alone cannot prove execution stopped or release only one of the associated locks.");
     }
 
     public async Task<IReadOnlyList<WebhookDelivery>> DeliveriesAsync(Guid actor, Guid id, CancellationToken ct = default)

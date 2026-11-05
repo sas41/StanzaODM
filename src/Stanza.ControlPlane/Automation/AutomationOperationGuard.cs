@@ -46,12 +46,13 @@ public sealed class AutomationOperationGuard(StanzaDbContext db, AutomationServi
     private static bool Same(IReadOnlyDictionary<string, string> expected, IReadOnlyDictionary<string, string>? actual) =>
         expected.Count == (actual?.Count ?? 0) && expected.All(p => actual is not null && actual.TryGetValue(p.Key, out var value) && p.Value == value);
 
-    public async Task AuthorizeAsync(Guid actorId, string trigger, string kind, Guid? deploymentId, Guid agentId, CancellationToken ct = default)
+    public async Task AuthorizeAsync(Guid actorId, string trigger, string kind, Guid? deploymentId, Guid agentId, CancellationToken ct = default, bool continuation = false)
     {
         if (!trigger.StartsWith("automation:", StringComparison.Ordinal)) return;
         if (!Guid.TryParseExact(trigger[11..], "N", out var id)) throw new AutomationAccessException();
         var run = await db.Set<AutomationRun>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct);
-        if (run is null || (run.ActionId.HasValue ? run.ActionOwnerId : run.OwnerId) != actorId || run.State != "running" || run.CancelRequested || run.LeaseUntil < automation.Now)
+        if (run is null || (run.ActionId.HasValue ? run.ActionOwnerId : run.OwnerId) != actorId ||
+            (continuation ? run.State is not ("running" or "uncertain") : run.State != "running" || run.LeaseUntil < automation.Now) || run.CancelRequested)
             throw new AutomationAccessException();
         if (run.ActionId is { } actionId)
         {

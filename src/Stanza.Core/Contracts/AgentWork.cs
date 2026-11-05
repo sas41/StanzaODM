@@ -28,6 +28,9 @@ public sealed record AgentOutputChunk(long Sequence, string Stream, string Text)
 {
     public override string ToString() => $"AgentOutputChunk {{ Sequence = {Sequence}, Stream = {Stream}, Text = [REDACTED] }}";
 }
+public sealed record AgentJobInspection(Guid Id, bool Found, bool Active, bool Stopped, string Phase,
+    bool ApplyStarted, long LastSequence, long AcknowledgedSequence, long? LastHeartbeat,
+    string? CancellationReason = null, AgentWorkResponse? Response = null);
 public sealed record AgentCapabilities(string Runtime, bool DockerAvailable, bool ComposeAvailable,
     string? DockerVersion, string? ComposeVersion, string Architecture, bool HostExecutionAvailable, bool TerminalAvailable);
 public sealed record AgentImageObservation(string Service, string Image, string Platform, string? CurrentDigest,
@@ -44,7 +47,8 @@ public sealed record AgentWorkRequest(Guid Id, Guid DeploymentId, string Operati
 }
 public sealed record AgentWorkResponse(Guid Id, bool Succeeded, string Code, string? Output = null,
     IReadOnlyDictionary<string, string>? ResolvedSources = null, IReadOnlyDictionary<string, string>? ResolvedImages = null,
-    IReadOnlyList<GitReference>? GitReferences = null)
+    IReadOnlyList<GitReference>? GitReferences = null, bool ExecutionStopped = false, string? CancellationReason = null,
+    bool ApplyStarted = false)
 {
     public override string ToString() => $"AgentWorkResponse {{ Id = {Id}, Succeeded = {Succeeded}, Code = {Code}, Output = [REDACTED] }}";
 }
@@ -57,8 +61,8 @@ public sealed record GitReference(string Name, string? Commit = null, long? Comm
 public sealed record AgentWireMessage(string Type, Guid Id, AgentWorkRequest? Request = null,
     AgentWorkResponse? Response = null, string? Data = null,
     AgentConfiguration? Configuration = null, AgentDeploymentConfiguration? Deployment = null,
-    AgentOutputChunk? Output = null)
+    AgentOutputChunk? Output = null, AgentJobInspection? Job = null)
 {
-    public const int Version = 3;
+    public const int Version = 4;
     public override string ToString() => $"AgentWireMessage {{ Type = {Type}, Id = {Id}, Contents = [REDACTED] }}";
 }

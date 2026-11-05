@@ -3,18 +3,20 @@
 <div id="action-run-content" data-action-run="@Model.Run.Id" data-version="@Stanza.ControlPlane.Automation.AutomationLive.Version(Model)">
 <h1>Automation run</h1>
 <p>@Model.Run.Id · @Model.Run.Source · @Model.Run.State · @Model.Run.Code</p>
+@if (Model.Run.BlockingRunId is { } blocker) { <p class="notice warning">Blocked by run <a href="/automation/runs/@blocker">@blocker — inspect and recover</a>. A timeout does not release unresolved execution locks.</p> }
 <p>Execution identity: @Model.Run.OwnerId · requested by: @Model.Run.RequestedBy · requested: @DateTimeOffset.FromUnixTimeSeconds(Model.Run.CreatedAt).ToString("u")</p>
 @if (Model.Run.OperationId is { } operation) { <p>Correlated operation: <a href="/operations/@operation">@operation</a></p> }
 <table><thead><tr><th>Step</th><th>Kind</th><th>Deployment</th><th>Resolved Agent</th><th>Operation</th><th>Result</th></tr></thead><tbody>
 @foreach (var x in Model.Steps)
 { <tr><td>@(x.Index + 1)</td><td>@x.Kind</td><td>@x.DeploymentId</td><td>@x.AgentId</td><td>@if (x.OperationId is { } stepOperation) { <a href="/operations/@stepOperation">Operation details</a> }</td><td>@x.State · @x.Code</td></tr> }
 </tbody></table>
-@if (Model.Run.State is "queued" or "running")
+@if (Model.Run.State is "queued" or "running" or "uncertain")
 { <form method="post" action="/automation/runs/@Model.Run.Id/cancel">@Html.AntiForgeryToken()<button>Request cancellation</button></form> }
 @if (Model.Run.State == "uncertain")
 { <p><strong>Do not replay blindly.</strong> An interrupted command may already have changed the target. Reconcile the actual host/container/deployment state before retrying. Its action/image-policy concurrency lock remains held.</p>
-  <form method="post" action="/automation/runs/@Model.Run.Id/reconcile">@Html.AntiForgeryToken()<label><input type="checkbox" name="confirmedStopped" value="true" required /> I verified externally that the command has stopped and reconciled the target state. I understand this does not undo side effects or retry anything.</label><button>Record reconciliation and release automation lock</button></form> }
+  <form method="post" action="/automation/runs/@Model.Run.Id/reconcile">@Html.AntiForgeryToken()<label><input type="checkbox" name="confirmedStopped" value="true" /> If apply began, I have inspected the target and acknowledge its side effects. This does not undo changes or retry anything.</label><button>Inspect and reconcile</button></form><p>The Agent ledger must prove execution stopped. Container status is refreshed automatically; operations and automation locks are reconciled atomically.</p> }
 @if (Model.Run.ReconciledBy is { } reconciler) { <p>Externally reconciled by @reconciler. No automatic replay occurred.</p> }
+@if (Model.Run.State == "reconciled" && Model.Run.ActionId is { } retryAction) { <p><a href="/automation/actions/@retryAction/invoke">Review inputs and retry this action explicitly</a>. This creates a new run; previously executed steps are not resumed automatically.</p> }
 <p><a href="/automation/runs/@Model.Run.Id">Refresh</a> · <a href="/automation">Back</a></p>
 </div>
 <section class="panel" data-action-output="@Model.Run.Id" data-initial-state="@Model.Run.State"><h2>Live execution feed</h2>

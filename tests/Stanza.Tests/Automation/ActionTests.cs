@@ -94,10 +94,10 @@ public sealed class ActionTests
         await s.Executor().ExecuteNextAsync(); Assert.Equal("uncertain", (await s.Service.ReadRunAsync(s.Root, uncertain.Id)).Run.State);
         var next = await s.Service.QueueActionAsync(s.Root, action.Id); Assert.False(await s.Executor().ExecuteNextAsync());
         await Assert.ThrowsAsync<AutomationException>(() => s.Service.ReconcileRunAsync(s.Root, uncertain.Id, false));
-        await s.Service.ReconcileRunAsync(s.Root, uncertain.Id, true);
-        Assert.Equal(s.Root, (await s.Service.ReadRunAsync(s.Root, uncertain.Id)).Run.ReconciledBy);
-        s.Operations.State = "Succeeded"; Assert.True(await s.Executor().ExecuteNextAsync());
-        Assert.Equal("succeeded", (await s.Service.ReadRunAsync(s.Root, next.Id)).Run.State);
+        await Assert.ThrowsAsync<AutomationException>(() => s.Service.ReconcileRunAsync(s.Root, uncertain.Id, true));
+        Assert.Null((await s.Service.ReadRunAsync(s.Root, uncertain.Id)).Run.ReconciledBy);
+        s.Operations.State = "Succeeded"; Assert.False(await s.Executor().ExecuteNextAsync());
+        Assert.Equal("queued", (await s.Service.ReadRunAsync(s.Root, next.Id)).Run.State);
     }
 
     [Theory]
@@ -108,6 +108,7 @@ public sealed class ActionTests
         var first = await s.Service.QueueActionAsync(s.Root, action.Id); var second = await s.Service.QueueActionAsync(s.Root, action.Id);
         Assert.True(await s.Executor().ClaimAsync(first)); Assert.False(await s.Executor().ClaimAsync(first));
         Assert.False(await s.Executor().ClaimAsync(second)); Assert.Equal(expected, (await s.Service.ReadRunAsync(s.Root, second.Id)).Run.State);
+        if (policy == "reject") Assert.Equal(first.Id, (await s.Service.ReadRunAsync(s.Root, second.Id)).Run.BlockingRunId);
     }
 
     [Fact]

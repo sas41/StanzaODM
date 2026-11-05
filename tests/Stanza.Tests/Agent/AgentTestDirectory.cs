@@ -11,6 +11,12 @@ internal sealed class AgentTestDirectory : IDisposable
 
 internal static class AgentTestWait
 {
+    public static async Task UntilAsync(Func<Task<bool>> condition)
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(10));
+        while (!await condition()) await timer.WaitForNextTickAsync(cancellation.Token);
+    }
     public static async Task UntilAsync(Func<bool> condition)
     {
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));

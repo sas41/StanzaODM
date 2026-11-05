@@ -29,10 +29,19 @@ public sealed class OperationOutputStore(StanzaDbContext db, IDataProtectionProv
 
     public async Task AppendAsync(Guid id, AgentOutputChunk chunk, CancellationToken ct = default)
     {
-        db.Set<OperationOutputEntity>().Add(new() { OperationId = id, Sequence = chunk.Sequence, Stream = chunk.Stream,
-            ProtectedText = Protector(id, chunk.Sequence).Protect(chunk.Text) });
-        await db.SaveChangesAsync(ct);
+        var protectedText = Protector(id, chunk.Sequence).Protect(chunk.Text);
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO "OperationOutput" ("OperationId", "Sequence", "Stream", "ProtectedText")
+            VALUES ({id}, {chunk.Sequence}, {chunk.Stream}, {protectedText})
+            ON CONFLICT ("OperationId", "Sequence") DO NOTHING
+            """, ct);
+        var existing = await db.Set<OperationOutputEntity>().AsNoTracking().SingleAsync(x => x.OperationId == id && x.Sequence == chunk.Sequence, ct);
+        if (existing.Stream != chunk.Stream || Protector(id, chunk.Sequence).Unprotect(existing.ProtectedText) != chunk.Text)
+            throw new IOException("Replayed output differs from retained output.");
     }
+
+    public async Task<long> LastSequenceAsync(Guid id, CancellationToken ct = default) =>
+        await db.Set<OperationOutputEntity>().Where(x => x.OperationId == id).Select(x => (long?)x.Sequence).MaxAsync(ct) ?? 0;
 
     public async Task<IReadOnlyList<AgentOutputChunk>> ReadAsync(Guid id, long after, int count = 64, CancellationToken ct = default)
     {

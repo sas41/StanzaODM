@@ -281,8 +281,14 @@ public sealed class AutomationController(AutomationService automation, Automatio
     { await authorization.RequireAsync(Actor, "settings.read", "instance", null, ct); return View(await automation.LimitsAsync(ct)); });
 
     [HttpPost("runs/{id:guid}/reconcile"), ValidateAntiForgeryToken]
-    public Task<IActionResult> Reconcile(Guid id, bool confirmedStopped, CancellationToken ct) => Mutate(async () =>
-    { await automation.ReconcileRunAsync(Actor, id, confirmedStopped, ct); return RedirectToAction(nameof(Run), new { id }); });
+    public async Task<IActionResult> Reconcile(Guid id, bool confirmedStopped, [FromServices] Stanza.ControlPlane.Operations.OperationRecoveryService recovery, CancellationToken ct)
+    {
+        try { TempData["Success"] = await recovery.InspectRunAsync(Actor, id, confirmedStopped, ct); }
+        catch (AutomationAccessException) { return Forbid(); }
+        catch (Exception error) when (error is AutomationException or Stanza.ControlPlane.Operations.OperationException or Transport.AgentUnavailableException or IOException or TimeoutException)
+        { TempData["Error"] = error.Message; }
+        return RedirectToAction(nameof(Run), new { id });
+    }
 
     [HttpPost("limits"), ValidateAntiForgeryToken]
     public async Task<IActionResult> Limits(AutomationLimits model, CancellationToken ct)

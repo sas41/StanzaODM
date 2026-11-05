@@ -117,6 +117,7 @@ public sealed class AutomationRun
     public Guid? LeaseOwner { get; set; }
     public bool CancelRequested { get; set; }
     public Guid? OperationId { get; set; }
+    public Guid? BlockingRunId { get; set; }
     public Guid? ReconciledBy { get; set; }
     public long? ReconciledAt { get; set; }
     [JsonIgnore] public string ProtectedPlan { get; set; } = "";

@@ -10,6 +10,40 @@ namespace Stanza.Tests.Operations;
 public sealed class OperationOutputTests
 {
     [Fact]
+    public async Task ReplayedChunksAreIdempotentButConflictingReplayIsRejected()
+    {
+        await using var h = await OperationTestHarness.CreateAsync(); var operation = await h.EnqueueAsync();
+        await h.InScope(async s =>
+        {
+            var store = s.GetRequiredService<OperationOutputStore>(); var chunk = new AgentOutputChunk(1, "stdout", "durably retained\n");
+            await store.AppendAsync(operation.Id, chunk); await store.AppendAsync(operation.Id, chunk);
+            Assert.Equal(1, await store.LastSequenceAsync(operation.Id)); Assert.Single(await store.ReadAsync(operation.Id, 0));
+            await Assert.ThrowsAsync<IOException>(() => store.AppendAsync(operation.Id, chunk with { Text = "different output" }));
+            Assert.Equal(chunk.Text, (await store.ReadAsync(operation.Id, 0)).Single().Text);
+            return true;
+        });
+    }
+    [Fact]
+    public async Task UnresolvedOperationsRetainOutputAndDisconnectEvidenceBeyondNormalRetention()
+    {
+        await using var h = await OperationTestHarness.CreateAsync(); var operation = await h.EnqueueAsync();
+        await h.SetStateAsync(operation.Id, "Unknown", h.Clock.GetUtcNow().AddDays(-100).ToUnixTimeSeconds());
+        await h.InScope(async s =>
+        {
+            var db = s.GetRequiredService<StanzaDbContext>();
+            await s.GetRequiredService<OperationalPolicyService>().SaveAsync(h.Root, new(new() { LogRetentionDays = 1, AuditRetentionDays = 1 }, 0));
+            await s.GetRequiredService<OperationOutputStore>().AppendAsync(operation.Id, new(1, "stderr", "interruption evidence"));
+            db.Add(new AgentDisconnectEntity { Id = Guid.NewGuid(), OperationId = operation.Id, At = h.Clock.GetUtcNow().AddDays(-100).ToUnixTimeSeconds() });
+            await db.SaveChangesAsync(); return true;
+        });
+        await h.StartWorkerAsync(); await Task.Delay(100);
+        await h.InScope(async s =>
+        {
+            Assert.Single(await s.GetRequiredService<OperationOutputStore>().ReadAsync(operation.Id, 0));
+            Assert.Single(await s.GetRequiredService<StanzaDbContext>().Set<AgentDisconnectEntity>().ToListAsync()); return true;
+        });
+    }
+    [Fact]
     public async Task WorkerPersistsEncryptedOutputWhileRunningAndKeepsItAfterFailure()
     {
         await using var h = await OperationTestHarness.CreateAsync();
