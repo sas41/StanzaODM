@@ -30,4 +30,5 @@
         @await Html.PartialAsync("_ActionSchedule", new Stanza.ControlPlane.Automation.AutomationSchedule { ActionId = actionId, Name = (Model.Name.Length > 91 ? Model.Name[..91] : Model.Name) + " schedule" })
     </details>
     <a class="button" href="/automation/actions/@actionId/access">Manage action access</a>
+    <a class="button danger" href="/automation/actions/@actionId/delete">Delete action…</a>
 }

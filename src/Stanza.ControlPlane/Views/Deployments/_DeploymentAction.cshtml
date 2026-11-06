@@ -8,5 +8,7 @@
 <label for="name-@key">Name</label><input id="name-@key" name="Name" value="@Model.Name" maxlength="100" required />
 @await Html.PartialAsync("_WorkflowFields", Model)
 <label class="check-field"><input name="Enabled" type="checkbox" value="true" checked="@Model.Enabled" /> Enabled</label><input name="Enabled" type="hidden" value="false" />
-<div class="form-actions"><button class="button primary" type="submit">Save action</button></div>
+<div class="form-actions"><button class="button primary" type="submit">Save action</button>
+@if (Model.Id is { } actionId) { <a class="button danger" href="/automation/actions/@actionId/delete">Delete action…</a> }
+</div>
 </form></section>

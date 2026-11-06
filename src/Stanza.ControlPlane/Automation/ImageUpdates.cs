@@ -74,6 +74,7 @@ public static class AutomationRegistration
         services.TryAddSingleton(TimeProvider.System);
         services.AddMemoryCache(); services.AddScoped<ActionInputService>(); services.AddScoped<DeploymentActionOverview>();
         services.AddScoped<AutomationAuthorization>(); services.AddScoped<AutomationService>();
+        services.AddScoped<ActionDeletionService>();
         services.AddScoped<WebhookReceiver>(); services.AddScoped<AutomationScheduler>(); services.AddScoped<AutomationExecutor>();
         services.AddScoped<AutomationOperationGuard>();
         services.TryAddScoped<IImageDigestProbe, UnavailableImageDigestProbe>();

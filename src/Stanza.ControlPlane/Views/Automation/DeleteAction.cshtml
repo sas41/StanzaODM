@@ -1,0 +1,33 @@
+@model Stanza.ControlPlane.Automation.ActionDeletionDetails
+@{ ViewData["Title"] = "Delete action"; }
+<div class="page-heading"><h1>Delete action</h1><a class="button subtle" href="/automation/actions/edit?id=@Model.Id">Back to action</a></div>
+<section class="panel narrow" data-action-deletion>
+    <h2>@Model.Name</h2>
+    <p>This permanently removes the action definition, its remembered inputs, and its action-specific permission grants. It does not remove containers, deployments, files, or application data.</p>
+    <p>Run history, step results, operation output, audit records, and webhook delivery history are retained under the existing retention settings. Administrators retain access to run history. Deletion revokes action-specific access; remaining permissions still govern history and output.</p>
+    <div asp-validation-summary="All" class="validation" role="alert"></div>
+    @if (Model.BlockedReason is { } blocked) { <p class="notice warning" role="alert">@blocked</p> }
+    @if (Model.Schedules.Count > 0)
+    {
+        <h3>Linked schedules</h3><ul>
+        @foreach (var schedule in Model.Schedules) { <li><a href="/automation/schedules/edit?id=@schedule.Id">@schedule.Name</a></li> }
+        </ul>
+    }
+    @if (Model.Webhooks.Count > 0)
+    {
+        <h3>Linked webhooks</h3><ul>
+        @foreach (var hook in Model.Webhooks) { <li><a href="/automation/webhooks/edit?id=@hook.Id">@hook.Name</a></li> }
+        </ul>
+    }
+    @if (Model.Schedules.Count > 0 || Model.Webhooks.Count > 0)
+    { <p>Reassign these triggers to another action first if you want to keep them. Otherwise, separately confirm their removal below. Deleted webhook URLs stop accepting deliveries; no trigger falls back to a deployment operation.</p> }
+    <form method="post" action="/automation/actions/@Model.Id/delete">
+        @Html.AntiForgeryToken()
+        <input type="hidden" name="revision" value="@Model.Revision" />
+        <input type="hidden" name="fingerprint" value="@Model.Fingerprint" />
+        <label class="check-field"><input type="checkbox" name="confirmed" value="true" required /> I understand that deleting this action cannot be undone.</label>
+        @if (Model.Schedules.Count > 0 || Model.Webhooks.Count > 0)
+        { <label class="check-field"><input type="checkbox" name="deleteLinkedTriggers" value="true" required /> Also delete the @Model.Schedules.Count linked schedule(s) and @Model.Webhooks.Count linked webhook(s) listed above.</label> }
+        <div class="form-actions"><button class="danger" type="submit" disabled="@(Model.BlockedReason is not null)">Delete action</button><a class="button subtle" href="/automation/actions/edit?id=@Model.Id">Cancel</a></div>
+    </form>
+</section>

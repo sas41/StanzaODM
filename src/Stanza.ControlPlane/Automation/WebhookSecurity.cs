@@ -76,6 +76,9 @@ public sealed class WebhookReceiver(StanzaDbContext db, AutomationService automa
         if (Stanza.Core.Contracts.LimitPolicy.Exceeded(body.Length, limits.MaximumWebhookBytes)) return new(413, "payload-too-large");
         if (!WebhookSecurity.Token(deliveryId) || !WebhookSecurity.Token(eventName) || eventName.Length > 100) return new(400, "invalid-delivery-headers");
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        // Match the queue/configuration lock order so deletion cannot race a delivery or
+        // deadlock with a delivery that already holds the webhook's revision row lock.
+        await Security.SecurityWriteGuard.LockAsync(db, ct);
         var hook = await db.Set<WebhookDefinition>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct);
         if (hook is null || !hook.Enabled || hook.ProtectedSecret.Length == 0) return new(404, "unavailable");
         if (!WebhookSecurity.Verify(automation.Unprotect<string>(hook.ProtectedSecret), body, signature)) return new(401, "invalid-signature");

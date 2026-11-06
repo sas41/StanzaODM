@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server.Features;
@@ -150,6 +151,20 @@ public sealed class AutomationBrowserTests
             Assert.Equal(qa, qaRun.Run.RequestedBy); Assert.Equal(owner, qaRun.Run.ActionOwnerId);
             var cleanupSchedule = Assert.Single(await verify.ServiceProvider.GetRequiredService<AutomationService>().ActionSchedulesAsync(owner, pruneAction, ct));
             Assert.Null(cleanupSchedule.DeploymentId); Assert.False(cleanupSchedule.Enabled); Assert.Equal("0 3 * * *", cleanupSchedule.Expression);
+            // Deletion uses an ordinary confirmation page and separately confirms linked triggers.
+            await chrome.Eval("document.querySelector('.sidebar-footer form').requestSubmit(); true");
+            await chrome.Wait("location.pathname==='/account/login'");
+            await chrome.Eval("document.querySelector('#Username').value='owner'; document.querySelector('#Password').value='a-secure-password-123'; document.querySelector('form').requestSubmit(); true");
+            await chrome.Wait("location.pathname==='/'");
+            await chrome.Go(address, "/automation/actions/edit?id=" + pruneAction, "!!document.querySelector('a[href$=\"/delete\"]')");
+            await chrome.Eval("document.querySelector('a[href$=\"/delete\"]').click(); true");
+            await chrome.Wait("!!document.querySelector('[data-action-deletion]') && document.body.textContent.includes('Nightly Docker cleanup')");
+            Assert.True((await chrome.Eval("(()=>{const form=document.querySelector('[data-action-deletion] form');form.querySelector('[name=confirmed]').checked=true;return !form.checkValidity();})()")).GetBoolean());
+            await chrome.Eval("document.querySelector('[name=deleteLinkedTriggers]').checked=true;document.querySelector('[data-action-deletion] form').requestSubmit();true");
+            await chrome.Wait("location.pathname==='/automation' && document.body.textContent.includes('Action deleted')");
+            using var deleted = factory.Services.CreateScope();
+            Assert.False(await deleted.ServiceProvider.GetRequiredService<StanzaDbContext>().Set<ActionDefinition>().AnyAsync(x => x.Id == pruneAction, ct));
+            Assert.False(await deleted.ServiceProvider.GetRequiredService<StanzaDbContext>().Set<AutomationSchedule>().AnyAsync(x => x.ActionId == pruneAction, ct));
         }
         finally
         {

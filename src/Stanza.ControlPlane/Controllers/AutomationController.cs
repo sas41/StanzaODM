@@ -11,7 +11,7 @@ namespace Stanza.ControlPlane.Controllers;
 [Authorize, Route("automation"), ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 [RequestSizeLimit(2 * 1024 * 1024)]
 public sealed class AutomationController(AutomationService automation, AutomationAuthorization authorization, Sources.SourceService sources,
-    Persistence.StanzaDbContext db, Security.AccessService access) : Controller
+    Persistence.StanzaDbContext db, Security.AccessService access, ActionDeletionService deletion) : Controller
 {
     private Guid Actor => Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : Guid.Empty;
 
@@ -58,6 +58,31 @@ public sealed class AutomationController(AutomationService automation, Automatio
         }
         catch (AutomationAccessException) { return Forbid(); }
         catch (Exception e) when (Safe(e)) { ModelState.AddModelError("", Message(e)); return View(model); }
+    }
+
+    [HttpGet("actions/{id:guid}/delete")]
+    public async Task<IActionResult> DeleteAction(Guid id, CancellationToken ct)
+    {
+        try { return View("DeleteAction", await deletion.PreviewAsync(Actor, id, ct)); }
+        catch (AutomationAccessException) { return Forbid(); }
+        catch (AutomationException) { return NotFound(); }
+    }
+
+    [HttpPost("actions/{id:guid}/delete"), ValidateAntiForgeryToken]
+    public async Task<IActionResult> DeleteAction(Guid id, long revision, string? fingerprint, bool confirmed, bool deleteLinkedTriggers, CancellationToken ct)
+    {
+        try
+        {
+            await deletion.DeleteAsync(Actor, id, revision, fingerprint, confirmed, deleteLinkedTriggers, ct);
+            TempData["Success"] = "Action deleted. Confirmed linked triggers were removed; run history was retained. No workloads were changed.";
+            return RedirectToAction(nameof(Index));
+        }
+        catch (AutomationAccessException) { return Forbid(); }
+        catch (Exception e) when (Safe(e))
+        {
+            ModelState.AddModelError("", Message(e));
+            return await DeleteAction(id, ct);
+        }
     }
 
     [HttpPost("actions/{actionId:guid}/schedules"), ValidateAntiForgeryToken]

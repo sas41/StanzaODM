@@ -2,6 +2,7 @@
 @{ ViewData["Title"] = "Automation run"; }
 <div id="action-run-content" data-action-run="@Model.Run.Id" data-version="@Stanza.ControlPlane.Automation.AutomationLive.Version(Model)">
 <h1>Automation run</h1>
+@if (Model.Run.ActionId is not null && !Model.ActionAvailable) { <p class="notice">This action has been deleted. Its run history has been retained.</p> }
 <p>@Model.Run.Id · @Model.Run.Source · @Model.Run.State · @Model.Run.Code</p>
 @if (Model.Run.BlockingRunId is { } blocker) { <p class="notice warning">Blocked by run <a href="/automation/runs/@blocker">@blocker — inspect and recover</a>. A timeout does not release unresolved execution locks.</p> }
 <p>Execution identity: @Model.Run.OwnerId · requested by: @Model.Run.RequestedBy · requested: @DateTimeOffset.FromUnixTimeSeconds(Model.Run.CreatedAt).ToString("u")</p>
@@ -16,7 +17,7 @@
 { <p><strong>Do not replay blindly.</strong> An interrupted command may already have changed the target. Reconcile the actual host/container/deployment state before retrying. Its action/image-policy concurrency lock remains held.</p>
   <form method="post" action="/automation/runs/@Model.Run.Id/reconcile">@Html.AntiForgeryToken()<label><input type="checkbox" name="confirmedStopped" value="true" /> If apply began, I have inspected the target and acknowledge its side effects. This does not undo changes or retry anything.</label><button>Inspect and reconcile</button></form><p>The Agent ledger must prove execution stopped. Container status is refreshed automatically; operations and automation locks are reconciled atomically.</p> }
 @if (Model.Run.ReconciledBy is { } reconciler) { <p>Externally reconciled by @reconciler. No automatic replay occurred.</p> }
-@if (Model.Run.State == "reconciled" && Model.Run.ActionId is { } retryAction) { <p><a href="/automation/actions/@retryAction/invoke">Review inputs and retry this action explicitly</a>. This creates a new run; previously executed steps are not resumed automatically.</p> }
+@if (Model.ActionAvailable && Model.Run.State == "reconciled" && Model.Run.ActionId is { } retryAction) { <p><a href="/automation/actions/@retryAction/invoke">Review inputs and retry this action explicitly</a>. This creates a new run; previously executed steps are not resumed automatically.</p> }
 <p><a href="/automation/runs/@Model.Run.Id">Refresh</a> · <a href="/automation">Back</a></p>
 </div>
 <section class="panel" data-action-output="@Model.Run.Id" data-initial-state="@Model.Run.State"><h2>Live execution feed</h2>

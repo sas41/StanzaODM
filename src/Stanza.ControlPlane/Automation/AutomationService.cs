@@ -13,7 +13,10 @@ public sealed record AutomationOverview(IReadOnlyList<ActionDefinition> Actions,
 {
     public IReadOnlyDictionary<Guid, string> ScopeNames { get; init; } = new Dictionary<Guid, string>();
 }
-public sealed record AutomationRunDetails(AutomationRun Run, IReadOnlyList<AutomationStepRun> Steps);
+public sealed record AutomationRunDetails(AutomationRun Run, IReadOnlyList<AutomationStepRun> Steps)
+{
+    public bool ActionAvailable { get; init; } = true;
+}
 public sealed record WebhookSaved(WebhookDefinition Definition, string? Secret)
 {
     public override string ToString() => "WebhookSaved { [REDACTED] }";
@@ -190,6 +193,8 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
 
     public async Task<WebhookSaved> SaveWebhookAsync(Guid actor, WebhookDefinition input, long expectedRevision, CancellationToken ct = default)
     {
+        await using var transaction = db.Database.CurrentTransaction is null ? await db.Database.BeginTransactionAsync(ct) : null;
+        await SecurityWriteGuard.LockAsync(db, ct);
         input.Name = AutomationRules.Name(input.Name);
         // Browser forms bind empty optional strings to null. Empty ref filters/mapping mean
         // accept all refs/no mapped parameters; they are not malformed configuration.
@@ -213,11 +218,15 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
         input.Id = existing?.Id ?? Guid.NewGuid(); input.OwnerId = actor; input.Revision = (existing?.Revision ?? 0) + 1;
         input.ProtectedSecret = existing?.ProtectedSecret ?? Protect(secret!);
         input.RateWindow = existing?.RateWindow ?? 0; input.RateCount = existing?.RateCount ?? 0;
-        await SaveReplacement(input, existing, expectedRevision, actor, "automation.webhook.saved", input.Id, ct); return new(input, secret);
+        await SaveReplacement(input, existing, expectedRevision, actor, "automation.webhook.saved", input.Id, ct);
+        if (transaction is not null) await transaction.CommitAsync(ct);
+        return new(input, secret);
     }
 
     public async Task<string?> RotateWebhookAsync(Guid actor, Guid id, bool revoke, CancellationToken ct = default)
     {
+        await using var transaction = db.Database.CurrentTransaction is null ? await db.Database.BeginTransactionAsync(ct) : null;
+        await SecurityWriteGuard.LockAsync(db, ct);
         var hook = await db.Set<WebhookDefinition>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)
             ?? throw new AutomationException("Webhook is unavailable.");
         await authorization.RequireAsync(actor, "automation.manage", "deployment", hook.DeploymentId, ct);
@@ -226,6 +235,7 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
         await db.Set<WebhookDefinition>().Where(x => x.Id == id).ExecuteUpdateAsync(u => u.SetProperty(x => x.ProtectedSecret, encrypted)
             .SetProperty(x => x.Enabled, !revoke && hook.Enabled).SetProperty(x => x.Revision, x => x.Revision + 1), ct);
         await RecordAuditAsync(actor, "automation.webhook.secret", id.ToString(), revoke ? "revoked" : "rotated", ct);
+        if (transaction is not null) await transaction.CommitAsync(ct);
         return secret;
     }
 
@@ -343,7 +353,8 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
             run.BlockingRunId = run.ActionId is { } action
                 ? await db.Set<ActionDefinition>().Where(x => x.Id == action).Select(x => x.ActiveRunId).SingleOrDefaultAsync(ct)
                 : await db.Set<ImageUpdatePolicy>().Where(x => x.Id == run.DefinitionId).Select(x => x.ActiveRunId).SingleOrDefaultAsync(ct);
-        return new(run, await db.Set<AutomationStepRun>().AsNoTracking().Where(x => x.RunId == id).OrderBy(x => x.Index).ToListAsync(ct));
+        return new(run, await db.Set<AutomationStepRun>().AsNoTracking().Where(x => x.RunId == id).OrderBy(x => x.Index).ToListAsync(ct))
+        { ActionAvailable = run.ActionId is { } actionId && await db.Set<ActionDefinition>().AnyAsync(x => x.Id == actionId, ct) };
     }
 
     public async Task CancelRunAsync(Guid actor, Guid id, CancellationToken ct = default)
