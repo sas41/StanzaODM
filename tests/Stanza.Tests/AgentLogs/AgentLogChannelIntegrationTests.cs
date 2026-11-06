@@ -8,7 +8,7 @@ using Microsoft.Extensions.Options;
 using Stanza.Agent;
 using Stanza.Agent.Enrollment;
 using Stanza.Agent.Runtime;
-using Stanza.Agent.Terminals;
+using Stanza.Agent.Logs;
 using Stanza.Agent.Transport;
 using Stanza.ControlPlane.Agents;
 using Stanza.ControlPlane.Transport;
@@ -40,10 +40,10 @@ public sealed class AgentLogChannelIntegrationTests
         var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = app.Urls.Single(), EnrollmentToken = credential, AllowInsecureHttp = true });
         var dockerOptions = Options.Create(new DockerRuntimeOptions());
         var runner = new ProcessRunner(TimeProvider.System);
-        var runtime = new DockerCliRuntime(runner, options, dockerOptions);
+        var runtime = new DockerCapabilitiesProbe(runner, options, dockerOptions);
         var executor = new RejectingExecutor();
-        var channel = new AgentCommandChannel(options, new AgentState(), executor, store.Clock, new AgentTerminalManager(), runtime,
-            dockerOptions, Options.Create(new HostExecutionOptions()));
+        var channel = new AgentCommandChannel(options, new AgentState(), executor, store.Clock, new AgentLogManager(), runtime,
+            Options.Create(new HostExecutionOptions()));
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         var deployment = Guid.NewGuid(); var name = "stanza-log-wire-" + deployment.ToString("N");
         async Task<string> Docker(params string[] arguments)
@@ -59,10 +59,8 @@ public sealed class AgentLogChannelIntegrationTests
                 "/bin/sh", "-c", "printf 'stdout-1\\n'; printf 'stderr-1\\n' >&2; sleep 2; printf 'stdout-2\\n'; printf 'stderr-2\\n' >&2; exec sleep 180");
             running = channel.RunAsync(identity, cancellation.Token);
             while (broker.Capabilities(agent) is null) await Task.Delay(10, cancellation.Token);
-            await using var logs = await broker.OpenTerminalAsync(agent, deployment,
-                new("ignored", [], Container: name, Mode: "logs"), new(TimeoutSeconds: 60), cancellation.Token);
-            await Assert.ThrowsAsync<IOException>(() => logs.WriteInputAsync("kill 1\n"u8.ToArray(), cancellation.Token).AsTask());
-            await Assert.ThrowsAsync<IOException>(() => logs.ResizeAsync(100, 30, cancellation.Token).AsTask());
+            await using var logs = await broker.OpenLogsAsync(agent, deployment,
+                new("logs", [], Container: name, Mode: "logs"), new(TimeoutSeconds: 60), cancellation.Token);
             var text = new StringBuilder();
             while (!new[] { "stdout-1", "stderr-1", "stdout-2", "stderr-2" }.All(marker => text.ToString().Contains(marker, StringComparison.Ordinal)))
                 text.Append(Encoding.UTF8.GetString((await logs.ReadOutputAsync(cancellation.Token)).Data.Span));
@@ -70,7 +68,8 @@ public sealed class AgentLogChannelIntegrationTests
             Assert.DoesNotContain('\0', text.ToString());
             await logs.CloseAsync(cancellation.Token);
             Assert.True(broker.IsConnected(agent)); Assert.Equal(0, executor.Calls);
-            Assert.Empty(Directory.GetFileSystemEntries(Path.Combine(root.Path, "workspaces")));
+            Assert.False(Directory.Exists(Path.Combine(root.Path, "workspaces")));
+            Assert.False(Directory.Exists(Path.Combine(root.Path, "operation-workspaces")));
             Assert.Equal("true", (await Docker("inspect", "--format", "{{.State.Running}}", name)).Trim());
             Assert.Equal("null", (await Docker("inspect", "--format", "{{json .ExecIDs}}", name)).Trim());
         }

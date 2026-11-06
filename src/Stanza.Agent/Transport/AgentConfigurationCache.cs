@@ -7,7 +7,7 @@ using Stanza.Core.Contracts;
 namespace Stanza.Agent.Transport;
 
 /// <summary>Private authored configuration cache. Never modifies runtime workspaces or invokes Docker.</summary>
-public sealed class AgentConfigurationCache(IOptions<AgentOptions> options)
+public sealed class AgentConfigurationCache(IOptions<AgentOptions> options, AgentStorageHealth? health = null)
 {
     private AgentConfiguration? pending;
     public bool ExecutionEnabled { get; private set; }
@@ -17,7 +17,7 @@ public sealed class AgentConfigurationCache(IOptions<AgentOptions> options)
     {
         if (pending is not null || configuration.AgentId == Guid.Empty || configuration.DeploymentIds is null ||
             configuration.DeploymentIds.Count > 10000 || configuration.DeploymentIds.Contains(Guid.Empty) ||
-            configuration.DeploymentIds.Distinct().Count() != configuration.DeploymentIds.Count || configuration.Policy is null ||
+            configuration.DeploymentIds.Distinct().Count() != configuration.DeploymentIds.Count || configuration.Policy is null || configuration.MinimumFreeSpaceMiB < 0 ||
             !DockerRuntimeOptions.IsValid(new() { Endpoint = configuration.Policy.DockerEndpoint,
                 OperationTimeoutSeconds = configuration.Policy.TimeoutSeconds }))
             throw new IOException("Invalid Agent configuration.");
@@ -104,6 +104,7 @@ public sealed class AgentConfigurationCache(IOptions<AgentOptions> options)
         await ReplaceFileAsync("agent.env", Encoding.UTF8.GetBytes(configuration.AgentEnvironment), ct);
         await ReplaceFileAsync("agent.json", JsonSerializer.SerializeToUtf8Bytes(configuration, JsonSerializerOptions.Web), ct);
         ExecutionEnabled = configuration.Policy.ExecutionEnabled;
+        health?.Configure(configuration.MinimumFreeSpaceMiB);
         pending = null;
     }
 

@@ -3,9 +3,9 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
-using Stanza.Agent.Terminals;
+using Stanza.Agent.Logs;
 using Stanza.Agent.Transport;
-using Stanza.ControlPlane.Terminals;
+using Stanza.ControlPlane.Logs;
 using Stanza.ControlPlane.Transport;
 using Stanza.Core.Contracts;
 
@@ -13,22 +13,42 @@ namespace Stanza.Tests.AgentLogs;
 
 public sealed class LogBrokerTests
 {
+    [Theory]
+    [InlineData("log.output", "invalid!")]
+    [InlineData("log.ended", "not-an-integer")]
+    public async Task MalformedLogFramesFailClosedWithoutCreatingAnExecution(string type, string data)
+    {
+        await using var wire = await LogWire.CreateAsync(); var session = await wire.OpenAsync();
+        await wire.SendAsync(new(type, wire.LastSession, Data: data));
+        while (wire.Broker.IsConnected(wire.Agent)) await Task.Delay(10, wire.Token);
+        await Assert.ThrowsAsync<IOException>(() => session.ReadOutputAsync(wire.Token).AsTask());
+    }
+
+    [Fact]
+    public async Task LogCapacityIsBoundedAndNeverFallsBackToAnExecSession()
+    {
+        await using var wire = await LogWire.CreateAsync();
+        for (var i = 0; i < AgentLogManager.MaximumSessions; i++) await wire.OpenAsync();
+        await Assert.ThrowsAsync<IOException>(() => wire.Broker.OpenLogsAsync(wire.Agent, Guid.NewGuid(), new("logs", [], Container: "scoped", Mode: "logs"), new(), wire.Token));
+        Assert.True(wire.Broker.IsConnected(wire.Agent));
+    }
+
     [Fact]
     public async Task LogsUseSameWireAndBrokerRejectsMutationWithoutSendingInputOrResize()
     {
         await using var wire = await LogWire.CreateAsync();
         var session = await wire.OpenAsync();
-        await Assert.ThrowsAsync<IOException>(() => session.WriteInputAsync(Encoding.UTF8.GetBytes("kill 1\n"), wire.Token).AsTask());
-        await Assert.ThrowsAsync<IOException>(() => session.ResizeAsync(100, 30, wire.Token).AsTask());
-        await wire.SendAsync(new("terminal.output", wire.LastSession, Data: Convert.ToBase64String(Encoding.UTF8.GetBytes("stdout\nstderr\n"))));
+        Assert.Null(typeof(IAgentLogSession).GetMethod("WriteInputAsync"));
+        Assert.Null(typeof(IAgentLogSession).GetMethod("ResizeAsync"));
+        await wire.SendAsync(new("log.output", wire.LastSession, Data: Convert.ToBase64String(Encoding.UTF8.GetBytes("stdout\nstderr\n"))));
         Assert.Equal("stdout\nstderr\n", Encoding.UTF8.GetString((await session.ReadOutputAsync(wire.Token)).Data.Span));
         var workRequest = new AgentWorkRequest(Guid.NewGuid(), Guid.NewGuid(), "status", [], []);
         var work = wire.Broker.DispatchAsync(wire.Agent, workRequest, wire.Token);
         var frame = await wire.ReadAsync(); Assert.Equal("work.request", frame.Type);
         await wire.SendAsync(new("work.response", frame.Id, Response: new(frame.Id, true, "succeeded")));
         Assert.True((await work).Succeeded);
-        await wire.SendAsync(new("terminal.exited", wire.LastSession, Data: "0"));
-        Assert.Equal(0, (await session.ReadOutputAsync(wire.Token)).ExitCode);
+        await wire.SendAsync(new("log.ended", wire.LastSession, Data: "0"));
+        Assert.Equal(0, (await session.ReadOutputAsync(wire.Token)).EndCode);
         await session.DisposeAsync();
     }
 
@@ -38,19 +58,19 @@ public sealed class LogBrokerTests
         await using var wire = await LogWire.CreateAsync();
         var session = await wire.OpenAsync();
         var payload = Convert.ToBase64String(Enumerable.Repeat((byte)251, 65536).ToArray());
-        for (var i = 0; i < 128; i++) await wire.SendAsync(new("terminal.output", wire.LastSession, Data: payload));
-        Assert.Equal("terminal.close", (await wire.ReadAsync()).Type);
-        await wire.SendAsync(new("terminal.exited", wire.LastSession, Data: "125"));
+        for (var i = 0; i < 128; i++) await wire.SendAsync(new("log.output", wire.LastSession, Data: payload));
+        Assert.Equal("log.close", (await wire.ReadAsync()).Type);
+        await wire.SendAsync(new("log.ended", wire.LastSession, Data: "125"));
         for (var i = 0; i < 16; i++) Assert.Equal(65536, (await session.ReadOutputAsync(wire.Token)).Data.Length);
-        try { Assert.Equal(125, (await session.ReadOutputAsync(wire.Token)).ExitCode); }
+        try { Assert.Equal(125, (await session.ReadOutputAsync(wire.Token)).EndCode); }
         catch (IOException) { }
         await Assert.ThrowsAsync<IOException>(() => session.ReadOutputAsync(wire.Token).AsTask());
         Assert.True(wire.Broker.IsConnected(wire.Agent));
         // A later open is independent: slow-log cleanup did not abort the Agent channel or replay a command.
         var later = await wire.OpenAsync();
         var closing = later.CloseAsync(wire.Token).AsTask();
-        var close = await wire.ReadAsync(); Assert.Equal("terminal.close", close.Type);
-        await wire.SendAsync(new("terminal.exited", close.Id, Data: "125")); await closing;
+        var close = await wire.ReadAsync(); Assert.Equal("log.close", close.Type);
+        await wire.SendAsync(new("log.ended", close.Id, Data: "125")); await closing;
     }
 
     [Theory]
@@ -61,12 +81,12 @@ public sealed class LogBrokerTests
     public async Task UnknownModeFailsClosedOnBothSides(string? mode)
     {
         await using var wire = await LogWire.CreateAsync();
-        await Assert.ThrowsAsync<IOException>(() => wire.Broker.OpenTerminalAsync(wire.Agent, Guid.NewGuid(),
+        await Assert.ThrowsAsync<IOException>(() => wire.Broker.OpenLogsAsync(wire.Agent, Guid.NewGuid(),
             new("/bin/sh", [], Container: "scoped", Mode: mode!), new(), wire.Token));
-        var manager = new AgentTerminalManager();
+        var manager = new AgentLogManager();
         var id = Guid.NewGuid(); var sent = 0;
-        await Assert.ThrowsAsync<IOException>(() => manager.HandleAsync(new("terminal.open", id,
-            new(id, Guid.NewGuid(), "terminal.open", [], [], new("/bin/sh", [], Container: "scoped", Mode: mode!), Policy: new())),
+        await Assert.ThrowsAsync<IOException>(() => manager.HandleAsync(new("log.open", id,
+            new(id, Guid.NewGuid(), "log.open", [], [], new("/bin/sh", [], Container: "scoped", Mode: mode!), Policy: new())),
             _ => { sent++; return Task.CompletedTask; }, wire.Token));
         Assert.Equal(0, sent);
     }
@@ -100,11 +120,11 @@ public sealed class LogBrokerTests
             while (wire.Broker.Capabilities(wire.Agent) is null) await Task.Delay(5, wire.Token);
             return wire;
         }
-        public async Task<IAgentTerminalSession> OpenAsync()
+        public async Task<IAgentLogSession> OpenAsync()
         {
-            var opening = Broker.OpenTerminalAsync(Agent, Guid.NewGuid(), new("ignored", [], Container: "scoped", Mode: "logs"), new(), Token);
-            var open = await ReadAsync(); Assert.Equal("terminal.open", open.Type); Assert.Equal("logs", open.Request!.Execution!.Mode);
-            LastSession = open.Id; await SendAsync(new("terminal.opened", open.Id)); return await opening;
+            var opening = Broker.OpenLogsAsync(Agent, Guid.NewGuid(), new("logs", [], Container: "scoped", Mode: "logs"), new(), Token);
+            var open = await ReadAsync(); Assert.Equal("log.open", open.Type); Assert.Equal("logs", open.Request!.Execution!.Mode);
+            LastSession = open.Id; await SendAsync(new("log.opened", open.Id)); return await opening;
         }
         public async Task SendAsync(AgentWireMessage message) => await client.SendAsync(JsonSerializer.SerializeToUtf8Bytes(message, WireJson), WebSocketMessageType.Text, true, Token);
         public async Task<AgentWireMessage> ReadAsync()

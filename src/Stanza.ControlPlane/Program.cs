@@ -19,7 +19,6 @@ using Stanza.ControlPlane.Transport;
 using Stanza.ControlPlane.Recovery;
 using Stanza.ControlPlane.Automation;
 using Stanza.ControlPlane.Portability;
-using Stanza.ControlPlane.Terminals;
 using Stanza.ControlPlane.Logs;
 
 namespace Stanza.ControlPlane;
@@ -46,9 +45,8 @@ public sealed class ControlPlaneEntryPoint
         builder.Services.AddScoped<OutgoingWebhookService>();
         builder.Services.AddHostedService<OutgoingWebhookWorker>();
         builder.Services.AddStanzaPortability();
-        builder.Services.AddStanzaTerminals();
-        builder.Services.AddStanzaAgentTerminalBridge();
         builder.Services.AddStanzaLogs();
+        builder.Services.AddScoped<IAgentLogTransport, AgentLogTransport>();
         builder.Services.AddScoped<AuditService>();
         builder.Services.AddScoped<SourceService>();
         builder.Services.AddScoped<ISourceSnapshotProvider>(provider => provider.GetRequiredService<SourceService>());
@@ -178,7 +176,6 @@ public sealed class ControlPlaneEntryPoint
         app.MapControllers();
         app.MapStanzaLiveStatus();
         app.MapStanzaAgentTransport();
-        app.MapStanzaTerminals();
         app.MapStanzaLogs();
         app.MapStanzaOperationLive();
         app.MapStanzaActionLive();

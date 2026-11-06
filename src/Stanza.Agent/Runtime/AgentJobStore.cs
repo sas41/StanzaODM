@@ -16,39 +16,68 @@ public sealed class AgentJobStore : IAsyncDisposable
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly CancellationTokenSource shutdown = new();
     private readonly Dictionary<Guid, (CancellationTokenSource Cancel, Task Work)> running = [];
+    private readonly Dictionary<Guid, Journal> journals = [];
+    private readonly Dictionary<Guid, AgentOutputSpool> spools = [];
+    private readonly HashSet<Guid> outputFailures = [];
+    private readonly IAgentJournalStorage storage;
+    private readonly AgentStorageHealth? health;
+    private readonly CancellationTokenSource persistenceStopping = new();
+    private int archiveCursor;
 
     private readonly ILogger<AgentJobStore>? logger;
-    public AgentJobStore(IOptions<AgentOptions> options, IAgentWorkExecutor executor, TimeProvider clock, ILogger<AgentJobStore>? logger = null)
+    public AgentJobStore(IOptions<AgentOptions> options, IAgentWorkExecutor executor, TimeProvider clock, ILogger<AgentJobStore>? logger = null,
+        IAgentJournalStorage? storage = null, AgentStorageHealth? health = null)
     {
         this.executor = executor; this.clock = clock;
         this.logger = logger;
+        this.storage = storage ?? new AgentJournalStorage(); this.health = health;
         root = PrivateStorage.EnsureDirectory(Path.Combine(options.Value.PersistentDataRoot, "jobs-v1"));
         if (executor is IReportingAgentWorkExecutor reporting)
         { reporting.Progress += ProgressAsync; reporting.Output += OutputAsync; }
+        if (health is not null)
+            foreach (var path in Directory.EnumerateFiles(root, "*.json"))
+                if (Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out var id))
+                {
+                    try { if (Read(id)?.Job.Stopped != true) health.Unresolved(id); }
+                    catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+                    { Failed(id, "journal-read", error); }
+                    finally { journals.Remove(id); }
+                }
     }
 
     private string PathFor(Guid id) => Path.Combine(root, id.ToString("N") + ".json");
     private Journal? Read(Guid id)
     {
+        if (journals.TryGetValue(id, out var cached)) return cached;
         var path = PathFor(id); PrivateStorage.RejectLinks(path);
         if (!File.Exists(path)) return null;
         var journal = JsonSerializer.Deserialize<Journal>(File.ReadAllText(path)) ?? throw new IOException("Invalid job journal.");
-        if (journal.Version != 1 || journal.Job.Id != id) throw new IOException("Unsupported job journal.");
+        if (journal.Version is not (1 or 2) || journal.Job.Id != id) throw new IOException("Unsupported job journal.");
+        journals[id] = journal;
         return journal;
     }
     private void Write(Journal journal)
     {
-        if (OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
-        var path = PathFor(journal.Job.Id); PrivateStorage.RejectLinks(path);
-        var temporary = path + "." + Guid.NewGuid().ToString("N");
         try
         {
-            using (var stream = new FileStream(temporary, new FileStreamOptions { Mode = FileMode.CreateNew,
-                Access = FileAccess.Write, UnixCreateMode = PrivateStorage.FileMode }))
-            { JsonSerializer.Serialize(stream, journal); stream.Flush(true); }
-            File.Move(temporary, path, true); AgentWorkExecutor.FlushDirectory(root);
+            storage.Write(PathFor(journal.Job.Id), journal);
+            journals[journal.Job.Id] = journal;
+            health?.Succeeded(journal.Job.Id, "journal");
         }
-        finally { File.Delete(temporary); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        { Failed(journal.Job.Id, "journal", error); throw; }
+    }
+
+    private void Failed(Guid id, string stage, Exception error)
+    {
+        if (health?.Failed(id, stage, error) != false)
+            logger?.LogError(error, "Agent job {OperationId} {Stage} persistence failed (I/O code {ErrorCode}).", id, stage, error.HResult);
+    }
+    private string SpoolPath(Guid id) => Path.Combine(root, id.ToString("N") + ".output");
+    private AgentOutputSpool Spool(Guid id)
+    {
+        if (!spools.TryGetValue(id, out var spool)) spools[id] = spool = new(SpoolPath(id));
+        return spool;
     }
 
     public async Task<AgentWorkResponse?> StartAsync(AgentWorkRequest request)
@@ -68,10 +97,12 @@ public sealed class AgentJobStore : IAsyncDisposable
             // The original executor ledger remains authoritative for requests accepted before this upgrade.
             // ExecuteAsync consults it and never repeats an accepted command.
             if (running.Count > 0) return new(request.Id, false, "agent_busy");
+            if (health?.Read() is { AvailableBytes: { } available, MinimumFreeBytes: var minimum } && available < minimum)
+                return new(request.Id, false, "agent_storage_low");
             if (Directory.EnumerateFiles(root, "*.json").Take(100001).Count() >= 100000)
                 return new(request.Id, false, "ledger_capacity");
             var job = new AgentJobInspection(request.Id, true, true, false, "Accepted", false, 0, 0, Now);
-            Write(new(1, hash, job));
+            Write(new(2, hash, job));
             var cancel = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
             running.Add(request.Id, (cancel, Task.Run(() => ExecuteAsync(request, cancel.Token))));
             return null;
@@ -87,26 +118,41 @@ public sealed class AgentJobStore : IAsyncDisposable
         try { response = await executor.ExecuteAsync(request, token); }
         catch (Exception error)
         {
-            logger?.LogError("Agent job {OperationId} failed without a terminal execution result ({ErrorType}).", request.Id, error.GetType().Name);
+            logger?.LogError(error, "Agent job {OperationId} failed without a terminal execution result.", request.Id);
             response = new(request.Id, false, "uncertain");
         }
         await heartbeatLifetime.CancelAsync();
         await heartbeat;
-        await gate.WaitAsync();
-        try
+        health?.Pending(request.Id);
+        while (true)
         {
-            var journal = Read(request.Id)!;
-            // An uncertain executor result does not prove process cleanup, even if its Task returned.
-            var stopped = response.ExecutionStopped || response.Succeeded;
-            if (response.Code == "interrupted_before_apply") stopped = true;
-            var reason = journal.Job.CancellationReason ?? response.CancellationReason;
-            Write(journal with { Job = journal.Job with { Active = false, Stopped = stopped,
-                Response = response with { CancellationReason = reason, ApplyStarted = journal.Job.ApplyStarted }, CancellationReason = reason, LastHeartbeat = Now } });
-        }
-        finally
-        {
-            if (running.Remove(request.Id, out var active)) active.Cancel.Dispose();
-            gate.Release();
+            await gate.WaitAsync();
+            try
+            {
+                var journal = Read(request.Id)!;
+                if (journal.Version == 2) Spool(request.Id).FlushDurable();
+                // Retain this actual executor outcome in the task until persistence succeeds.
+                var stopped = response.ExecutionStopped || response.Succeeded || response.Code == "interrupted_before_apply";
+                var reason = journal.Job.CancellationReason ?? response.CancellationReason;
+                var terminal = response with { CancellationReason = reason, ApplyStarted = journal.Job.ApplyStarted || response.ApplyStarted,
+                    OutputIncomplete = response.OutputIncomplete || outputFailures.Contains(request.Id) || journal.Version == 2 && Spool(request.Id).Incomplete,
+                    LastOutputSequence = journal.Job.LastSequence };
+                Write(journal with { Job = journal.Job with { Active = false, Stopped = stopped,
+                    Response = terminal, ApplyStarted = terminal.ApplyStarted, CancellationReason = reason, LastHeartbeat = Now } });
+                if (running.Remove(request.Id, out var active)) active.Cancel.Dispose();
+                health?.Durable(request.Id);
+                if (stopped) health?.Resolved(request.Id); else health?.Unresolved(request.Id);
+                return;
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                Failed(request.Id, "terminal", error);
+                // Neither a transport failure nor a full disk is permission to discard this result.
+                if (persistenceStopping.IsCancellationRequested) return;
+            }
+            finally { gate.Release(); }
+            try { await Task.Delay(TimeSpan.FromSeconds(1), clock, persistenceStopping.Token); }
+            catch (OperationCanceledException) { return; }
         }
     }
     private async Task HeartbeatAsync(Guid id, CancellationToken ct)
@@ -117,13 +163,17 @@ public sealed class AgentJobStore : IAsyncDisposable
             {
                 await Task.Delay(TimeSpan.FromSeconds(5), clock, ct);
                 await gate.WaitAsync(ct);
-                try { var journal = Read(id)!; Write(journal with { Job = journal.Job with { LastHeartbeat = Now } }); }
+                try
+                {
+                    var journal = Read(id)!;
+                    if (journal.Version == 2) Spool(id).FlushDurable();
+                    Write(journal with { Job = journal.Job with { LastHeartbeat = Now } });
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { Failed(id, "heartbeat", error); }
                 finally { gate.Release(); }
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-        { logger?.LogError("Agent job {OperationId} heartbeat persistence failed ({ErrorType}); existing execution evidence is retained.", id, error.GetType().Name); }
     }
     private async Task ProgressAsync(Guid id, string phase)
     {
@@ -131,6 +181,7 @@ public sealed class AgentJobStore : IAsyncDisposable
         try
         {
             var journal = Read(id)!;
+            if (journal.Version == 2) Spool(id).FlushDurable();
             Write(journal with { Job = journal.Job with { Phase = phase,
                 ApplyStarted = journal.Job.ApplyStarted || phase == "Applying", LastHeartbeat = Now } });
         }
@@ -141,15 +192,19 @@ public sealed class AgentJobStore : IAsyncDisposable
         await gate.WaitAsync();
         try
         {
+            if (outputFailures.Contains(id)) return;
             var journal = Read(id)!;
-            if (OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
-            var directory = PrivateStorage.EnsureDirectory(Path.Combine(root, id.ToString("N")));
-            var path = Path.Combine(directory, chunk.Sequence.ToString("D20") + ".json"); PrivateStorage.RejectLinks(path);
-            using (var stream = new FileStream(path, new FileStreamOptions { Mode = FileMode.CreateNew,
-                Access = FileAccess.Write, UnixCreateMode = PrivateStorage.FileMode }))
-            { JsonSerializer.Serialize(stream, chunk); stream.Flush(true); }
-            AgentWorkExecutor.FlushDirectory(directory);
-            Write(journal with { Job = journal.Job with { LastSequence = chunk.Sequence, LastHeartbeat = Now } });
+            try
+            {
+                Spool(id).Append(chunk);
+                // The live cursor is memory-only; phase checkpoints/heartbeats/finalization fsync it.
+                journals[id] = journal with { Job = journal.Job with { LastSequence = chunk.Sequence, LastHeartbeat = Now } };
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                outputFailures.Add(id); Failed(id, "output", error);
+                // Output loss is reported with the result, not thrown into the process's stdout reader.
+            }
         }
         finally { gate.Release(); }
     }
@@ -180,19 +235,26 @@ public sealed class AgentJobStore : IAsyncDisposable
                 }
             }
             if (journal is null) return new(id, false, false, false, "Unavailable", false, 0, 0, null);
+            if (!running.ContainsKey(id))
+            {
+                if (journal.Job.Stopped) health?.Resolved(id); else health?.Unresolved(id);
+            }
             // After a process/container restart, an unfinished journal is evidence of uncertainty,
             // not evidence that an orphaned CLI or daemon-side operation stopped.
             return journal.Job with { Active = running.ContainsKey(id) };
         }
         finally { gate.Release(); }
     }
-    public async Task<IReadOnlyList<AgentOutputChunk>> ReadOutputAsync(Guid id, long after)
+    public async Task<IReadOnlyList<AgentOutputChunk>> ReadOutputAsync(Guid id, long after, int count = 64)
     {
         await gate.WaitAsync();
         try
         {
+            if (after < 0 || count is < 1 or > 64) throw new IOException("Invalid output cursor.");
             var journal = Read(id); var chunks = new List<AgentOutputChunk>();
-            for (var seq = after + 1; seq <= (journal?.Job.LastSequence ?? 0) && chunks.Count < 64; seq++)
+            if (journal is null || journal.Job.OutputArchived) return chunks;
+            if (journal.Version == 2) return Spool(id).Read(after, count);
+            for (var seq = after + 1; seq <= journal.Job.LastSequence && chunks.Count < count; seq++)
             {
                 var path = Path.Combine(root, id.ToString("N"), seq.ToString("D20") + ".json"); PrivateStorage.RejectLinks(path);
                 chunks.Add(JsonSerializer.Deserialize<AgentOutputChunk>(File.ReadAllText(path)) ?? throw new IOException("Invalid output journal."));
@@ -201,15 +263,58 @@ public sealed class AgentJobStore : IAsyncDisposable
         }
         finally { gate.Release(); }
     }
-    public async Task AcknowledgeAsync(Guid id, long sequence)
+    public async Task CommitOutputAsync(Guid id, long lastSequence)
     {
         await gate.WaitAsync();
         try
         {
-            var journal = Read(id) ?? throw new IOException("Unknown job acknowledgement.");
-            if (sequence < 0 || sequence > journal.Job.LastSequence) throw new IOException("Invalid output acknowledgement.");
-            if (sequence > journal.Job.AcknowledgedSequence)
-                Write(journal with { Job = journal.Job with { AcknowledgedSequence = sequence } });
+            var journal = Read(id) ?? throw new IOException("Unknown archive acknowledgement.");
+            if (running.ContainsKey(id) || !journal.Job.Stopped || journal.Job.Response is null || lastSequence != journal.Job.LastSequence)
+                throw new IOException("Archive acknowledgement does not cover a completed job.");
+            if (!journal.Job.OutputArchived)
+                Write(journal with { Job = journal.Job with { OutputArchived = true, AcknowledgedSequence = lastSequence,
+                    Response = journal.Job.Response with { Output = null } } });
+            var spool = SpoolPath(id); PrivateStorage.RejectLinks(spool); File.Delete(spool);
+            var legacy = Path.Combine(root, id.ToString("N")); PrivateStorage.RejectLinks(legacy);
+            if (Directory.Exists(legacy))
+            {
+                var files = Directory.GetFileSystemEntries(legacy);
+                foreach (var file in files)
+                {
+                    PrivateStorage.RejectLinks(file);
+                    var name = Path.GetFileName(file);
+                    if (name.Length != 25 || !name.EndsWith(".json", StringComparison.Ordinal) || !long.TryParse(name[..20], out var seq) ||
+                        seq < 1 || seq > lastSequence || !File.Exists(file)) throw new IOException("Unexpected legacy output entry; preserved.");
+                }
+                foreach (var file in files) File.Delete(file);
+                Directory.Delete(legacy);
+            }
+            AgentWorkExecutor.FlushDirectory(root);
+            spools.Remove(id); journals.Remove(id); outputFailures.Remove(id); health?.Durable(id); health?.Resolved(id);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        { Failed(id, "archive-cleanup", error); throw; }
+        finally { gate.Release(); }
+    }
+
+    public async Task<IReadOnlyList<AgentJobInspection>> PendingArchivesAsync()
+    {
+        await gate.WaitAsync();
+        try
+        {
+            var ids = Directory.EnumerateFiles(root, "*.output").Select(Path.GetFileNameWithoutExtension)
+                .Concat(Directory.EnumerateDirectories(root).Select(Path.GetFileName))
+                .Where(x => Guid.TryParseExact(x, "N", out _)).Select(x => Guid.ParseExact(x!, "N")).Distinct().ToArray();
+            var result = new List<AgentJobInspection>();
+            if (ids.Length == 0) return result;
+            for (var i = 0; i < Math.Min(ids.Length, 64); i++)
+            {
+                var id = ids[(archiveCursor + i) % ids.Length];
+                if (!running.ContainsKey(id) && Read(id)?.Job is { Stopped: true, Response: not null } job)
+                    result.Add(job with { Response = job.Response with { Output = null } });
+            }
+            archiveCursor = (archiveCursor + Math.Min(ids.Length, 64)) % ids.Length;
+            return result;
         }
         finally { gate.Release(); }
     }
@@ -252,12 +357,15 @@ public sealed class AgentJobStore : IAsyncDisposable
     }
     public async ValueTask DisposeAsync()
     {
-        await CancelAllAsync("shutdown");
+        persistenceStopping.Cancel();
+        try { await CancelAllAsync("shutdown"); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         Task[] tasks; await gate.WaitAsync();
         try { tasks = running.Values.Select(x => x.Work).ToArray(); } finally { gate.Release(); }
         await Task.WhenAll(tasks);
         if (executor is IReportingAgentWorkExecutor reporting)
         { reporting.Progress -= ProgressAsync; reporting.Output -= OutputAsync; }
         shutdown.Dispose();
+        persistenceStopping.Dispose();
     }
 }

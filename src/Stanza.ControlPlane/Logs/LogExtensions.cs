@@ -7,7 +7,6 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Stanza.ControlPlane.Audit;
 using Stanza.ControlPlane.Configuration;
 using Stanza.ControlPlane.Live;
-using Stanza.ControlPlane.Terminals;
 
 namespace Stanza.ControlPlane.Logs;
 
@@ -34,7 +33,7 @@ public static class LogExtensions
         var services = context.RequestServices;
         var ct = context.RequestAborted;
         var origin = await services.GetRequiredService<InstanceSettingsService>().ReadPublicOriginAsync(ct);
-        if (!TerminalExtensions.IsSameOrigin(context.Request, origin)) { context.Response.StatusCode = 403; return; }
+        if (!LiveWebSockets.IsSameOrigin(context.Request, origin)) { context.Response.StatusCode = 403; return; }
         if (!context.WebSockets.IsWebSocketRequest) { context.Response.StatusCode = 400; return; }
         var auth = await context.AuthenticateAsync(CookieAuthenticationDefaults.AuthenticationScheme);
         if (!auth.Succeeded || !Guid.TryParse(context.User.FindFirstValue(ClaimTypes.NameIdentifier), out var actor)
@@ -50,13 +49,13 @@ public static class LogExtensions
         var policy = operational is null ? new OperationalPolicy() : (await operational.GetAsync(ct)).Policy;
         using var lease = services.GetRequiredService<LiveConnectionLeases>().TryAcquire(actor, policy.MaximumConnectionsPerUser, policy.MaximumConnections);
         if (lease is null) { context.Response.StatusCode = 429; return; }
-        var transport = services.GetRequiredService<IAgentTerminalTransport>();
+        var transport = services.GetRequiredService<IAgentLogTransport>();
         var scopes = services.GetRequiredService<IServiceScopeFactory>();
         var clock = services.GetRequiredService<TimeProvider>();
         using var socket = await context.WebSockets.AcceptWebSocketAsync();
         using var workers = CancellationTokenSource.CreateLinkedTokenSource(ct);
         using var receiver = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        IAgentTerminalSession? session = null;
+        IAgentLogSession? session = null;
         Task<WebSocketCloseStatus>? input = null, output = null, monitor = null;
         var status = WebSocketCloseStatus.InternalServerError;
         var outcome = "failed";
@@ -130,15 +129,15 @@ public static class LogExtensions
         return WebSocketCloseStatus.NormalClosure;
     }
 
-    private static async Task<WebSocketCloseStatus> OutputAsync(WebSocket socket, IAgentTerminalSession session, Action<int> ended, CancellationToken ct)
+    private static async Task<WebSocketCloseStatus> OutputAsync(WebSocket socket, IAgentLogSession session, Action<int> ended, CancellationToken ct)
     {
         while (true)
         {
             var output = await session.ReadOutputAsync(ct);
             if (output.Data.Length > LogProtocol.MaximumOutputBytes) throw new LogFrameException();
-            if (output.Data.IsEmpty && output.ExitCode is null) throw new InvalidOperationException("The Agent returned an empty non-final log frame.");
+            if (output.Data.IsEmpty && output.EndCode is null) throw new InvalidOperationException("The Agent returned an empty non-final log frame.");
             if (!output.Data.IsEmpty) await SendAsync(socket, new { type = "output", data = Convert.ToBase64String(output.Data.Span) }, ct);
-            if (output.ExitCode is { } code)
+            if (output.EndCode is { } code)
             {
                 ended(code);
                 await SendAsync(socket, new { type = "end", code }, ct);

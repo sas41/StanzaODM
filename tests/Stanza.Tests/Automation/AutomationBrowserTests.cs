@@ -63,10 +63,14 @@ public sealed class AutomationBrowserTests
             Guid deployment;
             using (var seed = factory.Services.CreateScope())
                 deployment = (await seed.ServiceProvider.GetRequiredService<DeploymentDraftService>().CreateAsync(owner, "Automation demo", null, "services: {}", "")).Id;
-            await chrome.Go(address, "/automation/actions/edit", "!!document.querySelector('#PlanJson')");
-            var plan = JsonSerializer.Serialize(new ActionPlan([new("validate", deployment)]), AutomationRules.Json);
-            await chrome.Eval("document.querySelector('#Name').value='Browser ordered action'; document.querySelector('#PlanJson').value=" + JsonSerializer.Serialize(plan) + "; document.querySelector('#Enabled').checked=true; setTimeout(()=>document.querySelector('form[action=\"/automation/actions/edit\"]').requestSubmit(),0); true");
-            await chrome.Wait("location.pathname==='/automation' && document.body.textContent.includes('Browser ordered action')");
+            await chrome.Go(address, "/automation/actions/edit", "!!document.querySelector('#script-new')");
+            Assert.True((await chrome.Eval("!document.querySelector('[data-add-step]') && !document.querySelector('#PlanJson') && !document.querySelector('dialog').open")).GetBoolean());
+            await chrome.Eval("document.querySelector('.help-button').click(); true");
+            await chrome.Wait("document.querySelector('dialog').open");
+            await chrome.Eval("document.querySelector('dialog button').click(); true");
+            await chrome.Wait("!document.querySelector('dialog').open");
+            await chrome.Eval($"document.querySelector('#Name').value='Browser script action'; document.querySelector('#DeploymentId').value='{deployment}'; document.querySelector('#script-new').value='docker ps'; document.querySelector('#Enabled').checked=true; setTimeout(()=>document.querySelector('form[action=\"/automation/actions/edit\"]').requestSubmit(),0); true");
+            await chrome.Wait("location.pathname==='/automation' && document.body.textContent.includes('Browser script action')");
             await chrome.Go(address, "/automation/schedules/edit", "!!document.querySelector('#Expression')");
             await chrome.Eval($"document.querySelector('#Name').value='Browser durable schedule'; document.querySelector('#DeploymentId').value='{deployment}'; document.querySelector('#Expression').value='*/5 * * * *'; document.querySelector('#TimeZone').value='UTC'; document.querySelector('button[hx-post]').click(); true");
             await chrome.Wait("document.querySelector('#occurrences').textContent.includes('Upcoming occurrences')");
@@ -84,7 +88,7 @@ public sealed class AutomationBrowserTests
             var saved = await checkScope.ServiceProvider.GetRequiredService<AutomationService>().ListAsync(owner, ct);
             Assert.Single(saved.Actions); Assert.Single(saved.Schedules); Assert.Single(saved.Webhooks); Assert.Single(saved.ImagePolicies);
 
-            // Exercise the real visual editor, HTMX modal, remote branch/tag selectors and QA grants.
+            // Exercise script editing and preserve existing branch/tag selectors and QA grants.
             Guid dev, staging, versionAction, resetAction, pruneAction, qa;
             using (var seed = factory.Services.CreateScope())
             {
@@ -101,11 +105,13 @@ public sealed class AutomationBrowserTests
                     Execution: new("/usr/bin/reset-db", ["--testing"], Service: "app"))], DeploymentId: dev, Confirmation: "Reset the testing database?"))).Id;
                 pruneAction = (await automation.SaveActionAsync(owner, null, 0, "Docker cleanup", true, "queue",
                     new([new("host-exec", AgentId: agent, Execution: new("/usr/bin/docker", ["system", "prune", "--force"]))]))).Id;
+                await automation.SaveActionAsync(owner, null, 0, "Dev deploy", true, "queue", new([new("deploy", dev)],
+                    [new("branch", Default: "main", Input: "branch", Source: "src")], dev, "Deploy Latest"));
                 qa = (await seed.ServiceProvider.GetRequiredService<AccountService>().CreateAsync(owner, "qa", "a-secure-password-123", AccountRole.User)).Id;
             }
-            await chrome.Go(address, "/automation/actions/edit", "!!document.querySelector('[data-action-editor]:not([hidden])')");
-            await chrome.Eval($"document.querySelector('#Name').value='Dev deploy'; document.querySelector('#Enabled').checked=true; const d=document.querySelector('[data-plan-deployment]'); d.value='{dev}'; d.dispatchEvent(new Event('change')); document.querySelector('[data-plan-label]').value='Deploy Latest'; document.querySelector('[data-add-input]').click(); const p=document.querySelector('[data-editor-inputs]'); p.querySelector('[data-field=name]').value='branch'; p.querySelector('[data-field=default]').value='main'; const input=p.querySelector('[data-field=input]'); input.value='branch'; input.dispatchEvent(new Event('change')); p.querySelector('[data-field=source]').value='src'; document.querySelector('form[action=\"/automation/actions/edit\"]').requestSubmit(); true");
-            await chrome.Wait("location.pathname==='/automation' && document.body.textContent.includes('Dev deploy')");
+            await chrome.Go(address, "/automation/actions/edit", "!!document.querySelector('#script-new')");
+            await chrome.Eval($"document.querySelector('#Name').value='Dev script'; document.querySelector('#Enabled').checked=true; document.querySelector('#DeploymentId').value='{dev}'; document.querySelector('#target-new').value='container-script'; document.querySelector('#service-new').value='app'; document.querySelector('#script-new').value='echo ready'; document.querySelector('form[action=\"/automation/actions/edit\"]').requestSubmit(); true");
+            await chrome.Wait("location.pathname==='/automation' && document.body.textContent.includes('Dev script')");
             await chrome.Go(address, "/", "document.body.textContent.includes('local-agent-1 Deployments')");
             await chrome.Wait("!!window.htmx && document.readyState==='complete'");
             await chrome.Eval($"document.querySelector('button[hx-get=\"/automation/actions/{versionAction}/invoke\"]').click(); true");

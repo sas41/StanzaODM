@@ -168,6 +168,11 @@ public sealed class AgentDockerIntegrationTests
             Assert.Equal("running", Assert.Single(observed.RootElement.EnumerateArray()).GetProperty("State").GetString());
             var echo = await Run("container-exec", new("/usr/bin/printf", ["%s", "literal;$(not-shell)"], Service: "app"));
             Assert.Equal("literal;$(not-shell)", echo.Output);
+            var script = await Run("container-script", new("/bin/bash", [], Service: "app", Mode: "script", Script: "printf '%s' 'container-script-result'\n"));
+            Assert.Equal("container-script-result", script.Output);
+            var dockerScript = await Run("docker-script", new("/bin/bash", [], Mode: "script",
+                Script: "docker ps --all --filter \"label=com.docker.compose.project=${STANZA_PROJECT_NAME}\" --format '{{.ID}}'\n"));
+            Assert.False(string.IsNullOrWhiteSpace(dockerScript.Output));
             var environment = await Run("container-exec", new("/usr/bin/printenv", ["STANZA_LAYER"], Service: "app"));
             Assert.Equal("deployment", environment.Output!.Trim());
             Assert.Equal("12345", (await Run("container-exec", new("/usr/bin/id", ["-u"], Service: "app"))).Output!.Trim());

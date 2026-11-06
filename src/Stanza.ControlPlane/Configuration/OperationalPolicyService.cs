@@ -28,6 +28,7 @@ public sealed record OperationalPolicy
     [Range(0, int.MaxValue)] public int MaximumConnections { get; set; } = 1024;
     [Range(0, 3650)] public int LogRetentionDays { get; set; } = 30;
     [Range(0, 3650)] public int AuditRetentionDays { get; set; } = 365;
+    [Range(0, int.MaxValue)] public int MinimumAgentFreeSpaceMiB { get; set; } = 2048;
     public bool AllowHostActions { get; set; }
     [StringLength(4096)] public string TrustedProxyAddresses { get; set; } = "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1,fc00::/7";
     [Range(0, int.MaxValue)] public int TrustedProxyForwardLimit { get; set; } = 1;

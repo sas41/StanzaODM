@@ -44,9 +44,13 @@ docker compose logs --tail=100 initialize-agent agent
 
 Keep the database/Control Plane named volumes (including encryption keys and database credentials) and `./agent_data`. Do not use `down -v` as a troubleshooting step. Docker socket access grants substantial host control.
 
-Execution-resilience upgrades use Agent channel protocol 4 and additive database schema version 4. Upgrade the Control Plane and Agents to matching releases, retaining all existing volumes, encryption keys, identity files and request ledgers. Drain active work before recreating an Agent: jobs survive network disconnects and Control Plane restarts, not destruction of the Agent process. An incompatible Agent fails closed until upgraded; no data reset is required.
+Script actions, temporary-output archiving and read-only log streaming use Agent channel protocol 7; the database schema remains version 4. Upgrade the Control Plane and Agents to matching releases, retaining all existing volumes, encryption keys, identity files and request ledgers. Existing action definitions are not automatically converted. Drain active work before recreating an Agent: jobs survive network disconnects and Control Plane restarts, not destruction of the Agent process. An incompatible Agent fails closed until upgraded; no data reset is required.
 
-Accepted jobs persist phase checkpoints, redacted output, final results and disconnect diagnostics under `./agent_data/jobs-v1`. The original `request-ledger` remains authoritative and is never cleared to permit a retry. The Control Plane also retains disconnect diagnostics in PostgreSQL, visible on operation details. Use **Inspect and reconcile** on an uncertain operation or automation run: it checks execution evidence, refreshes container status and resolves both locks together. Active work, missing evidence and unfinished journals after an Agent crash keep locks held. A failed/interrupted apply requires explicit acknowledgement of inspected side effects; a confirmed interruption before apply can be retried as a new run. Timeouts never unlock unresolved work.
+Accepted jobs keep phase checkpoints, final results and disconnect diagnostics under `./agent_data/jobs-v1`. New jobs use journal format 2 and one temporary `<operation-id>.output` spool, not a file per output chunk. During execution, the CP reads that spool for live output and mid-run catch-up. After completion it archives the output and result in PostgreSQL, then acknowledges the save; only that acknowledgement permits Agent spool deletion. Failed transfers/database writes retain the spool, and reconnects/heartbeats retry archive acknowledgements. Future history reads use the CP database. Older format-1 chunk histories remain readable and are not silently discarded.
+
+Small execution receipts and the original `request-ledger` remain on the Agent to prevent re-execution; they are never cleared to permit a retry. Journal writes use flush-and-rename replacement. A terminal result that cannot be saved is retained in memory and retried while the Agent remains alive. Agent readiness reports low free space, journal failures and unresolved jobs. The free-space minimum is configurable under **Settings → Operational policy**; output lost to a storage failure is explicitly marked incomplete, independently of the execution result.
+
+The Control Plane also retains disconnect diagnostics in PostgreSQL, visible on operation details. Use **Inspect and reconcile** on an uncertain operation or automation run: it checks execution evidence, refreshes container status and resolves both locks together. Active work, missing evidence and unfinished journals after an Agent crash keep locks held. A failed/interrupted apply requires explicit acknowledgement of inspected side effects; a confirmed interruption before apply can be retried as a new run. Timeouts never unlock unresolved work.
 
 ### Additional Agents
 
@@ -114,11 +118,11 @@ The stack's installation `.env` configures Stanza itself; the deployment `.env` 
 1. Create a draft, select an approved Agent, paste your Compose and deployment `.env`, then save.
 2. Reference values with `${KEY}`. To inject every value from the authored deployment file, use `env_file: ./.env`; this is not the merged Global/Agent environment. Add supporting `app.env` files through the file editor if needed.
 3. For private images, create registry credentials under **Credentials & registries**, test them, and bind them on the deployment's **Git and registry sources** page. Public images need no credential binding.
-4. Validate, deploy, and inspect **Operations**, **Live logs**, or **Container terminal**. Configuration edits require another explicit deployment to take effect.
+4. Validate, deploy, and inspect **Operations** or **Live logs**. Configuration edits require another explicit deployment to take effect. For commands inside a container, create a container script action; there is no interactive terminal.
 
 ### 2. Build application code from Git
 
-Compose is maintained in Stanza; Git supplies isolated application build inputs, not a Git-managed Compose file. HTTPS repositories are supported; SSH URLs and submodules are not.
+Compose is maintained in Stanza; Git supplies isolated application build inputs, not a Git-managed Compose file. HTTPS repositories are supported; SSH URLs are not. Checkouts fetch only the selected reference at depth one, without tag history or recursive submodule fetching; repositories containing submodule declarations can still supply their top-level files.
 
 1. Create the draft and select its Agent. For a private repository, first create a Git credential in **Credentials & registries**.
 2. Open the deployment's **Git and registry sources**, add the repository URL/ref/credential, and use destination `sources/app`. Save, then browse/search branches or tags; an exact commit can also be selected.
@@ -190,29 +194,27 @@ Compose is maintained in Stanza; Git supplies isolated application build inputs,
 4. Queue the guided move and monitor its operations: destination validation, source stop, destination deploy/health check, then placement update. Previews are warnings, not proof of host-wide conflict freedom.
 5. On success verify the destination application, then explicitly request source-container cleanup if desired. On failure inspect both Agents and the recovery record before repeating commands; do not assume rollback or delete source volumes. Use **Clone** instead to create a separate inactive deployment identity.
 
-## Scheduled maintenance: Docker cleanup
+## Script action buttons
 
-You can schedule `docker system prune` as an admin-only host action. **This affects the entire Docker daemon, not just one deployment**: it removes stopped containers, unused networks, dangling images and unused build cache. Review the impact on every environment sharing that daemon before enabling it.
+Open a deployment and select **Add action**, or edit its actions alongside the deployment configuration. Choose a name and one execution target:
 
-1. Use an approved Agent with the opt-in `compose.agent.privileged.yaml` profile described above, and enable host actions in the Control Plane's **Operational policy**. Ordinary Agents cannot execute host commands.
-2. Open **Actions & automation → New action**, name it `Docker cleanup`, and enable the action. No deployment or inputs are required.
-3. Configure one step:
-   - **Operation:** `host-exec`
-   - **Agent:** the host to clean up
-   - **Executable:** `/usr/bin/docker` (adjust if Docker is installed elsewhere on that host)
-   - **Arguments:** one per line, without a shell wrapper:
+- **Host Docker:** Bash runs inside the ordinary non-root Agent, with Docker CLI access to its host daemon. No host shell, SSH or privileged profile is required. Select a deployment for its managed files, depth-one Git checkouts, `STANZA_PROJECT_NAME` and `STANZA_DEPLOYMENT_ID`; or select an Agent with no deployment for host-wide administration.
+- **Container:** select a Compose service and supply a Bash script. Exactly one matching container must already be running and contain `/bin/bash`; Stanza does not install it or start the container automatically.
 
-   ```text
-   system
-   prune
-   --force
-   ```
+For example, a Host Docker action can inspect only its deployment's containers:
 
-4. Choose **Save and configure schedule**. Under **Periodic execution**, add a schedule with:
-   - **Cron:** `0 3 * * *`
-   - **Timezone:** `UTC` (daily at 03:00 UTC)
-   - **Overlap:** skip this occurrence
-   - **Missed occurrences:** skip
-5. Preview the next runs, enable periodic execution, and save the schedule. Keep the action admin-only: do not grant it to ordinary users or groups. Monitor scheduled results under **Actions & automation**.
+```bash
+docker ps --all --filter "label=com.docker.compose.project=${STANZA_PROJECT_NAME}"
+```
 
-The example deliberately omits `--volumes` and `--all`: it does not request volume cleanup or removal of all unused images. Do not add those flags without reviewing their broader impact. `--force` suppresses Docker's interactive confirmation, so review the action before enabling its schedule. Nothing is pruned merely by saving a paused schedule.
+Scripts are passed on standard input, not interpolated into command arguments. Bash stops on command/pipeline failure. Output streams to the action result, and cancellation stops execution without undoing changes already made. Docker scripts have daemon-level power: authors must scope commands appropriately, rather than use daemon-wide pruning on shared hosts.
+
+For host-wide maintenance, choose **Agents → Add Docker maintenance action**, leave Deployment empty, and select the target Agent. Commands such as `docker system prune --force` are supported; they affect the whole Docker daemon, not only Stanza deployments. Use a confirmation message and review shared workloads before running them. Stanza does not automatically invoke daemon-wide pruning.
+
+The Agent image retains OpenSSH for SSH-capable Git commands in authored scripts. Managed Git-source configuration currently supports HTTPS only; retaining the SSH client does not add a managed private-key/known-hosts editor.
+
+Live container logs are read-only and use a bounded streaming subscription. Interactive PTYs, keystroke forwarding, resizing and xterm.js are no longer shipped. Log streaming does not create an execution workspace or durable job.
+
+Enabled actions appear as buttons on the deployment and overview for authorized users/groups. The script body is not exposed by the button. Detailed target/execution help is available from the `?` beside the script field.
+
+Existing step-based actions, schedules and access assignments are retained unchanged. Their definitions can be inspected, and replacing their steps/inputs with a script requires explicit confirmation. Script edits preserve existing button labels, ordering, visibility and concurrency settings. Script actions also survive configuration JSON export/import; imports remain inactive until explicitly enabled.

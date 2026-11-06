@@ -1,0 +1,27 @@
+@model ActionEditorModel
+@{ var key = Model.Id?.ToString("N") ?? "new"; var help = "script-help-" + key; }
+@if (Model.IsLegacy)
+{
+    <p class="notice warning">This action uses the previous step format. It has not been converted.</p>
+    <details><summary>Existing definition</summary><pre>@(Model.PlanJson ?? ViewData["LegacyPlan"])</pre></details>
+    <label class="check-field"><input name="ReplaceLegacy" type="checkbox" value="true" checked="@Model.ReplaceLegacy" /> Replace its steps and inputs with the script below</label>
+}
+<div class="form-grid" data-script-action>
+    <label class="field" for="target-@key">Run on<select id="target-@key" name="Target">
+        <option value="docker-script" selected="@(Model.Target == "docker-script")">Host Docker</option>
+        <option value="container-script" selected="@(Model.Target == "container-script")">Container</option>
+    </select></label>
+    <label class="field" for="service-@key">Container service<input id="service-@key" name="Service" value="@Model.Service" maxlength="100" title="Compose service name. Required only for container scripts." /></label>
+    <div class="field span-full"><div class="inline-form"><label for="script-@key">Bash script</label><button type="button" class="help-button" command="show-modal" commandfor="@help" aria-label="Script help">?</button></div>
+        <textarea id="script-@key" name="Script" rows="14" maxlength="65536" spellcheck="false" class="code-editor" required>@Model.Script</textarea>
+    </div>
+    <label class="field span-full" for="confirmation-@key">Confirmation message (optional)<input id="confirmation-@key" name="Confirmation" value="@Model.Confirmation" maxlength="1000" title="Ask for confirmation before running this action." /></label>
+</div>
+<dialog id="@help" aria-labelledby="@help-title">
+    <h2 id="@help-title">Action scripts</h2>
+    <p><strong>Host Docker:</strong> Bash runs in the Agent's deployment workspace. Use the Docker CLI to operate the host daemon; this does not open a host shell or require a privileged Agent.</p>
+    <p>For deployment actions, <code>STANZA_PROJECT_NAME</code> and <code>STANZA_DEPLOYMENT_ID</code> identify the deployment, and its managed files and shallow Git checkouts are available. For host maintenance, select an Agent instead of a deployment. Commands such as <code>docker system prune</code> affect the whole Docker daemon.</p>
+    <p><strong>Container:</strong> select a Compose service. Its container must be running and contain <code>/bin/bash</code>. Stanza does not install Bash or start containers automatically.</p>
+    <p>Scripts stop on command or pipeline failure. Output is streamed to the result. Cancellation cannot undo changes already made.</p>
+    <button type="button" command="close" commandfor="@help">Close</button>
+</dialog>

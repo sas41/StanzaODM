@@ -93,6 +93,7 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
         string? responseText = null;
         string? appliedMetadata = null;
         var dispatched = false;
+        AgentWorkResponse? completedResponse = null;
         async Task Progress(Guid operationId, string stage)
         {
             if (operationId != id) return;
@@ -110,6 +111,7 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
         async Task Output(Guid operationId, AgentOutputChunk chunk)
         {
             if (operationId != id) return;
+            if (dispatcher is IAgentOutputArchive) return;
             await using var outputScope = scopes.CreateAsyncScope();
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             await outputScope.ServiceProvider.GetRequiredService<OperationOutputStore>().AppendAsync(id, chunk, deadline.Token);
@@ -126,6 +128,11 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
             // The Agent owns the deadline. Shutdown only detaches this waiter.
             dispatched = true;
             var response = await dispatcher.DispatchAsync(row.AgentId, request, cancel.Token);
+            if (response.ExecutionStopped || response.Succeeded)
+            {
+                await services.GetRequiredService<OperationOutputStore>().ArchiveAsync(row.AgentId, id, response.LastOutputSequence, stoppingToken);
+                completedResponse = response;
+            }
             if (response.CancellationReason is { } reason)
                 await db.Set<OperationEntity>().Where(x => x.Id == id).ExecuteUpdateAsync(u => u.SetProperty(x => x.CancellationReason, reason), stoppingToken);
             state = response.Code == "agent_busy" ? "Queued" : response.Code is "uncertain" or "job_not_found" or "request_id_conflict" || !response.Succeeded && response.ApplyStarted ? "Unknown" : response.Succeeded ? "Succeeded" : response.Code == "cancelled" ? "Cancelled" : "Failed";
@@ -152,10 +159,15 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
         finally { if (reporter is not null) reporter.Progress -= Progress; if (outputSource is not null) outputSource.Output -= Output; await cancel.CancelAsync(); try { await monitor; } catch (OperationCanceledException) { } }
         // Use a separate bounded token to persist uncertainty even during host shutdown.
         using var persist = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await db.Set<OperationEntity>().Where(x => x.Id == id && x.WorkerId == workerId && (x.State == "Running" || x.State == "CancellationRequested"))
+        var savedResult = await db.Set<OperationEntity>().Where(x => x.Id == id && x.WorkerId == workerId && (x.State == "Running" || x.State == "CancellationRequested"))
             .ExecuteUpdateAsync(update => update.SetProperty(x => x.State, state).SetProperty(x => x.Code, code)
                 .SetProperty(x => x.ProtectedResponse, responseText).SetProperty(x => x.ProtectedAppliedMetadata, appliedMetadata).SetProperty(x => x.CompletedAt, state == "Queued" ? null : (long?)clock.GetUtcNow().ToUnixTimeSeconds()), persist.Token);
         await services.GetRequiredService<AuditService>().WriteAsync(row.ActorId, state == "Queued" ? "operation.deferred" : "operation.finished", id.ToString(), state + ":" + code, persist.Token);
+        if (savedResult == 1 && completedResponse is not null && dispatcher is IAgentOutputArchive archive)
+        {
+            try { await archive.CommitOutputAsync(row.AgentId, id, completedResponse.LastOutputSequence, persist.Token); }
+            catch (Exception error) { logger.LogWarning(error, "Agent output archive acknowledgement for {OperationId} will be retried on reconnect/heartbeat.", id); }
+        }
     }
     private async Task MonitorCancellationAsync(Guid id, CancellationTokenSource cancel, CancellationToken stoppingToken)
     {

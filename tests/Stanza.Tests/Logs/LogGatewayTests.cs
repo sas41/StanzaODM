@@ -52,8 +52,8 @@ public sealed class LogGatewayTests
         await server.Transport.Session.Disposed.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await server.WaitForAuditAsync();
         Assert.True(server.Transport.Session.Closed);
-        Assert.Equal(0, server.Transport.Session.InputCalls);
-        Assert.Equal(0, server.Transport.Session.ResizeCalls);
+        Assert.Null(typeof(Stanza.ControlPlane.Logs.IAgentLogSession).GetMethod("WriteInputAsync"));
+        Assert.Null(typeof(Stanza.ControlPlane.Logs.IAgentLogSession).GetMethod("ResizeAsync"));
         using var scope = server.App.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<StanzaDbContext>();
         Assert.Empty(await db.Set<OperationEntity>().ToListAsync());
@@ -203,8 +203,8 @@ public sealed class LogGatewayTests
         else await SendAsync(socket, new { type = kind });
         await ExpectCloseAsync(socket, WebSocketCloseStatus.PolicyViolation);
         await server.Transport.Session.Disposed.Task.WaitAsync(timeout.Token);
-        Assert.Equal(0, server.Transport.Session.InputCalls);
-        Assert.Equal(0, server.Transport.Session.ResizeCalls);
+        Assert.Null(typeof(Stanza.ControlPlane.Logs.IAgentLogSession).GetMethod("WriteInputAsync"));
+        Assert.Null(typeof(Stanza.ControlPlane.Logs.IAgentLogSession).GetMethod("ResizeAsync"));
     }
 
     [Fact]

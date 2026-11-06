@@ -2,7 +2,7 @@ using Microsoft.Extensions.Options;
 using Stanza.Agent.Enrollment;
 using Stanza.Agent.Runtime;
 using Stanza.Agent.Transport;
-using Stanza.Agent.Terminals;
+using Stanza.Agent.Logs;
 
 namespace Stanza.Agent;
 
@@ -26,27 +26,32 @@ public sealed class AgentEntryPoint
         builder.Services.AddOptions<DockerRuntimeOptions>().BindConfiguration("Agent:Docker")
             .Validate(DockerRuntimeOptions.IsValid, "Agent Docker configuration is invalid.").ValidateOnStart();
         builder.Services.AddSingleton<IProcessRunner, ProcessRunner>();
-        builder.Services.AddSingleton<IContainerRuntime, DockerCliRuntime>();
+        builder.Services.AddSingleton<IDockerCapabilitiesProbe, DockerCapabilitiesProbe>();
         builder.Services.AddSingleton<IAgentHostPathResolver, DockerAgentHostPathResolver>();
         builder.Services.AddSingleton<IAgentWorkExecutor, AgentWorkExecutor>();
         builder.Services.AddSingleton<AgentJobStore>();
+        builder.Services.AddSingleton<IAgentJournalStorage, AgentJournalStorage>();
+        builder.Services.AddSingleton<IAgentDiskSpace, AgentDiskSpaceReader>();
+        builder.Services.AddSingleton<AgentStorageHealth>();
         builder.Services.AddSingleton<IAgentCommandChannel, AgentCommandChannel>();
-        builder.Services.AddSingleton<AgentTerminalManager>();
+        builder.Services.AddSingleton<AgentLogManager>();
         builder.Services.Configure<HostExecutionOptions>(builder.Configuration.GetSection("Agent:HostExecution"));
 
         var app = builder.Build();
         app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
-        app.MapGet("/health/ready", (AgentState state) =>
+        app.MapGet("/health/ready", (AgentState state, AgentStorageHealth health) =>
         {
             var snapshot = state.Snapshot;
+            var storage = health.Read();
             var body = new
             {
-                status = snapshot.Ready ? "ready" : "unavailable",
+                status = snapshot.Ready && storage.Healthy ? "ready" : "unavailable",
                 enrollment = snapshot.Enrollment.ToString().ToLowerInvariant(),
                 snapshot.CommandChannelAvailable,
-                snapshot.CanExecuteWork
+                CanExecuteWork = snapshot.CanExecuteWork && storage.Healthy,
+                storage
             };
-            return Results.Json(body, statusCode: snapshot.Ready ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
+            return Results.Json(body, statusCode: snapshot.Ready && storage.Healthy ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
         });
         await app.RunAsync();
     }

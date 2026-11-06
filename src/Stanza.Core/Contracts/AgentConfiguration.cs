@@ -2,7 +2,7 @@ namespace Stanza.Core.Contracts;
 
 // Configuration replication is not a workload operation. Credentials remain operation-scoped.
 public sealed record AgentConfiguration(Guid AgentId, string GlobalEnvironment, string AgentEnvironment,
-    AgentRuntimePolicy Policy, IReadOnlyList<Guid> DeploymentIds)
+    AgentRuntimePolicy Policy, IReadOnlyList<Guid> DeploymentIds, int MinimumFreeSpaceMiB = 2048)
 {
     public override string ToString() => $"AgentConfiguration {{ AgentId = {AgentId}, Contents = [REDACTED] }}";
 }

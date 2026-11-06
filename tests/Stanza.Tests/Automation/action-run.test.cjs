@@ -9,9 +9,11 @@ function setup({ preference = null, initial = 'queued', blocked = false, storage
     const listeners = {}, soundListeners = {}, testListeners = {}, sockets = [], notes = [], saved = [];
     const sound = { checked: true, addEventListener(name, fn) { soundListeners[name] = fn; } };
     const status = { textContent: '' }, soundStatus = { textContent: '' };
+    const sections = [];
     const controls = {
         '[data-completion-sound]': sound, '[data-sound-status]': soundStatus, '[data-feed-status]': status,
-        '[data-test-sound]': { addEventListener(name, fn) { testListeners[name] = fn; } }
+        '[data-test-sound]': { addEventListener(name, fn) { testListeners[name] = fn; } },
+        '[data-feed-operations]': { append(section) { sections.push(section); } }, '[data-feed-follow]': { checked: false }
     };
     const feed = { dataset: { actionOutput: '12345678-1234-1234-1234-123456789012', initialState: initial }, querySelector(s) { return controls[s]; } };
     class Socket {
@@ -28,7 +30,8 @@ function setup({ preference = null, initial = 'queued', blocked = false, storage
         createGain() { return { gain: { setValueAtTime() { }, exponentialRampToValueAtTime() { } }, connect() { } }; }
     }
     vm.runInNewContext(script, {
-        document: { querySelector() { return feed; }, getElementById() { return { dataset: {} }; }, addEventListener(name, fn) { listeners[name] = fn; } },
+        document: { querySelector() { return feed; }, getElementById() { return { dataset: {} }; }, addEventListener(name, fn) { listeners[name] = fn; },
+            createElement() { return { textContent: '', dataset: {}, children: [], append(...children) { this.children.push(...children); } }; } },
         window: { AudioContext: Audio, addEventListener(name, fn) { listeners[name] = fn; } },
         WebSocket: Socket, location: { protocol: 'https:', host: 'stanza.test' },
         localStorage: {
@@ -36,8 +39,8 @@ function setup({ preference = null, initial = 'queued', blocked = false, storage
             setItem(key, value) { if (storageBlocked) throw Error('private storage'); saved.push([key, value]); }
         }, setTimeout() { }, clearTimeout() { }
     });
-    return { sound, soundStatus, notes, saved, listeners, soundListeners, testListeners, sockets,
-        async message(state) { sockets.at(-1).onmessage({ data: JSON.stringify({ version: 'a'.repeat(64), operations: [], state }) }); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); } };
+    return { sound, soundStatus, notes, saved, listeners, soundListeners, testListeners, sockets, sections,
+        async message(state, operations = []) { sockets.at(-1).onmessage({ data: JSON.stringify({ version: 'a'.repeat(64), operations, state }) }); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); } };
 }
 
 test('sound defaults on and succeeds with a bell exactly once despite duplicate frames', async () => {
@@ -77,4 +80,12 @@ test('private storage failure does not break the live feed or default-on audio',
 
 test('test-sound button provides an audio gesture independently of the notification preference', async () => {
     const s = setup({ preference: 'off' }); await s.testListeners.click(); assert.equal(s.notes.length, 2);
+});
+
+test('storage-related output loss is explicitly shown independently of execution success', async () => {
+    const s = setup();
+    await s.message('succeeded', [{ id: '12345678-1234-1234-1234-123456789012', state: 'Succeeded', stage: 'Checking',
+        outputAllowed: true, outputIncomplete: true, chunks: [] }]);
+    assert.match(s.sections[0].children[1].textContent, /Output history incomplete/);
+    assert.match(s.sections[0].children[1].textContent, /^Succeeded/);
 });

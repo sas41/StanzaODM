@@ -1,6 +1,6 @@
 using System.Net.Sockets;
 using System.Text;
-using Stanza.Agent.Terminals;
+using Stanza.Agent.Logs;
 using Stanza.Core.Contracts;
 
 namespace Stanza.Tests.AgentLogs;
@@ -54,8 +54,8 @@ public sealed class UnixLogProtocolTests
         });
         try
         {
-            using var client = new DockerTerminalClient("unix://" + path);
-            var target = await client.ResolveTargetAsync(deployment, new("ignored", [], Service: "app", Mode: "logs"), false, timeout.Token);
+            using var client = new DockerLogClient("unix://" + path);
+            var target = await client.ResolveTargetAsync(deployment, new("logs", [], Service: "app", Mode: "logs"), timeout.Token);
             Assert.Equal("safe-id", target.Id); Assert.False(target.Tty);
             await using var logs = await client.OpenLogsAsync(target, timeout.Token);
             Assert.Equal("numbered-stdout-1\nnumbered-stderr-2\n", await DockerLogStreamTests.ReadAllAsync(logs));

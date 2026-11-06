@@ -3,7 +3,6 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using Stanza.Agent.Logs;
-using Stanza.Agent.Terminals;
 
 namespace Stanza.Tests.AgentLogs;
 

@@ -92,12 +92,13 @@ main { margin-left: var(--sidebar); }
 .help-disclosure { padding: 11px 14px; border: 1px solid var(--line); border-radius: var(--radius); margin: 12px 0; background: var(--surface); }
 .help-disclosure[open] > summary { margin-bottom: 12px; }
 .help-disclosure > :last-child { margin-bottom: 0; }
+.help-button { width: 24px; min-width: 24px; min-height: 24px; padding: 0; border-radius: 50%; }
 .empty-state { padding: 18px; color: var(--muted); text-align: center; border: 1px dashed var(--line); border-radius: var(--radius); }
 
 /* Every native control is styled, including buttons without a .button class. */
 label { display: block; font-size: 12px; font-weight: 600; margin: 10px 0 5px; }
-input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), select, textarea:not(.xterm-helper-textarea) { display: block; width: 100%; min-width: 0; min-height: 35px; padding: 7px 10px; border: 1px solid #425049; border-radius: 5px; background: #101719; color: var(--text); font-size: 13px; font-weight: 400; line-height: 1.45; }
-textarea:not(.xterm-helper-textarea) { min-height: 90px; resize: vertical; font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 2; }
+input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), select, textarea { display: block; width: 100%; min-width: 0; min-height: 35px; padding: 7px 10px; border: 1px solid #425049; border-radius: 5px; background: #101719; color: var(--text); font-size: 13px; font-weight: 400; line-height: 1.45; }
+textarea { min-height: 90px; resize: vertical; font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 2; }
 input::placeholder, textarea::placeholder { color: #7e8c85; opacity: 1; }
 input:focus-visible, select:focus-visible, textarea:focus-visible { border-color: var(--accent); outline: 2px solid #b9ed9160; outline-offset: 1px; }
 input[type="checkbox"], input[type="radio"] { display: inline-block; width: 16px; height: 16px; min-width: 16px; margin: 2px 0 0; padding: 0; vertical-align: middle; accent-color: var(--accent); cursor: pointer; flex: none; }
@@ -202,9 +203,8 @@ dialog [data-close-action] { margin-top: 10px; }
 .htmx-request.htmx-indicator, .htmx-request .htmx-indicator { display: inline-block; }
 .htmx-request.htmx-indicator[hidden], .htmx-request .htmx-indicator[hidden] { display: inline-block !important; }
 button.htmx-request { cursor: progress; opacity: .65; }
-#container-terminal { overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); padding: 8px; background: #000; }
 #container-logs { height: 55vh; min-height: 220px; max-height: none; white-space: pre-wrap; overflow-wrap: anywhere; }
-#terminal-status, #logs-status { color: var(--muted); font-size: 12px; margin: 10px 0; }
+#logs-status { color: var(--muted); font-size: 12px; margin: 10px 0; }
 
 .auth-layout .sidebar { position: static; width: auto; height: auto; background: transparent; border: 0; padding: 20px 24px; }
 .auth-layout .sidebar-copy { display: none; }

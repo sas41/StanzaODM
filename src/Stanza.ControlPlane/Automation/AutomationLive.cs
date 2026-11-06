@@ -7,7 +7,6 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Stanza.ControlPlane.Configuration;
 using Stanza.ControlPlane.Live;
 using Stanza.ControlPlane.Security;
-using Stanza.ControlPlane.Terminals;
 
 namespace Stanza.ControlPlane.Automation;
 
@@ -38,7 +37,7 @@ public static class AutomationLive
         }
         var legacySent = new HashSet<Guid>();
         var origin = await context.RequestServices.GetRequiredService<InstanceSettingsService>().ReadPublicOriginAsync(context.RequestAborted);
-        if (!TerminalExtensions.IsSameOrigin(context.Request, origin)) { context.Response.StatusCode = 403; return; }
+        if (!LiveWebSockets.IsSameOrigin(context.Request, origin)) { context.Response.StatusCode = 403; return; }
         if (!context.WebSockets.IsWebSocketRequest) { context.Response.StatusCode = 400; return; }
         var auth = await context.AuthenticateAsync(CookieAuthenticationDefaults.AuthenticationScheme);
         if (!Guid.TryParse(context.User.FindFirstValue(ClaimTypes.NameIdentifier), out var actor) || auth.Properties?.ExpiresUtc is not { } expires)
@@ -84,7 +83,10 @@ public static class AutomationLive
                 if (batch is not null && !batch.HasMore && batch.Operations.All(x => Operations.OperationService.Terminal(x.State)) &&
                     data is AutomationRunDetails final && final.Run.State is not ("queued" or "running"))
                 { await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Run finished.", lifetime.Token); break; }
-                if (batch?.HasMore != true) await Task.WhenAny(input, Task.Delay(TimeSpan.FromMilliseconds(includeOutput ? 250 : 2000), lifetime.Token));
+                if (batch?.HasMore != true)
+                    await Task.WhenAny(input, includeOutput && batch?.Operations.LastOrDefault() is { } current
+                        ? scope.ServiceProvider.GetRequiredService<Operations.OperationOutputStore>().WaitAsync(current.Id, lifetime.Token)
+                        : Task.Delay(TimeSpan.FromMilliseconds(includeOutput ? 250 : 2000), lifetime.Token));
             }
         }
         catch (AutomationAccessException) { if (socket.State == WebSocketState.Open) await socket.CloseOutputAsync(WebSocketCloseStatus.PolicyViolation, "Access revoked.", CancellationToken.None); }

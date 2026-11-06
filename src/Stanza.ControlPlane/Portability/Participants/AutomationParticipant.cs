@@ -142,10 +142,16 @@ public sealed class AutomationParticipant(StanzaDbContext db, AutomationService 
             for (var i = 0; i < a.Steps.Count; i++)
             {
                 var s = a.Steps[i];
-                var target = s.Kind == "host-exec" ? await support.Resolve(c, s.Agent!, "agent", ct, true) : await support.Resolve(c, s.Deployment!, "deployment", ct, true);
-                var permission = Permission(s.Kind);
-                await support.Require(c.ActorId, permission, s.Kind == "host-exec" ? "agent" : "deployment", target, ct);
-                await support.Require(owner, permission, s.Kind == "host-exec" ? "agent" : "deployment", target, ct);
+                var agentTarget = s.Agent is not null && s.Deployment is null;
+                var target = agentTarget ? await support.Resolve(c, s.Agent!, "agent", ct, true) : await support.Resolve(c, s.Deployment!, "deployment", ct, true);
+                var permission = agentTarget ? "host.execute" : Permission(s.Kind);
+                await support.Require(c.ActorId, permission, agentTarget ? "agent" : "deployment", target, ct);
+                await support.Require(owner, permission, agentTarget ? "agent" : "deployment", target, ct);
+                if (s.Kind == "docker-script")
+                {
+                    await support.Require(c.ActorId, "host.execute", "agent", agentTarget ? target : null, ct);
+                    await support.Require(owner, "host.execute", "agent", agentTarget ? target : null, ct);
+                }
             }
         }
         foreach (var s in section.Schedules)
@@ -201,9 +207,10 @@ public sealed class AutomationParticipant(StanzaDbContext db, AutomationService 
                 for (var i = 0; i < definition.Steps.Count; i++)
                 {
                     var step = definition.Steps[i];
-                    var type = step.Kind == "host-exec" ? "agent" : "deployment";
+                    var type = step.Agent is not null && step.Deployment is null ? "agent" : "deployment";
                     var target = await support.Resolve(c, type == "agent" ? step.Agent! : step.Deployment!, type, ct, true);
-                    if (!actionSchedule) await support.Require(owner, Permission(step.Kind), type, target, ct);
+                    if (!actionSchedule) await support.Require(owner, type == "agent" ? "host.execute" : Permission(step.Kind), type, target, ct);
+                    if (!actionSchedule && step.Kind == "docker-script") await support.Require(owner, "host.execute", "agent", type == "agent" ? target : null, ct);
                 }
             }
             else if (id is { } existing)
@@ -247,7 +254,8 @@ public sealed class AutomationParticipant(StanzaDbContext db, AutomationService 
     }
     private static string Permission(string kind) => kind switch
     {
-        "host-exec" => "host.execute", "container-exec" => "container.execute", "pull" => "deployment.deploy",
+        "host-exec" => "host.execute", "container-exec" or "container-script" => "container.execute", "pull" => "deployment.deploy",
+        "docker-script" => "deployment.read",
         "status" => "deployment.read", "logs" => "logs.read", _ => "deployment." + kind
     };
     private static WebhookDefinition Hook(PortableWebhook h, Guid deployment, Guid? action) => new()

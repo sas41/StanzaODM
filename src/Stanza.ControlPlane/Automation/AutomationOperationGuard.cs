@@ -60,7 +60,7 @@ public sealed class AutomationOperationGuard(StanzaDbContext db, AutomationServi
             if (!definition.Enabled || definition.OwnerId != run.ActionOwnerId) throw new AutomationAccessException();
             var plan = automation.Unprotect<ActionPlan>(run.ProtectedPlan);
             if (definition.ScopeDeploymentId != plan.DeploymentId) throw new AutomationAccessException();
-            var step = plan.Steps.FirstOrDefault(s => AutomationRules.OperationKind(s.Kind) == kind && s.DeploymentId == deploymentId && (s.Kind != "host-exec" || s.AgentId == agentId));
+            var step = plan.Steps.FirstOrDefault(s => AutomationRules.OperationKind(s.Kind) == kind && s.DeploymentId == deploymentId && (s.AgentId is null || s.AgentId == agentId));
             if (step is null) throw new AutomationAccessException();
             await authorization.RequireAsync(run.OwnerId, "action.execute", "action", actionId, ct);
             await authorization.RequireAsync(run.RequestedBy, "action.execute", "action", actionId, ct);

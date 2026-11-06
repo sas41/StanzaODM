@@ -7,6 +7,8 @@ public sealed class DockerRuntimeOptions
     // Unix socket only in this foundation. Remote endpoints need an explicit TLS design.
     public string Endpoint { get; set; } = "unix:///var/run/docker.sock";
     public int OperationTimeoutSeconds { get; set; } = 3600;
+    public static bool IsIdentifier(string? value) => value is { Length: > 0 and <= 63 } &&
+        (value[0] is >= 'a' and <= 'z' or >= '0' and <= '9') && value.All(c => c is >= 'a' and <= 'z' or >= '0' and <= '9' or '_' or '-');
 
     public static bool IsValid(DockerRuntimeOptions options) =>
         !string.IsNullOrWhiteSpace(options.ExecutablePath) && Path.IsPathFullyQualified(options.ExecutablePath) &&

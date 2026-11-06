@@ -59,6 +59,10 @@ public static partial class AutomationRules
         if (plan.Steps is null || plan.Steps.Count is < 1 or > 50 || (plan.Parameters?.Count ?? 0) > 50)
             throw new AutomationException("Use 1–50 steps and at most 50 parameters.");
         if (!MatchesScope(plan)) throw new AutomationException("Deployment-scoped actions may target only their own deployment. Use Global scope for cross-deployment or host actions.");
+        if (plan.Steps.Any(s => s?.Kind is "docker-script" or "container-script") &&
+            (plan.Steps.Count != 1 || plan.Parameters?.Count > 0 || plan.DeploymentId != plan.Steps[0].DeploymentId ||
+                plan.DeploymentId is null && plan.Steps[0].Kind != "docker-script"))
+            throw new AutomationException("A script action contains one script and targets one deployment or Agent.");
         var parameters = plan.Parameters ?? [];
         if (parameters.Any(p => p is null || p.Name is null || !NamePattern().IsMatch(p.Name) || p.Type is not ("string" or "integer" or "boolean")))
             throw new AutomationException("Parameters require unique identifier names and string, integer, or boolean types.");
@@ -99,13 +103,19 @@ public static partial class AutomationRules
         {
             if (step is null || step.TimeoutSeconds is < 0 or > 604800 || step.Failure is not ("stop" or "continue"))
                 throw new AutomationException("Each step needs a 1–3600 second timeout and stop/continue failure policy.");
-            if (step.Kind == "host-exec")
+            if (step.Kind == "host-exec" || step.Kind == "docker-script" && step.DeploymentId is null)
             {
                 if (step.AgentId is null || step.AgentId == Guid.Empty || step.DeploymentId is not null)
                     throw new AutomationException("Host execution requires an explicit Agent and no deployment target.");
             }
-            else if ((!Operations.Contains(step.Kind) && step.Kind != "container-exec") || step.DeploymentId is null || step.DeploymentId == Guid.Empty || step.AgentId is not null)
+            else if ((!Operations.Contains(step.Kind) && step.Kind is not ("container-exec" or "docker-script" or "container-script")) || step.DeploymentId is null || step.DeploymentId == Guid.Empty || step.AgentId is not null)
                 throw new AutomationException("Select a supported operation and an explicit deployment target.");
+            if (step.Kind is "docker-script" or "container-script")
+            {
+                ValidateScript(step.Kind, step.Execution);
+                continue;
+            }
+            if (step.Execution?.Script is not null) throw new AutomationException("Scripts require a script action target.");
             if (step.Kind is "container-exec" or "host-exec")
             {
                 var execution = step.Execution;
@@ -133,6 +143,17 @@ public static partial class AutomationRules
             }
             else if (step.Execution is not null) throw new AutomationException("Only execution steps accept command fields.");
         }
+    }
+
+    public static void ValidateScript(string kind, AgentExecution? execution)
+    {
+        if (kind is not ("docker-script" or "container-script") || execution is null || execution.Mode != "script" ||
+            execution.Executable != "/bin/bash" || execution.Arguments is not { Count: 0 } ||
+            !BashScriptRules.IsValid(execution.Script) || execution.Environment is { Count: > 0 } ||
+            execution.Container is not null || execution.User is not null || execution.WorkingDirectory is not null)
+            throw new AutomationException("Supply a Bash script of 1–65,536 characters without NUL characters.");
+        if (kind == "container-script" ? !BashScriptRules.IsServiceName(execution.Service) : execution.Service is not null)
+            throw new AutomationException("Container scripts require a Compose service; Docker scripts do not select a container.");
     }
 
     private static bool IsInterpreter(string executable) => new[] { "sh", "bash", "dash", "zsh", "ash", "fish", "cmd", "cmd.exe", "powershell", "pwsh", "python", "python3", "node", "perl", "ruby", "env" }

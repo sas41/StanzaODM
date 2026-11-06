@@ -8,6 +8,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Stanza.Agent;
 using Stanza.Agent.Enrollment;
+using Stanza.Agent.Runtime;
 using Stanza.Core.Contracts;
 
 namespace Stanza.Tests.Agent;
@@ -46,7 +47,42 @@ public sealed class AgentHealthTests
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/health/live")).StatusCode);
     }
 
-    private sealed class AgentFactory(string root, string? enrollmentToken = null) : WebApplicationFactory<AgentEntryPoint>
+    [Fact]
+    public async Task ReadinessIncludesDiskHeadroomAndUnresolvedJournalFailuresWithoutLeakingErrorMessages()
+    {
+        using var directory = new AgentTestDirectory(); var disk = new Disk();
+        using var factory = new AgentFactory(directory.Path, disk: disk); using var client = factory.CreateClient();
+        await factory.Registered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await AgentTestWait.UntilAsync(() => factory.Services.GetRequiredService<AgentState>().Snapshot.Enrollment == EnrollmentStatus.Pending);
+        factory.Services.GetRequiredService<AgentState>().Set(new(true, EnrollmentStatus.Approved, "test") { CommandChannelAvailable = true, CanExecuteWork = true });
+        disk.Available = 512 * 1024 * 1024;
+        using (var response = await client.GetAsync("/health/ready"))
+        {
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.False(json.RootElement.GetProperty("canExecuteWork").GetBoolean());
+            Assert.Equal(disk.Available, json.RootElement.GetProperty("storage").GetProperty("availableBytes").GetInt64());
+        }
+        disk.Available = 10L * 1024 * 1024 * 1024;
+        var health = factory.Services.GetRequiredService<AgentStorageHealth>(); var id = Guid.NewGuid();
+        health.Failed(id, "journal", new IOException("sensitive-host-path"));
+        using (var response = await client.GetAsync("/health/ready"))
+        {
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+            Assert.DoesNotContain("sensitive-host-path", await response.Content.ReadAsStringAsync());
+        }
+        health.Durable(id);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/health/ready")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/health/live")).StatusCode);
+    }
+
+    private sealed class Disk : IAgentDiskSpace
+    {
+        public long Available = 10L * 1024 * 1024 * 1024;
+        public AgentDiskSpace Read(string path) => new(Available, 100L * 1024 * 1024 * 1024);
+    }
+
+    private sealed class AgentFactory(string root, string? enrollmentToken = null, IAgentDiskSpace? disk = null) : WebApplicationFactory<AgentEntryPoint>
     {
         public TaskCompletionSource Registered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -62,6 +98,7 @@ public sealed class AgentHealthTests
             {
                 services.RemoveAll<IEnrollmentClient>();
                 services.AddSingleton<IEnrollmentClient>(new PendingClient(Registered));
+                if (disk is not null) { services.RemoveAll<IAgentDiskSpace>(); services.AddSingleton(disk); }
             });
         }
     }

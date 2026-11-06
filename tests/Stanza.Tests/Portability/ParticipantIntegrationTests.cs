@@ -22,6 +22,54 @@ namespace Stanza.Tests.Portability;
 public sealed class ParticipantIntegrationTests
 {
     [Fact]
+    public async Task AgentDockerMaintenanceScriptRoundtripsWithoutADeploymentOrHostShellPrivilegeProfile()
+    {
+        await using var source = await Instance.Create("source-admin"); await using var destination = await Instance.Create("destination-admin");
+        var plan = new Stanza.ControlPlane.Models.ActionEditorModel { AgentId = source.Agent, Script = "docker system prune --force" }.ToPlan();
+        await source.Automation.SaveActionAsync(source.Root, null, 0, "Docker cleanup", true, "queue", plan);
+        var export = await source.Portability.ExportAsync(source.Root, new([], ["automation"], true)); var bundle = PortableBundleValidator.Parse(export);
+        Assert.Empty(bundle.Deployments);
+        var mapping = new PortableImportMapping(bundle.Agents.ToDictionary(a => a.Id, _ => destination.Agent), new Dictionary<string, string>(),
+            new Dictionary<string, string> { ["account:source-admin"] = "destination-admin" });
+        var preview = await destination.Portability.PreviewAsync(destination.Root, export, mapping);
+        Assert.True(preview.CanApply, string.Join("; ", preview.Conflicts));
+        Assert.Equal("complete", (await destination.Portability.ApplyAsync(destination.Root, preview.Id, preview.Fingerprint, true)).State);
+        var imported = Assert.Single((await destination.Automation.ListAsync(destination.Root)).Actions);
+        Assert.False(imported.Enabled);
+        var saved = (await destination.Automation.ReadActionAsync(destination.Root, imported.Id)).Plan;
+        Assert.Null(saved.DeploymentId); Assert.Null(saved.Steps[0].DeploymentId);
+        Assert.Equal(destination.Agent, saved.Steps[0].AgentId); Assert.Equal("docker system prune --force", saved.Steps[0].Execution!.Script);
+    }
+
+    [Theory]
+    [InlineData("docker-script", null)]
+    [InlineData("container-script", "app")]
+    public async Task ScriptActionsRoundtripAsLiteralScriptsWithNewDeploymentIdentityAndRemainInactive(string kind, string? service)
+    {
+        await using var source = await Instance.Create("source-admin"); await using var destination = await Instance.Create("destination-admin");
+        var deployment = (await source.Drafts.CreateAsync(source.Root, "Script deployment", source.Agent, "services: {app: {image: busybox}}", "KEY=secret\r\n")).Id;
+        const string script = "printf '%s' \"${HOME}\"\r\nprintf '%s' 'literal;$(text)'\n";
+        var plan = new Stanza.ControlPlane.Models.ActionEditorModel { DeploymentId = deployment, Target = kind, Service = service, Script = script }.ToPlan();
+        await source.Automation.SaveActionAsync(source.Root, null, 0, "Script button", true, "queue", plan);
+        var export = await source.Portability.ExportAsync(source.Root, new([deployment], ["automation"], true));
+        var bundle = PortableBundleValidator.Parse(export);
+        var mapping = new PortableImportMapping(bundle.Agents.ToDictionary(a => a.Id, _ => destination.Agent), new Dictionary<string, string>(),
+            new Dictionary<string, string> { ["account:source-admin"] = "destination-admin" });
+        var preview = await destination.Portability.PreviewAsync(destination.Root, export, mapping);
+        Assert.True(preview.CanApply, string.Join("; ", preview.Conflicts));
+        var result = await destination.Portability.ApplyAsync(destination.Root, preview.Id, preview.Fingerprint, true);
+        Assert.Equal("complete", result.State);
+        var imported = Assert.Single((await destination.Automation.ListAsync(destination.Root)).Actions);
+        Assert.False(imported.Enabled);
+        var saved = (await destination.Automation.ReadActionAsync(destination.Root, imported.Id)).Plan;
+        var newDeployment = Assert.Single(result.CreatedDeployments);
+        Assert.NotEqual(deployment, newDeployment); Assert.Equal(newDeployment, saved.DeploymentId);
+        Assert.Equal(newDeployment, Assert.Single(saved.Steps).DeploymentId);
+        Assert.Equal(kind, saved.Steps[0].Kind); Assert.Equal(script, saved.Steps[0].Execution!.Script);
+        Assert.Equal(service, saved.Steps[0].Execution!.Service);
+    }
+
+    [Fact]
     public async Task HostOnlyActionSchedulesRoundtripWithoutInventingDeploymentOrExportingSharedRuntimeInputs()
     {
         await using var source = await Instance.Create("source-admin"); await using var destination = await Instance.Create("destination-admin");

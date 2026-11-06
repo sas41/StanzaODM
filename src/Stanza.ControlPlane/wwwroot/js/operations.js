@@ -35,7 +35,7 @@
             }
             if (output && cursor === 0 && typeof value.output === "string") { output.hidden = false; output.textContent = value.output; }
             finished = ["Succeeded", "Failed", "Cancelled", "Unknown"].includes(value.state);
-            if (notice) notice.textContent = cursor > 0 || output?.textContent ? "Output recorded. Download contains the full retained history; the live view shows recent output." : finished
+            if (notice) notice.textContent = value.outputIncomplete === true ? "Output history is incomplete: the Agent could not save all process output. The execution result is recorded separately." : cursor > 0 || output?.textContent ? "Output available. Download contains the retained history; the live view shows recent output." : finished
                 ? "No retained output: none was produced, retention expired, or this older execution did not record diagnostics."
                 : "Waiting for operation output…";
             if (output && root.querySelector("[data-output-follow]")?.checked) output.scrollTop = output.scrollHeight;

@@ -20,6 +20,7 @@ public static class AgentTransportExtensions
     {
         services.AddSingleton<AgentCommandBroker>();
         services.AddSingleton<IAgentCommandDispatcher>(sp => sp.GetRequiredService<AgentCommandBroker>());
+        services.AddSingleton<IAgentOutputArchive>(sp => sp.GetRequiredService<AgentCommandBroker>());
         services.TryAddScoped<InstanceSettingsService>();
         services.TryAddScoped<AccessService>();
         services.TryAddScoped<OperationalPolicyService>();
@@ -99,14 +100,25 @@ public static class AgentTransportExtensions
     }
 }
 
-public sealed class AgentCommandBroker(IServiceScopeFactory? scopes = null) : IAgentCommandDispatcher, IAgentJobDispatcher, IAgentWorkProgressSource, IAgentWorkOutputSource, IAgentConnectionCatalog
+public sealed class AgentCommandBroker(IServiceScopeFactory? scopes = null) : IAgentCommandDispatcher, IAgentJobDispatcher, IAgentWorkProgressSource, IAgentConnectionCatalog, IAgentOutputArchive
 {
-    public event Func<Guid, AgentOutputChunk, Task>? Output;
-    private async Task OutputAsync(Guid id, AgentOutputChunk chunk)
+    private readonly ConcurrentDictionary<Guid, TaskCompletionSource> outputWaiters = new();
+    private void OutputAvailable(Guid id)
     {
-        if (Output is not { } handlers) return;
-        foreach (Func<Guid, AgentOutputChunk, Task> handler in handlers.GetInvocationList()) await handler(id, chunk);
+        if (outputWaiters.TryRemove(id, out var waiter)) waiter.TrySetResult();
     }
+    public async Task WaitForOutputAsync(Guid operationId, CancellationToken token = default)
+    {
+        var waiter = outputWaiters.GetOrAdd(operationId, _ => new(TaskCreationOptions.RunContinuationsAsynchronously));
+        try { await waiter.Task.WaitAsync(TimeSpan.FromSeconds(1), token); } catch (TimeoutException) { }
+        finally { outputWaiters.TryRemove(new KeyValuePair<Guid, TaskCompletionSource>(operationId, waiter)); }
+    }
+    public Task<IReadOnlyList<AgentOutputChunk>> ReadOutputAsync(Guid agentId, Guid operationId, long after, int count, CancellationToken token = default) =>
+        sessions.TryGetValue(agentId, out var session) && session.Connected
+            ? session.ReadOutputAsync(operationId, after, count, token) : throw new AgentUnavailableException();
+    public Task CommitOutputAsync(Guid agentId, Guid operationId, long lastSequence, CancellationToken token = default) =>
+        sessions.TryGetValue(agentId, out var session) && session.Connected
+            ? session.CommitOutputAsync(operationId, lastSequence, token) : throw new AgentUnavailableException();
     public event Func<Guid, string, Task>? Progress;
     private async Task ReportAsync(Guid id, string stage)
     {
@@ -120,13 +132,13 @@ public sealed class AgentCommandBroker(IServiceScopeFactory? scopes = null) : IA
     public AgentCapabilities? Capabilities(Guid agentId) => sessions.TryGetValue(agentId, out var session) && session.Connected ? session.Capabilities : null;
     public DateTimeOffset? ConfigurationSyncedAt(Guid agentId) => sessions.TryGetValue(agentId, out var session) && session.Connected ? session.ConfigurationSyncedAt : null;
     public bool ConfigurationPending(Guid agentId) => sessions.TryGetValue(agentId, out var session) && session.Connected && session.ConfigurationPending;
-    public Task<Stanza.ControlPlane.Terminals.IAgentTerminalSession> OpenTerminalAsync(Guid agentId, Guid deploymentId,
+    public Task<Stanza.ControlPlane.Logs.IAgentLogSession> OpenLogsAsync(Guid agentId, Guid deploymentId,
         AgentExecution execution, AgentRuntimePolicy policy, CancellationToken token = default) =>
         sessions.TryGetValue(agentId, out var session) && session.Connected
-            ? session.OpenTerminalAsync(deploymentId, execution, policy, token) : throw new AgentUnavailableException();
+            ? session.OpenLogsAsync(deploymentId, execution, policy, token) : throw new AgentUnavailableException();
     public AgentCommandSession? Reserve(Guid agentId)
     {
-        var session = new AgentCommandSession(ReportAsync, OutputAsync, async id =>
+        var session = new AgentCommandSession(ReportAsync, async id =>
         {
             if (scopes is null) return 0;
             await using var scope = scopes.CreateAsyncScope();
@@ -138,6 +150,16 @@ public sealed class AgentCommandBroker(IServiceScopeFactory? scopes = null) : IA
             await using var scope = scopes.CreateAsyncScope();
             var db = scope.ServiceProvider.GetRequiredService<StanzaDbContext>();
             diagnostic.AgentId = agentId; db.Add(diagnostic); await db.SaveChangesAsync();
+        }, OutputAvailable, async (job, ct) =>
+        {
+            if (scopes is null) return false;
+            await using var scope = scopes.CreateAsyncScope();
+            try { return await scope.ServiceProvider.GetRequiredService<Operations.OperationOutputStore>().CanReleaseAsync(agentId, job, ct); }
+            catch (Exception error) when (!ct.IsCancellationRequested)
+            {
+                scope.ServiceProvider.GetService<ILogger<AgentCommandBroker>>()?.LogWarning(error, "Archive acknowledgement for {OperationId} deferred; Agent output is retained.", job.Id);
+                return false;
+            }
         });
         return sessions.TryAdd(agentId, session) ? session : null;
     }
@@ -182,27 +204,29 @@ public sealed class AgentCommandSession : IDisposable
 {
     private readonly Func<Guid, string, Task>? report;
     private readonly ConcurrentDictionary<Guid, int> progressCount = new();
-    private readonly Func<Guid, AgentOutputChunk, Task>? output;
-    private readonly ConcurrentDictionary<Guid, long> outputSequences = new();
     private readonly Func<Guid, Task<long>>? cursor;
     private readonly Func<Operations.AgentDisconnectEntity, Task>? diagnostic;
+    private readonly Action<Guid>? outputAvailable;
+    private readonly Func<AgentJobInspection, CancellationToken, Task<bool>>? canArchive;
+    private readonly ConcurrentDictionary<Guid, (AgentOutputRead Read, TaskCompletionSource<IReadOnlyList<AgentOutputChunk>> Completion)> outputReads = new();
     private readonly ConcurrentDictionary<Guid, TaskCompletionSource<AgentJobInspection>> inspections = new();
     private readonly ConcurrentDictionary<Guid, string> phases = new();
     private readonly ConcurrentDictionary<Guid, long> evidenceSequences = new();
     private long lastHeartbeat;
     public string? FailureReason { get; private set; }
-    public AgentCommandSession(Func<Guid, string, Task>? report = null, Func<Guid, AgentOutputChunk, Task>? output = null,
-        Func<Guid, Task<long>>? cursor = null, Func<Operations.AgentDisconnectEntity, Task>? diagnostic = null)
-    { this.report = report; this.output = output; this.cursor = cursor; this.diagnostic = diagnostic; }
+    public AgentCommandSession(Func<Guid, string, Task>? report = null,
+        Func<Guid, Task<long>>? cursor = null, Func<Operations.AgentDisconnectEntity, Task>? diagnostic = null,
+        Action<Guid>? outputAvailable = null, Func<AgentJobInspection, CancellationToken, Task<bool>>? canArchive = null)
+    { this.report = report; this.cursor = cursor; this.diagnostic = diagnostic; this.outputAvailable = outputAvailable; this.canArchive = canArchive; }
     // Wire JSON is never embedded in HTML; base64 must not inflate beyond its declared frame bound.
-    private static readonly JsonSerializerOptions TerminalJson = new(JsonSerializerDefaults.Web)
+    private static readonly JsonSerializerOptions LogJson = new(JsonSerializerDefaults.Web)
     { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private readonly SemaphoreSlim send = new(1, 1);
     private readonly SemaphoreSlim execution = new(1, 1);
     private readonly ConcurrentDictionary<Guid, TaskCompletionSource<AgentWorkResponse>> pending = new();
     private readonly CancellationTokenSource lifetime = new();
-    private readonly ConcurrentDictionary<Guid, BrokerTerminalSession> terminals = new();
-    private readonly SemaphoreSlim terminalCapacity = new(16, 16);
+    private readonly ConcurrentDictionary<Guid, Stanza.ControlPlane.Logs.BrokerLogSession> logs = new();
+    private readonly SemaphoreSlim logCapacity = new(16, 16);
     public AgentCapabilities? Capabilities { get; private set; }
     private string? expectedConfiguration;
     private string? appliedConfiguration;
@@ -220,20 +244,37 @@ public sealed class AgentCommandSession : IDisposable
     private int ready;
     public bool Connected => Volatile.Read(ref ready) == 1 && socket?.State == WebSocketState.Open && !lifetime.IsCancellationRequested;
 
-    public async Task<Stanza.ControlPlane.Terminals.IAgentTerminalSession> OpenTerminalAsync(Guid deploymentId,
+    public async Task<IReadOnlyList<AgentOutputChunk>> ReadOutputAsync(Guid operationId, long after, int count, CancellationToken token)
+    {
+        if (!Connected) throw new AgentUnavailableException();
+        if (operationId == Guid.Empty || after < 0 || count is < 1 or > 64) throw new ArgumentException("Invalid output read.");
+        var query = Guid.NewGuid(); var read = new AgentOutputRead(operationId, after, count);
+        var completion = new TaskCompletionSource<IReadOnlyList<AgentOutputChunk>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        outputReads[query] = (read, completion);
+        try
+        {
+            await SendAsync(new("work.output.read", query, OutputRead: read), token);
+            return await completion.Task.WaitAsync(TimeSpan.FromSeconds(15), token);
+        }
+        finally { outputReads.TryRemove(query, out _); }
+    }
+    public Task CommitOutputAsync(Guid operationId, long lastSequence, CancellationToken token) =>
+        SendAsync(new("work.archive.committed", operationId, Data: lastSequence.ToString(System.Globalization.CultureInfo.InvariantCulture)), token);
+
+    public async Task<Stanza.ControlPlane.Logs.IAgentLogSession> OpenLogsAsync(Guid deploymentId,
         AgentExecution target, AgentRuntimePolicy policy, CancellationToken token)
     {
-        if (!Connected || Capabilities is not { TerminalAvailable: true }) throw new AgentUnavailableException();
-        if (deploymentId == Guid.Empty || !policy.ExecutionEnabled || target.Mode is not ("exec" or "logs")) throw new IOException("Invalid stream target, mode, or policy.");
-        if (!await terminalCapacity.WaitAsync(0, token)) throw new IOException("Agent terminal limit reached.");
+        if (!Connected || Capabilities is not { LogsAvailable: true }) throw new AgentUnavailableException();
+        if (deploymentId == Guid.Empty || !policy.ExecutionEnabled || policy.TimeoutSeconds is < 0 or > 604800 || !AgentLogProtocol.IsValid(target)) throw new IOException("Invalid read-only log target or policy.");
+        if (!await logCapacity.WaitAsync(0, token)) throw new IOException("Agent log stream limit reached.");
         var id = Guid.NewGuid();
-        var session = new BrokerTerminalSession(id, SendAsync, key => { if (terminals.TryRemove(key, out _)) terminalCapacity.Release(); }, target.Mode == "logs");
-        if (!terminals.TryAdd(id, session)) { terminalCapacity.Release(); throw new IOException("Duplicate terminal identity."); }
+        var session = new Stanza.ControlPlane.Logs.BrokerLogSession(id, SendAsync, key => { if (logs.TryRemove(key, out _)) logCapacity.Release(); });
+        if (!logs.TryAdd(id, session)) { logCapacity.Release(); throw new IOException("Duplicate log identity."); }
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
             timeout.CancelAfter(TimeSpan.FromSeconds(25));
-            await SendAsync(new("terminal.open", id, new(id, deploymentId, "terminal.open", [], [], target, Policy: policy)), timeout.Token);
+            await SendAsync(new("log.open", id, new(id, deploymentId, "log.open", [], [], target, Policy: policy)), timeout.Token);
             await session.Opened.WaitAsync(timeout.Token);
             return session;
         }
@@ -265,7 +306,6 @@ public sealed class AgentCommandSession : IDisposable
             if (!pending.TryAdd(id, completion)) return new(id, false, "duplicate_pending_request");
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
             var after = cursor is null ? 0 : await cursor(id);
-            outputSequences[id] = after;
             evidenceSequences[id] = after;
             attempted = true;
             await SendAsync(request is not null ? new("work.request", id, request) : new("work.attach", id, Data: after.ToString(System.Globalization.CultureInfo.InvariantCulture)), linked.Token);
@@ -280,7 +320,7 @@ public sealed class AgentCommandSession : IDisposable
             Dispose();
             return new(id, false, "uncertain");
         }
-        finally { pending.TryRemove(id, out _); progressCount.TryRemove(id, out _); outputSequences.TryRemove(id, out _); execution.Release(); }
+        finally { pending.TryRemove(id, out _); progressCount.TryRemove(id, out _); execution.Release(); }
     }
 
     public async Task RunAsync(WebSocket connectedSocket, Func<CancellationToken, Task<bool>> validate, CancellationToken token,
@@ -320,24 +360,25 @@ public sealed class AgentCommandSession : IDisposable
                 {
                     if (response.Code is not { Length: > 0 and <= 100 } ||
                         !response.Code.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-' or '.') ||
-                        response.ResolvedSources?.Count > 32 || response.ResolvedImages?.Count > 10000)
+                        response.ResolvedSources?.Count > 32 || response.ResolvedImages?.Count > 10000 || response.LastOutputSequence < 0)
                         throw new IOException("Invalid Agent response.");
                     if (pending.TryGetValue(message.Id, out var completion)) completion.TrySetResult(response);
+                    outputAvailable?.Invoke(message.Id);
                 }
-                else if (message.Type == "work.output" && message.Output is { } chunk)
+                else if (message.Type == "work.output.available" && message.Id != Guid.Empty && long.TryParse(message.Data, out var available) && available >= 0)
+                    outputAvailable?.Invoke(message.Id);
+                else if (message.Type == "work.output.batch" && outputReads.TryGetValue(message.Id, out var read) && message.OutputRead == read.Read && message.OutputBatch is { } batch)
                 {
-                    if (!pending.ContainsKey(message.Id)) throw new IOException("Unsolicited operation output.");
-                    var previous = outputSequences.GetValueOrDefault(message.Id);
-                    if (chunk.Sequence != previous + 1 || chunk.Stream is not ("stdout" or "stderr" or "system") || chunk.Text.Length is < 1 or > 16384)
-                        throw new IOException("Invalid operation output.");
-                    if (output is not null)
-                    {
-                        try { await output(message.Id, chunk); }
-                        catch (Exception error) { FailureReason = "output_persistence_" + error.GetType().Name; throw; }
-                    }
-                    outputSequences[message.Id] = chunk.Sequence;
-                    evidenceSequences[message.Id] = chunk.Sequence;
-                    await SendAsync(new("work.output.applied", message.Id, Data: chunk.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)), linked.Token);
+                    if (batch.Count > read.Read.Count || batch.Where((chunk, index) => chunk is null || chunk.Sequence != read.Read.After + index + 1 ||
+                        chunk.Stream is not ("stdout" or "stderr" or "system") || chunk.Text is not { Length: > 0 and <= 16384 }).Any())
+                        throw new IOException("Invalid output batch.");
+                    read.Completion.TrySetResult(batch);
+                }
+                else if (message.Type == "work.output.batch" && !outputReads.ContainsKey(message.Id)) { /* A cancelled reader may have an in-flight reply. */ }
+                else if (message.Type == "work.archive.pending" && message.Job is { Stopped: true, Response: not null } archived && archived.Id == message.Id)
+                {
+                    if (canArchive is not null && await canArchive(archived, linked.Token))
+                        await CommitOutputAsync(archived.Id, archived.LastSequence, linked.Token);
                 }
                 else if (message.Type == "work.progress")
                 {
@@ -353,17 +394,17 @@ public sealed class AgentCommandSession : IDisposable
                     { UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow, MaxDepth = 4 });
                     static bool Safe(string? value, int max) => value is null || value.Length is > 0 && value.Length <= max && value.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '+' or '_');
                     if (caps is null || caps.Runtime != "docker" || caps.Architecture is null || !Safe(caps.Architecture, 32) ||
-                        !Safe(caps.DockerVersion, 64) || !Safe(caps.ComposeVersion, 64) || caps.TerminalAvailable && !caps.DockerAvailable)
+                        !Safe(caps.DockerVersion, 64) || !Safe(caps.ComposeVersion, 64) || caps.LogsAvailable && !caps.DockerAvailable)
                         throw new IOException("Invalid capabilities.");
                     Capabilities = caps;
                 }
-                else if (message.Type is "terminal.opened" or "terminal.output" or "terminal.exited")
+                else if (message.Type is "log.opened" or "log.output" or "log.ended")
                 {
-                    if (message.Id == Guid.Empty || message.Data?.Length > 87384) throw new IOException("Invalid terminal frame.");
-                    if (terminals.TryGetValue(message.Id, out var terminal) && !terminal.Receive(message))
+                    if (message.Id == Guid.Empty || message.Data?.Length > 87384) throw new IOException("Invalid log frame.");
+                    if (logs.TryGetValue(message.Id, out var log) && !log.Receive(message))
                     {
-                        // A slow browser closes its terminal only; normal deployment traffic remains duplex.
-                        _ = terminal.CloseAsync(linked.Token).AsTask();
+                        // A slow viewer closes its log subscription only, not the Agent command channel.
+                        _ = log.CloseAsync(linked.Token).AsTask();
                     }
                 }
                 else if (message.Type == "ping") await SendAsync(new("pong", message.Id), linked.Token);
@@ -427,7 +468,7 @@ public sealed class AgentCommandSession : IDisposable
 
     private async Task SendAsync(AgentWireMessage message, CancellationToken token)
     {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(message, message.Type.StartsWith("terminal.", StringComparison.Ordinal) ? TerminalJson : JsonSerializerOptions.Web);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(message, message.Type.StartsWith("log.", StringComparison.Ordinal) ? LogJson : JsonSerializerOptions.Web);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
         timeout.CancelAfter(TimeSpan.FromSeconds(15));
         await send.WaitAsync(timeout.Token);
@@ -447,9 +488,10 @@ public sealed class AgentCommandSession : IDisposable
         lifetime.Cancel();
         socket?.Abort();
         Capabilities = null;
-        foreach (var terminal in terminals.Values) terminal.Complete();
+        foreach (var log in logs.Values) log.Complete();
         foreach (var pair in pending) pair.Value.TrySetResult(new(pair.Key, false, "uncertain"));
         foreach (var pair in inspections) pair.Value.TrySetException(new AgentUnavailableException());
+        foreach (var pair in outputReads) pair.Value.Completion.TrySetException(new AgentUnavailableException());
     }
 }
 
@@ -473,9 +515,9 @@ public static class AgentSocketFrames
         var message = JsonSerializer.Deserialize<AgentWireMessage>(stream.GetBuffer().AsSpan(0, (int)stream.Length), JsonSerializerOptions.Web)
             ?? throw new IOException("Invalid Agent message.");
         if (message.Type is not { Length: > 0 and <= 64 }) throw new IOException("Invalid Agent message type.");
-        if (message.Type.StartsWith("terminal.", StringComparison.Ordinal) &&
-            (stream.Length > 96 * 1024 || message.Request is not null || message.Response is not null || message.Type == "terminal.opened" && message.Data is not null))
-            throw new IOException("Invalid terminal frame.");
+        if (message.Type.StartsWith("log.", StringComparison.Ordinal) &&
+            (stream.Length > 96 * 1024 || message.Request is not null || message.Response is not null || message.Type == "log.opened" && message.Data is not null))
+            throw new IOException("Invalid log frame.");
         return message;
     }
 }

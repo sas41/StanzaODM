@@ -1,5 +1,5 @@
 using System.Buffers.Binary;
-using Stanza.Agent.Terminals;
+using Stanza.Core.Contracts;
 
 namespace Stanza.Agent.Logs;
 
@@ -18,7 +18,7 @@ public sealed class DockerLogStream : IAsyncDisposable
 
     public static async Task<DockerLogStream> OpenAsync(HttpClient http, DockerContainerTarget target, CancellationToken token)
     {
-        if (!DockerTerminalClient.SafeId(target.Id)) throw new IOException("Invalid log container identifier.");
+        if (!AgentLogProtocol.IsTargetName(target.Id)) throw new IOException("Invalid log container identifier.");
         using var request = new HttpRequestMessage(HttpMethod.Get,
             $"containers/{target.Id}/logs?follow=1&stdout=1&stderr=1&timestamps=1&tail=200");
         var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
@@ -36,7 +36,7 @@ public sealed class DockerLogStream : IAsyncDisposable
 
     public async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken token)
     {
-        if (buffer.Length is 0 or > AgentTerminalManager.MaximumChunk) throw new ArgumentOutOfRangeException(nameof(buffer));
+        if (buffer.Length is 0 or > AgentLogProtocol.MaximumChunk) throw new ArgumentOutOfRangeException(nameof(buffer));
         if (tty) return await stream.ReadAsync(buffer, token);
         var emptyFrames = 0;
         while (remaining == 0)

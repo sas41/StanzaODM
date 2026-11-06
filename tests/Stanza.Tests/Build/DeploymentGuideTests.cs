@@ -121,26 +121,21 @@ public sealed class DeploymentGuideTests
     }
 
     [Fact]
-    public void Prune_recipe_is_a_valid_fixed_host_action_with_daily_cron_and_explicit_safety_limits()
+    public void Script_recipe_uses_ordinary_Agent_Docker_and_scopes_commands_to_the_deployment()
     {
         var readme = File.ReadAllText(Path.Combine(ArchitectureTests.RepositoryRoot(), "README.md"));
-        const string heading = "## Scheduled maintenance: Docker cleanup";
+        const string heading = "## Script action buttons";
         Assert.Contains(heading, readme);
         var recipe = readme[readme.IndexOf(heading, StringComparison.Ordinal)..].Replace("\n   ", "\n", StringComparison.Ordinal);
-        var executable = Regex.Match(recipe, @"\*\*Executable:\*\* `([^`]+)`").Groups[1].Value;
-        var cron = Regex.Match(recipe, @"\*\*Cron:\*\* `([^`]+)`").Groups[1].Value;
-        var arguments = Block(recipe, "text", "system\nprune\n--force").Trim().Split('\n');
-        Assert.Equal("/usr/bin/docker", executable);
-        Assert.Equal(new[] { "system", "prune", "--force" }, arguments);
-        AutomationRules.Validate(new([new("host-exec", AgentId: Guid.NewGuid(), Execution: new(executable, arguments))]));
-        Assert.Equal(DateTimeOffset.Parse("2026-10-23T03:00:00Z"),
-            new CronSchedule(cron).Next(DateTimeOffset.Parse("2026-10-23T00:00:00Z"), TimeZoneInfo.Utc));
-        Assert.Contains("entire Docker daemon, not just one deployment", recipe);
-        Assert.Contains("admin-only", recipe);
-        Assert.Contains("compose.agent.privileged.yaml", recipe);
-        Assert.Contains("Operational policy", recipe);
-        Assert.Contains("deliberately omits `--volumes` and `--all`", recipe);
-        Assert.Contains("Preview the next runs", recipe);
+        var script = Block(recipe, "bash", "docker ps --all --filter");
+        Assert.True(BashScriptRules.IsValid(script));
+        AutomationRules.ValidateScript("docker-script", new("/bin/bash", [], Mode: "script", Script: script));
+        Assert.Contains("label=com.docker.compose.project=${STANZA_PROJECT_NAME}", script);
+        Assert.DoesNotContain("prune", script);
+        Assert.Contains("No host shell, SSH or privileged profile is required", recipe);
+        Assert.Contains("standard input", recipe);
+        Assert.Contains("/bin/bash", recipe);
+        Assert.Contains("not automatically converted", readme);
     }
 
     private static string Block(string readme, string language, string content) =>

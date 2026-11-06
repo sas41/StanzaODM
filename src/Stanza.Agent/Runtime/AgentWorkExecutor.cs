@@ -20,8 +20,10 @@ public sealed class HostExecutionOptions
 /// <summary>Executes immutable, authenticated operation snapshots. Outputs are sensitive; diagnostics are codes only.</summary>
 public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptions> options,
     IOptions<DockerRuntimeOptions> dockerOptions, IOptions<HostExecutionOptions> hostOptions,
-    IAgentHostPathResolver? hostPaths = null) : IAgentWorkExecutor, IReportingAgentWorkExecutor
+    IAgentHostPathResolver? hostPaths = null, IAgentJournalStorage? journals = null,
+    ILogger<AgentWorkExecutor>? logger = null) : IAgentWorkExecutor, IReportingAgentWorkExecutor
 {
+    private readonly IAgentJournalStorage journals = journals ?? new AgentJournalStorage();
     public event Func<Guid, string, Task>? Progress;
     public event Func<Guid, AgentOutputChunk, Task>? Output;
     private long outputSequence;
@@ -46,15 +48,14 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     }
     private async Task ReportAsync(Guid id, string stage)
     {
+        if (Progress is { } progress)
+            foreach (Func<Guid, string, Task> handler in progress.GetInvocationList()) await handler(id, stage);
         if (stage == "Applying") applyStarted = true;
-        if (Progress is not { } progress) return;
-        foreach (Func<Guid, string, Task> handler in progress.GetInvocationList())
-            await handler(id, stage);
     }
     private readonly SemaphoreSlim execution = new(1, 1);
     private sealed record Ledger(string Hash, AgentWorkResponse? Response);
     private sealed class WorkFailure(string code) : Exception { public string Code { get; } = code; }
-    private static readonly HashSet<string> Operations = ["validate", "environment-preview", "build", "pull", "deploy", "start", "stop", "restart", "remove", "status", "logs", "container-exec", "host-exec", "git-branches", "git-action-branches", "registry-tags", "resolve-action-inputs", "registry-check", "image-digests"];
+    private static readonly HashSet<string> Operations = ["validate", "environment-preview", "build", "pull", "deploy", "start", "stop", "restart", "remove", "status", "logs", "container-exec", "host-exec", "docker-script", "container-script", "git-branches", "git-action-branches", "registry-tags", "resolve-action-inputs", "registry-check", "image-digests"];
 
     public async Task<AgentWorkResponse> ExecuteAsync(AgentWorkRequest request, CancellationToken token = default)
     {
@@ -66,13 +67,14 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         string? hash = null;
         var started = false;
         var resultProduced = false;
+        AgentWorkResponse? completedResult = null;
         using var operationTimeout = new CancellationTokenSource();
         var resolvedSources = new Dictionary<string, string>(StringComparer.Ordinal);
         var resolvedImages = new Dictionary<string, string>(StringComparer.Ordinal);
         FileStream? processLease = null;
         try
         {
-            if (request.Id == Guid.Empty || request.DeploymentId == Guid.Empty && request.Operation is not ("host-exec" or "git-branches" or "registry-check") || !Operations.Contains(request.Operation) ||
+            if (request.Id == Guid.Empty || request.DeploymentId == Guid.Empty && request.Operation is not ("host-exec" or "docker-script" or "git-branches" or "registry-check") || !Operations.Contains(request.Operation) ||
                 request.Files is null || request.EnvironmentFiles is null ||
                 request.Files.Any(x => x is null || x.Content is null || x.Path is null) ||
                 request.EnvironmentFiles.Any(x => x is null || x.Text is null || x.Name is null) ||
@@ -84,6 +86,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
                 return new(request.Id, false, "invalid_request");
             var policy = request.Policy ?? new AgentRuntimePolicy();
             if (!policy.ExecutionEnabled) return new(request.Id, false, "execution_disabled");
+            if (request.Operation is "docker-script" or "container-script") ValidateScriptExecution(request.Operation, request.Execution);
             if (policy.TimeoutSeconds is < 0 or > 604800 ||
                 !DockerRuntimeOptions.IsValid(new DockerRuntimeOptions { Endpoint = policy.DockerEndpoint }))
                 return new(request.Id, false, "invalid_runtime_policy");
@@ -130,7 +133,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             await ReportAsync(request.Id, "Preparing");
             await MaterializeAsync(request, directory, secretDirectory, linked.Token);
             var context = new WorkContext(request, policy, directory, secretDirectory, environment, resolvedImages, linked.Token);
-            if (!ControlsExisting(request.Operation)) await PrepareSourcesAsync(context, resolvedSources);
+            if (!ControlsExisting(request.Operation) && request.Operation != "container-script") await PrepareSourcesAsync(context, resolvedSources);
             var output = await RunOperationAsync(context);
             resultProduced = true;
             // Never report successful work while its temporary registry credentials remain on disk.
@@ -139,12 +142,16 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             var result = new AgentWorkResponse(request.Id, true, "succeeded", output, resolvedSources,
                 resolvedImages.Count == 0 ? null : resolvedImages, context.GitReferences.Count == 0 ? null : context.GitReferences,
                 ExecutionStopped: true, ApplyStarted: applyStarted);
+            completedResult = result;
             await WriteLedgerAsync(ledgerPath, new(hash, result), true, CancellationToken.None);
             return result;
         }
         catch (Exception ex) when (ex is WorkFailure or ArgumentException or IOException or UnauthorizedAccessException or
             JsonException or OperationCanceledException or PlatformNotSupportedException or KeyNotFoundException or InvalidOperationException or HttpRequestException)
         {
+            if (ex is IOException or UnauthorizedAccessException)
+                logger?.LogError(ex, "Agent operation {OperationId} encountered I/O failure (code {ErrorCode}).", request.Id, ex.HResult);
+            if (completedResult is not null) return completedResult;
             if (ex is OperationCanceledException)
             {
                 try { await EmitAsync(request.Id, "system", operationTimeout.IsCancellationRequested
@@ -170,7 +177,10 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             {
                 try { await WriteLedgerAsync(ledgerPath, new(hash, result), true, CancellationToken.None); }
                 catch (Exception storageError) when (storageError is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
-                { return new(request.Id, false, "uncertain"); }
+                {
+                    logger?.LogError(storageError, "Agent operation {OperationId} could not persist its executor receipt; the job store retains the terminal outcome.", request.Id);
+                    return result;
+                }
             }
             return result;
         }
@@ -214,31 +224,19 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         }
     }
 
-    private static async Task WriteLedgerAsync(string path, Ledger ledger, bool replace, CancellationToken token)
+    private Task WriteLedgerAsync(string path, Ledger ledger, bool replace, CancellationToken token)
     {
-        if (OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
-        var temporary = path + "." + Guid.NewGuid().ToString("N");
-        try
-        {
-            await using (var stream = new FileStream(temporary, new FileStreamOptions { Mode = FileMode.CreateNew,
-                Access = FileAccess.Write, Share = FileShare.None, UnixCreateMode = PrivateStorage.FileMode }))
-            {
-                await JsonSerializer.SerializeAsync(stream, ledger, cancellationToken: token);
-                await stream.FlushAsync(token);
-                stream.Flush(true);
-            }
-            File.Move(temporary, path, replace);
-            FlushDirectory(Path.GetDirectoryName(path)!);
-        }
-        finally { File.Delete(temporary); }
+        token.ThrowIfCancellationRequested();
+        journals.Write(path, ledger, replace);
+        return Task.CompletedTask;
     }
 
     internal static void FlushDirectory(string directory)
     {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Durable execution requires Linux storage.");
         var handle = Open(directory, 0x10000); // O_RDONLY | O_DIRECTORY
-        if (handle < 0) throw new IOException("Durable request storage is unavailable.");
-        try { if (Fsync(handle) != 0) throw new IOException("Durable request storage is unavailable."); }
+        if (handle < 0) throw new IOException("Durable request storage is unavailable.", new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError()));
+        try { if (Fsync(handle) != 0) throw new IOException("Durable request storage is unavailable.", new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError())); }
         finally { Close(handle); }
     }
     [DllImport("libc", EntryPoint = "open", SetLastError = true)]
@@ -387,11 +385,10 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             PrivateStorage.EnsureDirectory(destination);
             await GitAsync(context, source, destination, ["init", "--quiet"]);
             await GitAsync(context, source, destination, ["remote", "add", "origin", source.Url]);
-            await GitAsync(context, source, destination, ["fetch", "--depth=1", "--no-tags", "--", "origin", source.Reference]);
+            await GitAsync(context, source, destination, ["fetch", "--depth=1", "--no-tags", "--no-recurse-submodules", "--", "origin", source.Reference]);
             var commit = (await GitAsync(context, source, destination, ["rev-parse", "--verify", "FETCH_HEAD^{commit}"])).Trim();
             if (commit.Length != 40 || !commit.All(Uri.IsHexDigit)) throw new WorkFailure("invalid_git_commit");
             await GitAsync(context, source, destination, ["checkout", "--quiet", "--detach", commit]);
-            if (File.Exists(Path.Combine(destination, ".gitmodules"))) throw new WorkFailure("git_submodules_unsupported");
             ValidateCheckout(destination);
             if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(destination, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
             resolved[source.Destination] = commit;
@@ -430,7 +427,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     }
 
     private async Task<string> RunAsync(WorkContext context, string executable, string directory, IReadOnlyList<string> arguments,
-        IReadOnlyDictionary<string, string>? environment = null, string failure = "runtime_failed")
+        IReadOnlyDictionary<string, string>? environment = null, string failure = "runtime_failed", string? standardInput = null)
     {
         // Internal inspection/configuration stdout can contain environment secrets and is not a user log.
         var commandIndex = 0;
@@ -457,7 +454,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         try
         {
             result = await runner.RunAsync(new(executable, directory, arguments, environment ?? context.Environment,
-                LimitPolicy.Duration(context.Policy.TimeoutSeconds), OnOutput: Report, CaptureOutput: capture), context.Token);
+                LimitPolicy.Duration(context.Policy.TimeoutSeconds), StandardInput: standardInput, OnOutput: Report, CaptureOutput: capture), context.Token);
         }
         finally
         {
@@ -473,8 +470,8 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         return context.Request.Operation == "logs" && arguments.FirstOrDefault() == "logs" ? result.StandardOutput + result.StandardError : result.StandardOutput;
     }
 
-    private Task<string> DockerAsync(WorkContext context, IReadOnlyList<string> arguments, string failure = "runtime_failed") =>
-        RunAsync(context, dockerOptions.Value.ExecutablePath, context.Directory, arguments, failure: failure);
+    private Task<string> DockerAsync(WorkContext context, IReadOnlyList<string> arguments, string failure = "runtime_failed", string? standardInput = null) =>
+        RunAsync(context, dockerOptions.Value.ExecutablePath, context.Directory, arguments, failure: failure, standardInput: standardInput);
 
     private List<string> ComposeArguments(WorkContext context)
     {
@@ -562,6 +559,18 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             await RegistryCheckAsync(context, request.Registries[0]);
             return null;
         }
+        if (request.Operation is "docker-script" or "container-script")
+        {
+            await ReportAsync(request.Id, "Applying");
+            if (request.Operation == "container-script") return await ContainerExecAsync(context);
+            var environment = new Dictionary<string, string>(context.Environment);
+            if (request.DeploymentId != Guid.Empty)
+            {
+                environment["STANZA_DEPLOYMENT_ID"] = request.DeploymentId.ToString("N");
+                environment["STANZA_PROJECT_NAME"] = "stanza-" + request.DeploymentId.ToString("N");
+            }
+            return await RunAsync(context, "/bin/bash", context.Directory, BashArguments, environment, "script_failed", request.Execution!.Script);
+        }
         if (request.Operation is "host-exec" or "container-exec") await ReportAsync(request.Id, "Applying");
         if (request.Operation == "host-exec") return await HostExecAsync(context);
         if (request.Operation == "container-exec") return await ContainerExecAsync(context);
@@ -572,7 +581,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             using var original = JsonDocument.Parse(await DockerAsync(context, [.. prefix, "config", "--format", "json"]));
             foreach (var item in request.ImageOverrides)
             {
-                if (!WorkspacePolicy.IsIdentifier(item.Key) || !original.RootElement.GetProperty("services").TryGetProperty(item.Key, out var service) || service.TryGetProperty("build", out _))
+                if (!DockerRuntimeOptions.IsIdentifier(item.Key) || !original.RootElement.GetProperty("services").TryGetProperty(item.Key, out var service) || service.TryGetProperty("build", out _))
                     throw new WorkFailure("image_override_service_unavailable");
                 ValidateImageReference(item.Value);
             }
@@ -710,7 +719,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
 
     private async Task<string> DeploymentImageReferenceAsync(WorkContext context, IReadOnlyList<string> prefix, JsonProperty service)
     {
-        if (!WorkspacePolicy.IsIdentifier(service.Name)) throw new WorkFailure("invalid_service");
+        if (!DockerRuntimeOptions.IsIdentifier(service.Name)) throw new WorkFailure("invalid_service");
         string reference;
         if (service.Value.TryGetProperty("image", out var image)) reference = image.GetString() ?? "";
         else
@@ -854,7 +863,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
 
     private async Task<JsonElement?> InstalledImageAsync(WorkContext context, string service, string? platform = null, string? expectedImage = null)
     {
-        if (!WorkspacePolicy.IsIdentifier(service)) throw new WorkFailure("invalid_service");
+        if (!DockerRuntimeOptions.IsIdentifier(service)) throw new WorkFailure("invalid_service");
         var project = "stanza-" + context.Request.DeploymentId.ToString("N");
         var text = await DockerAsync(context, ["ps", "--all", "--quiet", "--filter", "label=com.docker.compose.project=" + project,
             "--filter", "label=com.docker.compose.service=" + service, "--filter", "label=com.docker.compose.oneoff=False"]);
@@ -976,7 +985,8 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         var container = command.Container;
         if (container is null)
         {
-            if (!WorkspacePolicy.IsIdentifier(command.Service!)) throw new WorkFailure("service_required");
+            if (context.Request.Operation == "container-script" ? !Stanza.Core.Automation.BashScriptRules.IsServiceName(command.Service) :
+                !DockerRuntimeOptions.IsIdentifier(command.Service!)) throw new WorkFailure("service_required");
             // Resolve deployed containers by labels, not the current draft Compose (which may
             // have pending edits, or be absent from an existing-container operation snapshot).
             var ids = await DockerAsync(context, ["ps", "--all", "--quiet", "--filter", "label=com.docker.compose.project=stanza-" + context.Request.DeploymentId.ToString("N"),
@@ -999,12 +1009,27 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             throw new WorkFailure("container_not_running");
         // Pin the inspected immutable ID, not the supplied name (which could be replaced between inspect and exec).
         var id = root.GetProperty("Id").GetString() ?? throw new WorkFailure("invalid_container");
-        List<string> arguments = ["exec"];
+        var script = context.Request.Operation == "container-script";
+        if (!script && command.Script is not null) throw new WorkFailure("invalid_execution");
+        List<string> arguments = script ? ["exec", "--interactive", "--env", "BASH_ENV=/dev/null", "--env", "ENV=/dev/null"] : ["exec"];
         if (command.User is not null) arguments.AddRange(["--user", command.User]);
         if (command.WorkingDirectory is not null) arguments.AddRange(["--workdir", command.WorkingDirectory]);
         foreach (var item in command.Environment ?? new Dictionary<string, string>()) arguments.AddRange(["--env", item.Key + "=" + item.Value]);
-        arguments.AddRange(["--", id, command.Executable, .. command.Arguments]);
-        return await DockerAsync(context, arguments);
+        arguments.AddRange(["--", id, command.Executable, .. script ? BashArguments : command.Arguments]);
+        return await DockerAsync(context, arguments, script ? "script_failed" : "runtime_failed", script ? command.Script : null);
+    }
+
+    private static readonly string[] BashArguments = ["--noprofile", "--norc", "-e", "-o", "pipefail", "-s", "--"];
+
+    private static void ValidateScriptExecution(string kind, AgentExecution? command)
+    {
+        if (command is null || command.Mode != "script" || command.Executable != "/bin/bash" ||
+            command.Arguments is not { Count: 0 } || command.Environment is { Count: > 0 } || command.User is not null ||
+            command.WorkingDirectory is not null || command.Container is not null ||
+            !Stanza.Core.Automation.BashScriptRules.IsValid(command.Script)) throw new WorkFailure("invalid_script");
+        if (kind == "container-script" ? !Stanza.Core.Automation.BashScriptRules.IsServiceName(command.Service) : command.Service is not null)
+            throw new WorkFailure("invalid_script_target");
+        ValidateExecution(command);
     }
 
     private async Task<string> HostExecAsync(WorkContext context)

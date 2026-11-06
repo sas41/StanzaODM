@@ -64,8 +64,8 @@ public sealed class LogBrowserTests
             await Task.Delay(250, timeout.Token);
             Assert.Single(server.Transport.Opens);
             Assert.True(server.Transport.Session.Closed);
-            Assert.Equal(0, server.Transport.Session.InputCalls);
-            Assert.Equal(0, server.Transport.Session.ResizeCalls);
+            Assert.Null(typeof(Stanza.ControlPlane.Logs.IAgentLogSession).GetMethod("WriteInputAsync"));
+            Assert.Null(typeof(Stanza.ControlPlane.Logs.IAgentLogSession).GetMethod("ResizeAsync"));
         }
         finally
         {

@@ -13,12 +13,19 @@ public sealed class AutomationAuthorization(AccessService access)
     {
         "git-refresh" => GitRefreshAsync(actor, step.DeploymentId, ct),
         "host-exec" => RequireAsync(actor, "host.execute", "agent", step.AgentId, ct),
-        "container-exec" => RequireAsync(actor, "container.execute", "deployment", step.DeploymentId, ct),
+        "docker-script" => DockerScriptAsync(actor, step.DeploymentId, step.AgentId, ct),
+        "container-exec" or "container-script" => RequireAsync(actor, "container.execute", "deployment", step.DeploymentId, ct),
         "pull" => RequireAsync(actor, "deployment.deploy", "deployment", step.DeploymentId, ct),
         "status" => RequireAsync(actor, "deployment.read", "deployment", step.DeploymentId, ct),
         "logs" => RequireAsync(actor, "logs.read", "deployment", step.DeploymentId, ct),
         _ => RequireAsync(actor, "deployment." + step.Kind, "deployment", step.DeploymentId, ct)
     };
+
+    private async Task DockerScriptAsync(Guid actor, Guid? deployment, Guid? agent, CancellationToken ct)
+    {
+        await RequireAsync(actor, "host.execute", "agent", agent, ct);
+        if (deployment is not null) await RequireAsync(actor, "deployment.read", "deployment", deployment, ct);
+    }
 
     private async Task GitRefreshAsync(Guid actor, Guid? deployment, CancellationToken ct)
     {

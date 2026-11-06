@@ -28,10 +28,9 @@ public sealed class AgentJobStoreTests
             Assert.Null(await jobs.StartAsync(request)); Assert.Equal(1, executor.Executions);
             Assert.Equal("request_id_conflict", (await jobs.StartAsync(request with { Operation = "remove" }))!.Code);
             Assert.Equal("agent_busy", (await jobs.StartAsync(request with { Id = Guid.NewGuid() }))!.Code);
-            await jobs.AcknowledgeAsync(request.Id, 17);
             var replay = await jobs.ReadOutputAsync(request.Id, 17);
             Assert.Equal(Enumerable.Range(18, 33).Select(x => (long)x), replay.Select(x => x.Sequence));
-            await Assert.ThrowsAsync<IOException>(() => jobs.AcknowledgeAsync(request.Id, 51));
+            await Assert.ThrowsAsync<IOException>(() => jobs.CommitOutputAsync(request.Id, 51));
             executor.Finish.TrySetResult();
             await AgentTestWait.UntilAsync(async () => !(await jobs.InspectAsync(request.Id)).Active);
             Assert.True((await jobs.InspectAsync(request.Id)).Response!.Succeeded);
@@ -42,7 +41,7 @@ public sealed class AgentJobStoreTests
         Assert.Null(await reopened.StartAsync(request));
         var saved = await reopened.InspectAsync(request.Id);
         Assert.False(saved.Active); Assert.True(saved.Stopped); Assert.Equal(phase, saved.Phase);
-        Assert.Equal(17, saved.AcknowledgedSequence); Assert.Equal(0, replacement.Executions);
+        Assert.Equal(0, saved.AcknowledgedSequence); Assert.Equal(0, replacement.Executions);
         Assert.Equal(50, (await reopened.ReadOutputAsync(request.Id, 0)).Count);
         var diagnostic = await File.ReadAllTextAsync(Path.Combine(root.Path, "jobs-v1", "disconnects.jsonl"));
         Assert.Contains("WebSocketException", diagnostic); Assert.Contains(request.Id.ToString(), diagnostic);

@@ -35,15 +35,17 @@ internal sealed class OperationTestHarness : IAsyncDisposable
     public const string Password = "a-secure-password-123";
     public const string GitUrl = "https://git.example.test/team/app.git";
 
-    public static async Task<OperationTestHarness> CreateAsync(bool recoverable = false)
+    public static async Task<OperationTestHarness> CreateAsync(bool recoverable = false, OperationTestDispatcher? dispatcher = null)
     {
         var harness = new OperationTestHarness();
         if (recoverable) harness.Dispatcher = new RecoverableOperationTestDispatcher();
+        if (dispatcher is not null) harness.Dispatcher = dispatcher;
         Directory.CreateDirectory(harness.directory);
         var registrations = new ServiceCollection();
         registrations.AddSingleton<TimeProvider>(harness.Clock);
         registrations.AddSingleton(harness.Protection);
         registrations.AddSingleton<IAgentCommandDispatcher>(harness.Dispatcher);
+        if (harness.Dispatcher is IAgentOutputArchive archive) registrations.AddSingleton(archive);
         registrations.AddDbContext<StanzaDbContext>(options => options.UseSqlite($"Data Source={Path.Combine(harness.directory, "state.db")};Default Timeout=5;Pooling=False"));
         registrations.AddScoped<AccountService>(); registrations.AddScoped<AccessService>();
         registrations.AddScoped<DeploymentDraftService>(); registrations.AddScoped<InstanceSettingsService>();

@@ -31,3 +31,10 @@ public interface IAgentConnectionCatalog
 {
     IReadOnlyList<Guid> ConnectedAgentIds { get; }
 }
+
+public interface IAgentOutputArchive
+{
+    Task<IReadOnlyList<AgentOutputChunk>> ReadOutputAsync(Guid agentId, Guid operationId, long after, int count, CancellationToken token = default);
+    Task CommitOutputAsync(Guid agentId, Guid operationId, long lastSequence, CancellationToken token = default);
+    Task WaitForOutputAsync(Guid operationId, CancellationToken token = default);
+}

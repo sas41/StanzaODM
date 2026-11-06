@@ -28,7 +28,8 @@ public static class PermissionCatalog
         new("files.read", "deployment", "Read managed deployment files"),
         new("files.write", "deployment", "Edit managed deployment files"),
         new("logs.read", "deployment", "Read deployment logs"),
-        new("terminal.open", "deployment", "Open a container terminal"),
+        // Retained for reading/exporting existing grants until explicit access migration; no endpoint consumes it.
+        new("terminal.open", "deployment", "Legacy interactive-terminal grant (inactive)"),
         new("container.execute", "deployment", "Execute a configured command in deployment containers"),
         new("sources.manage", "deployment", "Manage deployment Git and registry source references"),
         new("deployment.clone", "deployment", "Clone a deployment configuration"),

@@ -8,10 +8,11 @@ public static class PolicyFields
     public static IReadOnlyList<PolicyGroup> Groups { get; } =
     [
         new("operations", "Operations", [
+            new(nameof(OperationalPolicy.MinimumAgentFreeSpaceMiB), "Agent free-space minimum (MiB)", "Agent readiness fails and new jobs are refused below this free space on the Agent data filesystem. Default: 2,048 MiB. 0 disables the free-space threshold; journal failures still fail readiness."),
             new(nameof(OperationalPolicy.MaximumDeploymentLockHours), "Maximum deployment lock (hours)", "Longest deployment lock users may create. Default: 168 hours (7 days). 0: no configured maximum. Changing this does not shorten existing locks."),
             new(nameof(OperationalPolicy.OperationTimeoutSeconds), "Operation timeout (seconds)", "Global deadline for the whole operation on every Agent. Default: 3,600 seconds (1 hour). 0: no timeout. Cancellation cannot undo changes already made."),
             new(nameof(OperationalPolicy.MaximumParallelOperations), "Concurrent operations", "Maximum operations running across the instance. Each Agent still runs one mutating operation at a time. Default: 4. 0: unlimited."),
-            new(nameof(OperationalPolicy.AllowHostActions), "Allow host actions", "Permit authorized host commands. Also requires an explicitly privileged Agent deployment; this switch cannot grant host permissions.")]),
+            new(nameof(OperationalPolicy.AllowHostActions), "Allow legacy host-shell actions", "Applies only to older host-exec actions and their privileged namespace profile. Host Docker scripts use the Docker socket and do not require this option.")]),
         new("deployment-files", "Deployment files", [
             new(nameof(OperationalPolicy.MaximumTextBytes), "Editable text per file (bytes)", "Compose, environment, and supporting text files. Default: 4 MiB (4,194,304 bytes). 0: unlimited. Large text increases editor and diff costs."),
             new(nameof(OperationalPolicy.MaximumUploadBytes), "Uploaded file size (bytes)", "Maximum individual managed file. Default: 16 MiB (16,777,216 bytes). 0: unlimited."),
@@ -29,7 +30,7 @@ public static class PolicyFields
             new(nameof(OperationalPolicy.StatusIntervalSeconds), "Status refresh interval (seconds)", "Refresh the dashboard status feed. Default: 15 seconds. 0: initial status only, no periodic refresh. Operation output streams independently."),
             new(nameof(OperationalPolicy.ConfigurationIntervalSeconds), "Agent configuration check interval (seconds)", "Check for saved configuration changes. Default: 15 seconds. 0: synchronize only on connection/reconnection; reconnect Agents to resume checks after changing this from 0."),
             new(nameof(OperationalPolicy.StaleStatusSeconds), "Observation freshness (seconds)", "Age after which a recorded deployment observation is stale. Default: 15 seconds. 0: no age-based expiry. Offline and never-observed states remain explicit."),
-            new(nameof(OperationalPolicy.MaximumConnectionsPerUser), "Live connections per user", "Concurrent status, output, logs, and terminal streams per user. Default: 4. 0: unlimited."),
+            new(nameof(OperationalPolicy.MaximumConnectionsPerUser), "Live connections per user", "Concurrent status, output and log streams per user. Default: 4. 0: unlimited."),
             new(nameof(OperationalPolicy.MaximumConnections), "Live connections per instance", "Total concurrent browser streams. Default: 1,024. 0: unlimited.")]),
         new("retention", "Retention", [
             new(nameof(OperationalPolicy.LogRetentionDays), "Operation output retention (days)", "Delete output after completed operations reach this age; retain operation metadata. Default: 30 days. 0: retain forever. Output has no character limit, so monitor database disk space."),

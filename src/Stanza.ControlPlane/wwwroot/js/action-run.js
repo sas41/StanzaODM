@@ -63,7 +63,8 @@
                     section.append(heading, state, link, output); feed.querySelector("[data-feed-operations]").append(section);
                     panel = { section, state, output, link }; panels.set(operation.id, panel);
                 }
-                panel.state.textContent = operation.state + " · " + operation.stage + (operation.code ? " · " + operation.code : "");
+                panel.state.textContent = operation.state + " · " + operation.stage + (operation.code ? " · " + operation.code : "") +
+                    (operation.outputIncomplete === true ? " · Output history incomplete (Agent storage failure)" : "");
                 panel.link.hidden = !operation.outputAllowed;
                 if (!operation.outputAllowed) { panel.output.textContent = "Output access is not granted for this operation."; continue; }
                 for (const chunk of operation.chunks || []) {

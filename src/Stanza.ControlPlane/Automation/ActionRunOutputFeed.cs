@@ -8,6 +8,7 @@ namespace Stanza.ControlPlane.Automation;
 public sealed record ActionOperationFeed(Guid Id, int? Step, string State, string Stage, string? Code, bool OutputAllowed,
     IReadOnlyList<AgentOutputChunk> Chunks, string? Output)
 {
+    public bool OutputIncomplete { get; init; }
     public override string ToString() => $"Operation feed {Id} (output redacted)";
 }
 public sealed record ActionOutputBatch(IReadOnlyList<ActionOperationFeed> Operations, bool HasMore);
@@ -29,6 +30,7 @@ public sealed class ActionRunOutputFeed(StanzaDbContext db, OperationService ope
             var after = cursors.TryGetValue(id, out var value) ? value : 0;
             IReadOnlyList<AgentOutputChunk> chunks = [];
             string? legacy = null;
+            var incomplete = false;
             if (allowed)
             {
                 if (remaining > 0)
@@ -38,11 +40,16 @@ public sealed class ActionRunOutputFeed(StanzaDbContext db, OperationService ope
                     more |= chunks.Count == count;
                     if (chunks.Count > 0) cursors[id] = chunks[^1].Sequence;
                     remaining -= chunks.Count;
-                    if (state.HasResponse && after == 0 && chunks.Count == 0 && legacySent.Add(id)) legacy = (await operations.DetailAsync(actor, id, ct)).Output;
+                    if (state.HasResponse)
+                    {
+                        var saved = await operations.DetailAsync(actor, id, ct);
+                        incomplete = saved.OutputIncomplete;
+                        if (after == 0 && chunks.Count == 0 && legacySent.Add(id)) legacy = saved.Output;
+                    }
                 }
                 else more = true;
             }
-            result.Add(new(id, step, state.State, state.Stage, state.Code, allowed, chunks, legacy));
+            result.Add(new(id, step, state.State, state.Stage, state.Code, allowed, chunks, legacy) { OutputIncomplete = incomplete });
         }
         return new(result, more);
     }

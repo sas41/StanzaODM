@@ -20,6 +20,26 @@ namespace Stanza.Tests.Web;
 public sealed class WebSecurityTests
 {
     [Fact]
+    public async Task ConcurrentScopesUseIndependentConnectionsToTheSameTestDatabase()
+    {
+        await using var factory = new StanzaFactory(); await factory.BootstrapAsync();
+        using var first = factory.Services.CreateScope(); using var second = factory.Services.CreateScope();
+        var writer = first.ServiceProvider.GetRequiredService<StanzaDbContext>();
+        var reader = second.ServiceProvider.GetRequiredService<StanzaDbContext>();
+        Assert.NotSame(writer.Database.GetDbConnection(), reader.Database.GetDbConnection());
+        Assert.Equal(writer.Database.GetConnectionString(), reader.Database.GetConnectionString());
+        writer.Settings.Add(new() { Key = "scope-test", Value = "0" }); await writer.SaveChangesAsync();
+        await Task.WhenAll(Task.Run(async () =>
+        {
+            for (var i = 1; i <= 25; i++) await writer.Settings.Where(x => x.Key == "scope-test").ExecuteUpdateAsync(u => u.SetProperty(x => x.Value, i.ToString()));
+        }), Task.Run(async () =>
+        {
+            for (var i = 0; i < 50; i++) Assert.NotNull(await reader.Settings.AsNoTracking().SingleAsync(x => x.Key == "scope-test"));
+        }));
+        Assert.Equal("25", (await reader.Settings.AsNoTracking().SingleAsync(x => x.Key == "scope-test")).Value);
+    }
+
+    [Fact]
     public async Task HealthIsAnonymousButDashboardRequiresAuthentication()
     {
         await using var factory = new StanzaFactory();
@@ -146,8 +166,8 @@ public sealed class WebSecurityTests
 
 public sealed class StanzaFactory : WebApplicationFactory<ControlPlaneEntryPoint>
 {
-    private readonly SqliteConnection connection = new("Data Source=:memory:");
-    private readonly string dataRoot = Path.Combine(Path.GetTempPath(), $"stanza-web-test-{Guid.NewGuid():N}");
+    private readonly string dataRoot = Path.Combine(Directory.Exists("/tmp/opencode") ? "/tmp/opencode" : Path.GetTempPath(), $"stanza-web-test-{Guid.NewGuid():N}");
+    private string ConnectionString => $"Data Source={Path.Combine(dataRoot, "state.db")};Default Timeout=10;Pooling=False";
     private readonly TimeProvider? clock;
     private readonly string environment;
     private readonly bool allowInsecureHttp;
@@ -157,7 +177,9 @@ public sealed class StanzaFactory : WebApplicationFactory<ControlPlaneEntryPoint
         this.clock = clock;
         this.environment = environment;
         this.allowInsecureHttp = allowInsecureHttp;
-        connection.Open();
+        Directory.CreateDirectory(dataRoot);
+        using var connection = new SqliteConnection(ConnectionString); connection.Open();
+        using var command = connection.CreateCommand(); command.CommandText = "PRAGMA journal_mode=WAL;"; command.ExecuteNonQuery();
     }
 
     protected override IHost CreateHost(IHostBuilder builder)
@@ -185,7 +207,9 @@ public sealed class StanzaFactory : WebApplicationFactory<ControlPlaneEntryPoint
             services.RemoveAll<StanzaDbContext>();
             services.RemoveAll<DbContextOptions<StanzaDbContext>>();
             services.RemoveAll<IDbContextOptionsConfiguration<StanzaDbContext>>();
-            services.AddDbContext<StanzaDbContext>(options => options.UseSqlite(connection));
+            // Each request/scope owns its connection, like production. Sharing one SqliteConnection
+            // across concurrent WebSocket readers and mutations corrupts the test driver's command list.
+            services.AddDbContext<StanzaDbContext>(options => options.UseSqlite(ConnectionString));
             if (clock is not null)
                 services.Configure<CookieAuthenticationOptions>(CookieAuthenticationDefaults.AuthenticationScheme, options => options.TimeProvider = clock);
         });
@@ -200,7 +224,6 @@ public sealed class StanzaFactory : WebApplicationFactory<ControlPlaneEntryPoint
     public override async ValueTask DisposeAsync()
     {
         await base.DisposeAsync();
-        await connection.DisposeAsync();
         if (Directory.Exists(dataRoot)) Directory.Delete(dataRoot, recursive: true);
         GC.SuppressFinalize(this);
     }

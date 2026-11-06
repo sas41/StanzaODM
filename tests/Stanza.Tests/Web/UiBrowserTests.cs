@@ -133,18 +133,20 @@ public sealed class UiBrowserTests
             }
         }
         await browser.GoAsync($"/deployments/{deployment}/edit");
-        await browser.WaitAsync("document.querySelectorAll('[data-deployment-action] [data-editor-steps] > section').length>0");
+        await browser.WaitAsync("document.querySelectorAll('[data-deployment-action] textarea[name=Script]').length>0");
         await browser.EvaluateAsync("document.querySelector('[name=ComposeText]').value='unsaved compose edit'; true");
         for (var revision = 2; revision <= 3; revision++)
         {
-            await browser.EvaluateAsync($"(()=>{{const form=document.querySelector('[data-deployment-action] input[name=Id][value=\"{action}\"]').closest('form');form.querySelector('[name=Name]').value='Dev deployment edited {revision}';form.querySelector('[data-plan-order]').value='{revision}';form.requestSubmit();return true;}})()");
+            await browser.EvaluateAsync($"(()=>{{const form=document.querySelector('[data-deployment-action] input[name=Id][value=\"{action}\"]').closest('form');form.querySelector('[name=Name]').value='Dev deployment edited {revision}';const replace=form.querySelector('[name=ReplaceLegacy]');if(replace) replace.checked=true;form.querySelector('[name=Target]').value='container-script';form.querySelector('[name=Service]').value='app';form.querySelector('[name=Script]').value='echo revision-{revision}';form.requestSubmit();return true;}})()");
             await browser.WaitAsync($"document.querySelector('[data-deployment-action] input[name=Id][value=\"{action}\"]')?.closest('form').querySelector('[name=Revision]').value==='{revision}'");
             Assert.Equal("unsaved compose edit", (await browser.EvaluateAsync("document.querySelector('[name=ComposeText]').value")).GetString());
         }
         using var check = factory.Services.CreateScope();
         var changed = await check.ServiceProvider.GetRequiredService<StanzaDbContext>().Set<ActionDefinition>().AsNoTracking().SingleAsync(x => x.Id == action);
         Assert.Equal("Dev deployment edited 3", changed.Name);
-        Assert.Equal(3, check.ServiceProvider.GetRequiredService<AutomationService>().Unprotect<ActionPlan>(changed.ProtectedSteps).Order);
+        var changedPlan = check.ServiceProvider.GetRequiredService<AutomationService>().Unprotect<ActionPlan>(changed.ProtectedSteps);
+        Assert.Equal("echo revision-3", Assert.Single(changedPlan.Steps).Execution!.Script);
+        Assert.Equal("Deploy Latest", changedPlan.ButtonLabel);
         Assert.Equal(1, (await check.ServiceProvider.GetRequiredService<StanzaDbContext>().Set<DeploymentDraftEntity>().AsNoTracking().SingleAsync(x => x.Id == deployment)).Revision);
     }
 

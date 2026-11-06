@@ -63,6 +63,18 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
 
     public Task<bool> CanManageActionAsync(Guid actor, Guid? id, CancellationToken ct = default) => Allowed(actor, "action.manage", "action", id, ct);
 
+    public async Task<IReadOnlyList<DeploymentActionButton>> DeploymentButtonsAsync(Guid actor, Guid deployment, CancellationToken ct)
+    {
+        var buttons = new List<DeploymentActionButton>();
+        foreach (var action in await db.Set<ActionDefinition>().AsNoTracking().Where(x => x.ScopeDeploymentId == deployment && x.Enabled).ToListAsync(ct))
+        {
+            if (!await Allowed(actor, "action.execute", "action", action.Id, ct)) continue;
+            var plan = Unprotect<ActionPlan>(action.ProtectedSteps);
+            buttons.Add(new(action.Id, plan.ButtonLabel ?? action.Name, plan.Order, plan.Parameters?.Count > 0 || !string.IsNullOrEmpty(plan.Confirmation)));
+        }
+        return buttons.OrderBy(x => x.Order).ThenBy(x => x.Label).ToArray();
+    }
+
     public async Task<IReadOnlyList<(ActionDefinition Definition, ActionPlan Plan)>> ScopedActionsAsync(Guid actor, Guid deployment, CancellationToken ct)
     {
         var result = new List<(ActionDefinition, ActionPlan)>();

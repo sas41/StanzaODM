@@ -20,6 +20,7 @@ public sealed record OperationDetail(OperationSummary Summary, string? Output, b
     public string? Phase { get; init; }
     public string? CancellationReason { get; init; }
     public Guid? BlockingOperationId { get; init; }
+    public bool OutputIncomplete { get; init; }
     public IReadOnlyList<AgentDisconnectEntity> Disconnects { get; init; } = [];
     public override string ToString() => $"OperationDetail {{ Id = {Summary.Id}, Output = [REDACTED] }}";
 }
@@ -34,10 +35,10 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         ["deploy"] = "deployment.deploy", ["start"] = "deployment.start", ["stop"] = "deployment.stop",
         ["restart"] = "deployment.restart", ["remove"] = "deployment.remove", ["status"] = "deployment.read",
         ["logs"] = "logs.read", ["container-exec"] = "container.execute", ["image-digests"] = "automation.read",
-        ["environment-preview"] = "deployment.read"
+        ["environment-preview"] = "deployment.read", ["container-script"] = "container.execute", ["docker-script"] = "deployment.read"
     };
     public static bool Terminal(string state) => state is "Succeeded" or "Failed" or "Cancelled" or "Unknown";
-    internal static bool ControlsExistingContainers(string kind) => kind is "start" or "stop" or "restart" or "remove" or "status" or "logs" or "container-exec";
+    internal static bool ControlsExistingContainers(string kind) => kind is "start" or "stop" or "restart" or "remove" or "status" or "logs" or "container-exec" or "container-script";
     public async Task<OperationSummary> EnqueueAsync(OperationSubmission submission, CancellationToken token = default)
     {
         if (maintenance?.Paused == true) throw new OperationException("Recovery requires a Control Plane restart before execution can resume.");
@@ -87,16 +88,22 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
                 if (submission.Kind != "environment-preview") sourceSnapshot = await sources.PrepareAsync(submission.ActorId, deploymentId, token);
             }
         }
-        else if (submission.Kind != "host-exec") throw new OperationException("A deployment is required for this operation.");
+        else if (submission.Kind is not ("host-exec" or "docker-script")) throw new OperationException("A deployment is required for this operation.");
         if (target is null || target == Guid.Empty) throw new OperationException("Assign an approved Agent before running this operation.");
         if (submission.Kind == "host-exec") await RequireAsync(submission.ActorId, "host.execute", "agent", target, token);
         else await RequireAsync(submission.ActorId, "agent.read", "agent", target, token);
+        if (submission.Kind == "docker-script") await RequireAsync(submission.ActorId, "host.execute", "agent", target, token);
         if (!await db.Set<AgentEntity>().AnyAsync(x => x.Id == target && x.Status == "approved", token))
             throw new OperationException("The target Agent is not approved.");
         if (submission.AgentId.HasValue && submission.DeploymentId.HasValue)
             await RequireAsync(submission.ActorId, "deployment.move", "deployment", submission.DeploymentId, token);
-        if (submission.Kind is "host-exec" or "container-exec" && submission.Execution is null)
+        if (submission.Kind is "host-exec" or "container-exec" or "docker-script" or "container-script" && submission.Execution is null)
             throw new OperationException("An executable and argument list are required.");
+        if (submission.Kind is "docker-script" or "container-script")
+        {
+            try { AutomationRules.ValidateScript(submission.Kind, submission.Execution); }
+            catch (AutomationException error) { throw new OperationException(error.Message); }
+        }
         if (submission.Execution is { } execution && (string.IsNullOrWhiteSpace(execution.Executable) || execution.Executable.Contains('\0') || execution.Arguments.Count > 256 || execution.Arguments.Any(x => x is null || x.Length > 8192 || x.Contains('\0'))))
             throw new OperationException("Invalid command arguments.");
         if (submission.Trigger.Length is < 1 or > 100 || submission.Trigger.Any(char.IsControl)) throw new OperationException("Invalid operation trigger.");
@@ -167,12 +174,12 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
         var row = await RequiredAsync(id, ct);
         if (!await CanReadAsync(actor, row, ct)) throw new OperationException("Operation read access is denied.");
         var allowed = await CanReadOutputAsync(actor, row, ct);
-        var output = row.ProtectedResponse is not null && allowed
-            ? JsonSerializer.Deserialize<AgentWorkResponse>(Protector(id).Unprotect(row.ProtectedResponse))?.Output : null;
+        var response = row.ProtectedResponse is not null && allowed
+            ? JsonSerializer.Deserialize<AgentWorkResponse>(Protector(id).Unprotect(row.ProtectedResponse)) : null;
         var blocking = row.State == "Queued" && row.DeploymentId is { } target
             ? await db.Set<OperationEntity>().Where(x => x.DeploymentId == target && x.Id != id && (x.State == "Unknown" || x.State == "Running" || x.State == "CancellationRequested"))
                 .OrderBy(x => x.CreatedAt).Select(x => (Guid?)x.Id).FirstOrDefaultAsync(ct) : null;
-        return new(Summary(row), output, allowed) { Phase = row.Stage, CancellationReason = row.CancellationReason, BlockingOperationId = blocking,
+        return new(Summary(row), response?.Output, allowed) { Phase = row.Stage, CancellationReason = row.CancellationReason, BlockingOperationId = blocking, OutputIncomplete = response?.OutputIncomplete == true,
             Disconnects = await db.Set<AgentDisconnectEntity>().AsNoTracking().Where(x => x.OperationId == id).OrderByDescending(x => x.At).Take(20).ToListAsync(ct) };
     }
 
@@ -249,6 +256,7 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
             if (row.Kind == "environment-preview") await RequireEnvironmentPreviewAsync(row.ActorId, deployment, row.AgentId, ct);
         }
         else await RequireAsync(row.ActorId, "host.execute", "agent", row.AgentId, ct);
+        if (row.Kind == "docker-script") await RequireAsync(row.ActorId, "host.execute", "agent", row.AgentId, ct);
         if (!(await agentPolicies.RuntimeAsync(row.AgentId, ct)).ExecutionEnabled) throw new OperationException("Agent execution has been disabled.");
         if (row.Kind == "host-exec" && !(await policies.GetAsync(ct)).Policy.AllowHostActions) throw new OperationException("Host actions have been disabled.");
         if (!await db.Set<AgentEntity>().AnyAsync(x => x.Id == row.AgentId && x.Status == "approved", ct)) throw new OperationException("Agent approval has been revoked.");
@@ -265,6 +273,7 @@ public sealed class OperationService(StanzaDbContext db, DeploymentDraftService 
             if (row.RequiresMovePermission) await RequireAsync(row.ActorId, "deployment.move", "deployment", deployment, ct);
         }
         else await RequireAsync(row.ActorId, "host.execute", "agent", row.AgentId, ct);
+        if (row.Kind == "docker-script") await RequireAsync(row.ActorId, "host.execute", "agent", row.AgentId, ct);
         if (!(await agentPolicies.RuntimeAsync(row.AgentId, ct)).ExecutionEnabled ||
             !await db.Set<AgentEntity>().AnyAsync(x => x.Id == row.AgentId && x.Status == "approved", ct))
             throw new OperationException("Execution authorization was revoked.");

@@ -203,10 +203,14 @@ public sealed class AgentWorkExecutorTests
         Assert.Equal(commit, result.ResolvedSources!["source"]);
         var checkout = Assert.Single(runner.Requests, x => x.Arguments.Contains("checkout"));
         Assert.Equal(commit, checkout.Arguments[^1]); Assert.Contains("submodule.recurse=false", checkout.Arguments);
+        var fetch = Assert.Single(runner.Requests, x => x.Arguments.Contains("fetch"));
+        Assert.Contains("--depth=1", fetch.Arguments); Assert.Contains("--no-tags", fetch.Arguments);
+        Assert.Contains("--no-recurse-submodules", fetch.Arguments); Assert.Equal("main", fetch.Arguments[^1]);
+        Assert.DoesNotContain(fetch.Arguments, argument => argument.Contains('*'));
     }
 
     [Fact]
-    public async Task SubmodulesAndCheckoutSymlinksAreRejected()
+    public async Task TopLevelCheckoutLeavesSubmodulesUnfetchedAndRejectsCheckoutSymlinks()
     {
         foreach (var symlink in new[] { false, true })
         {
@@ -218,10 +222,12 @@ public sealed class AgentWorkExecutorTests
                     if (symlink) File.CreateSymbolicLink(Path.Combine(request.WorkingDirectory, "escape"), "/etc/passwd");
                     else File.WriteAllText(Path.Combine(request.WorkingDirectory, ".gitmodules"), "[submodule]");
                 }
-                return new(0, request.Arguments.Contains("rev-parse") ? new string('a', 40) : "", "", false, false);
+                return new(0, request.Arguments.Contains("rev-parse") ? new string('a', 40) : request.Arguments.Contains("config") ? "{\"services\":{}}" : "", "", false, false);
             }};
             var result = await Executor(directory.Path, runner).ExecuteAsync(Request() with { Sources = [new("https://git.example/repo", "main", "source")] });
-            Assert.False(result.Succeeded); Assert.DoesNotContain(runner.Requests, x => x.Executable.EndsWith("docker", StringComparison.Ordinal));
+            Assert.Equal(!symlink, result.Succeeded);
+            Assert.DoesNotContain(runner.Requests, x => x.Arguments.Contains("submodule"));
+            if (symlink) Assert.DoesNotContain(runner.Requests, x => x.Executable.EndsWith("docker", StringComparison.Ordinal));
         }
     }
 

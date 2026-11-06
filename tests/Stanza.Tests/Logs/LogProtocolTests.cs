@@ -4,7 +4,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Stanza.ControlPlane.Audit;
 using Stanza.ControlPlane.Live;
 using Stanza.ControlPlane.Logs;
-using Stanza.ControlPlane.Terminals;
 
 namespace Stanza.Tests.Logs;
 
@@ -68,10 +67,10 @@ public sealed class LogProtocolTests
     public void RegistrationIsIdempotentSharesLeasesAndDoesNotFakeTheTransport()
     {
         var services = new ServiceCollection();
-        services.AddStanzaTerminals().AddStanzaLogs().AddStanzaLogs();
+        services.AddStanzaLogs().AddStanzaLogs();
         Assert.Single(services, service => service.ServiceType == typeof(LiveConnectionLeases));
         Assert.Single(services, service => service.ServiceType == typeof(AuditService));
         Assert.Single(services, service => service.ServiceType == typeof(LogAccess));
-        Assert.DoesNotContain(services, service => service.ServiceType == typeof(IAgentTerminalTransport));
+        Assert.DoesNotContain(services, service => service.ServiceType == typeof(IAgentLogTransport));
     }
 }

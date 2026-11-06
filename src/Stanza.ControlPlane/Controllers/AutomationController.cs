@@ -19,7 +19,7 @@ public sealed class AutomationController(AutomationService automation, Automatio
     public async Task<IActionResult> Index(CancellationToken ct) => View(await automation.ListAsync(Actor, ct));
 
     [HttpGet("actions/edit")]
-    public async Task<IActionResult> ActionEditor(Guid? id, CancellationToken ct, Guid? deploymentId = null)
+    public async Task<IActionResult> ActionEditor(Guid? id, CancellationToken ct, Guid? deploymentId = null, Guid? agentId = null)
     {
         try
         {
@@ -28,14 +28,11 @@ public sealed class AutomationController(AutomationService automation, Automatio
             ViewData["ActionAgents"] = await sources.ListAgentsAsync(Actor, ct);
             if (id is null)
             {
-                var initialPlan = new ActionPlan([new("deploy", deploymentId)], DeploymentId: deploymentId);
-                return View(new ActionEditorModel { PlanJson = JsonSerializer.Serialize(initialPlan, AutomationRules.Json) });
+                return View(new ActionEditorModel { DeploymentId = deploymentId, AgentId = agentId, Enabled = true });
             }
             var (definition, plan) = await automation.ReadActionAsync(Actor, id.Value, ct);
-            if (!AutomationRules.MatchesScope(plan)) ModelState.AddModelError("", "This legacy action was disabled because its steps escape its deployment scope. Review its targets or explicitly change it to Global before enabling it.");
             ViewData["ActionSchedules"] = await automation.ActionSchedulesAsync(Actor, id.Value, ct);
-            return View(new ActionEditorModel { Id = id, Name = definition.Name, Enabled = definition.Enabled, Revision = definition.Revision,
-                Concurrency = definition.Concurrency, PlanJson = JsonSerializer.Serialize(plan, new JsonSerializerOptions(AutomationRules.Json) { WriteIndented = true }) });
+            return View(ActionEditorModel.From(definition, plan));
         }
         catch (AutomationAccessException) { return Forbid(); }
         catch (AutomationException) { return NotFound(); }
@@ -50,8 +47,12 @@ public sealed class AutomationController(AutomationService automation, Automatio
             ViewData["ActionDeployments"] = await sources.ListDeploymentsAsync(Actor, ct);
             ViewData["ActionAgents"] = await sources.ListAgentsAsync(Actor, ct);
             if (model.Id is { } actionId) ViewData["ActionSchedules"] = await automation.ActionSchedulesAsync(Actor, actionId, ct);
+            var existing = model.Id is { } existingId ? await automation.ReadActionAsync(Actor, existingId, ct) : default;
+            model.IsLegacy = existing.Plan is not null && !ActionEditorModel.IsScript(existing.Plan);
+            if (model.IsLegacy) ViewData["LegacyPlan"] = JsonSerializer.Serialize(existing.Plan, AutomationRules.Json);
             if (!ModelState.IsValid) return View(model);
-            var saved = await automation.SaveActionAsync(Actor, model.Id, model.Revision, model.Name, model.Enabled, model.Concurrency, AutomationRules.ParsePlan(model.PlanJson), ct);
+            var saved = await automation.SaveActionAsync(Actor, model.Id, model.Revision, model.Name, model.Enabled,
+                existing.Definition?.Concurrency ?? model.Concurrency, model.ToPlan(existing.Plan), ct);
             if (configureSchedule) return RedirectToAction(nameof(ActionEditor), new { id = saved.Id });
             return RedirectToAction(nameof(Index));
         }

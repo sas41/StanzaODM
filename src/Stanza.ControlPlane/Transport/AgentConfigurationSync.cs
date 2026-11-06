@@ -42,9 +42,10 @@ public sealed class AgentConfigurationSync(StanzaDbContext db, IDataProtectionPr
                 .OrderBy(x => x.CredentialId).Select(x => x.CredentialId).ToArrayAsync(ct);
             deployments.Add(new(draft.Id, snapshot.Name, snapshot.Revision, snapshot.Files, snapshot.EnvironmentText, sources, registries));
         }
+        var operationalPolicy = (await operational.GetAsync(ct)).Policy;
         var configuration = new AgentConfiguration(agentId, global.GlobalEnvironment, environment, await policies.RuntimeAsync(agentId, ct),
-            assigned.Select(x => x.Id).ToArray());
-        var interval = (await operational.GetAsync(ct)).Policy.ConfigurationIntervalSeconds;
+            assigned.Select(x => x.Id).ToArray(), operationalPolicy.MinimumAgentFreeSpaceMiB);
+        var interval = operationalPolicy.ConfigurationIntervalSeconds;
         await transaction.CommitAsync(ct);
         return new(configuration, deployments, interval);
     }

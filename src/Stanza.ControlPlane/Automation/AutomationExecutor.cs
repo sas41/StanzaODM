@@ -190,7 +190,8 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
                 await CheckIdentityAsync(run, ct);
                 // Recheck the currently running target on every heartbeat, not just when the next step starts.
                 var step = await db.Set<AutomationStepRun>().AsNoTracking().Where(x => x.RunId == run.Id && x.OperationId == operationId).SingleOrDefaultAsync(ct);
-                if (step is not null) await AuthorizeStepAsync(run, new(step.Kind, step.DeploymentId, step.Kind == "host-exec" ? step.AgentId : null), ct);
+                if (step is not null) await AuthorizeStepAsync(run, new(step.Kind, step.DeploymentId,
+                    step.Kind is "host-exec" or "docker-script" && step.DeploymentId is null ? step.AgentId : null), ct);
                 await db.Set<AutomationRun>().Where(x => x.Id == run.Id && x.State == "running" && x.LeaseOwner == workerId)
                     .ExecuteUpdateAsync(u => u.SetProperty(x => x.LeaseUntil, automation.Now + 120), ct);
             }

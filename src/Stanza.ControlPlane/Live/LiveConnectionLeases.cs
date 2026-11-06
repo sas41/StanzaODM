@@ -1,5 +1,16 @@
 namespace Stanza.ControlPlane.Live;
 
+public static class LiveWebSockets
+{
+    public static bool IsSameOrigin(HttpRequest request, string? publicOrigin)
+    {
+        var origins = request.Headers.Origin;
+        return origins.Count == 1 && origins[0] is { } origin && Uri.TryCreate(origin, UriKind.Absolute, out var uri) &&
+            uri.Scheme is "http" or "https" && uri.UserInfo.Length == 0 && uri.AbsolutePath == "/" && uri.Query.Length == 0 && uri.Fragment.Length == 0 &&
+            string.Equals(origin, publicOrigin ?? $"{request.Scheme}://{request.Host}", StringComparison.OrdinalIgnoreCase);
+    }
+}
+
 // A bounded registry: empty account entries are removed immediately, including on cancellation.
 public sealed class LiveConnectionLeases
 {

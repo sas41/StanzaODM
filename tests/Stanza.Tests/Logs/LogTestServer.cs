@@ -18,7 +18,6 @@ using Stanza.ControlPlane.Logs;
 using Stanza.ControlPlane.Operations;
 using Stanza.ControlPlane.Persistence;
 using Stanza.ControlPlane.Security;
-using Stanza.ControlPlane.Terminals;
 using Stanza.Core.Contracts;
 using Stanza.Tests.Live;
 
@@ -51,7 +50,7 @@ internal sealed class LogTestServer : IAsyncDisposable
         builder.Services.AddScoped<OperationalPolicyService>();
         builder.Services.AddSingleton<TimeProvider>(fixture.Clock);
         builder.Services.AddStanzaLogs();
-        builder.Services.AddSingleton<IAgentTerminalTransport>(fixture.Transport);
+        builder.Services.AddSingleton<IAgentLogTransport>(fixture.Transport);
         builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(options => options.TimeProvider = fixture.Clock);
         builder.Services.AddAuthorization();
         builder.Services.AddControllersWithViews().AddApplicationPart(typeof(Stanza.ControlPlane.Controllers.LogsController).Assembly);
@@ -165,29 +164,25 @@ internal sealed class LogTestServer : IAsyncDisposable
     private static string SourceDirectory([CallerFilePath] string path = "") => Path.GetDirectoryName(path)!;
 }
 
-internal sealed class FakeLogTransport : IAgentTerminalTransport
+internal sealed class FakeLogTransport : IAgentLogTransport
 {
     public FakeLogSession Session { get; } = new();
     public List<(Guid Agent, Guid Deployment, AgentExecution Execution)> Opens { get; } = [];
     public bool Unavailable { get; set; }
-    public Task<IAgentTerminalSession> OpenAsync(Guid agentId, Guid deploymentId, AgentExecution execution, CancellationToken ct)
+    public Task<IAgentLogSession> OpenAsync(Guid agentId, Guid deploymentId, AgentExecution execution, CancellationToken ct)
     {
         if (Unavailable) throw new InvalidOperationException("private-log-transport-error");
         Opens.Add((agentId, deploymentId, execution));
-        return Task.FromResult<IAgentTerminalSession>(Session);
+        return Task.FromResult<IAgentLogSession>(Session);
     }
 }
 
-internal sealed class FakeLogSession : IAgentTerminalSession
+internal sealed class FakeLogSession : IAgentLogSession
 {
-    public Channel<TerminalOutput> Output { get; } = Channel.CreateBounded<TerminalOutput>(2);
+    public Channel<LogOutput> Output { get; } = Channel.CreateBounded<LogOutput>(2);
     public TaskCompletionSource Disposed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public bool Closed { get; private set; }
-    public int InputCalls { get; private set; }
-    public int ResizeCalls { get; private set; }
-    public ValueTask<TerminalOutput> ReadOutputAsync(CancellationToken ct) => Output.Reader.ReadAsync(ct);
-    public ValueTask WriteInputAsync(ReadOnlyMemory<byte> input, CancellationToken ct) { InputCalls++; throw new InvalidOperationException("Log gateway attempted input."); }
-    public ValueTask ResizeAsync(int columns, int rows, CancellationToken ct) { ResizeCalls++; throw new InvalidOperationException("Log gateway attempted resize."); }
+    public ValueTask<LogOutput> ReadOutputAsync(CancellationToken ct) => Output.Reader.ReadAsync(ct);
     public ValueTask CloseAsync(CancellationToken ct) { Closed = true; return ValueTask.CompletedTask; }
     public ValueTask DisposeAsync() { Disposed.TrySetResult(); return ValueTask.CompletedTask; }
 }

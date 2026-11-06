@@ -104,6 +104,7 @@ public sealed class OperationRecoveryService(StanzaDbContext db, OperationServic
             finally { if (feed is not null) feed.Output -= Append; }
             if (response.Code == "agent_busy" || response.Code != job.Response.Code || response.Succeeded != job.Response.Succeeded)
                 throw new OperationException("Agent evidence changed during inspection. Retry inspection; locks remain held.");
+            await output.ArchiveAsync(row.AgentId, row.Id, response.LastOutputSequence, ct);
             responses.Add(row.Id, (job, response));
             if (row.DeploymentId is { } deployment)
             {
@@ -163,6 +164,11 @@ public sealed class OperationRecoveryService(StanzaDbContext db, OperationServic
         await db.SaveChangesAsync(ct);
         await automation.RecordAuditAsync(actor, "execution.inspected-reconciled", (run?.Id ?? rows[0].Id).ToString(), "no-command-replay", ct);
         await transaction.CommitAsync(ct);
+        if (dispatcher is IAgentOutputArchive archive)
+            foreach (var row in rows)
+                if (responses.TryGetValue(row.Id, out var saved))
+                    try { await archive.CommitOutputAsync(row.AgentId, row.Id, saved.Response.LastOutputSequence, ct); }
+                    catch (Exception error) when (error is AgentUnavailableException or IOException or OperationCanceledException) { /* Agent retries after reconnect. */ }
         return "Execution evidence and container status inspected. Operations and associated automation locks were reconciled together. No commands were retried; you may explicitly retry interrupted work.";
     }
 }

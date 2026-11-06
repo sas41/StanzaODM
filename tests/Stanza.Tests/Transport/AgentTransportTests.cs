@@ -10,6 +10,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Hosting;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.DataProtection;
 using Stanza.ControlPlane.Operations;
 using Stanza.ControlPlane.Persistence;
 using Stanza.Agent;
@@ -39,8 +40,6 @@ public sealed class AgentTransportTests
         var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = fixture.Origin,
             EnrollmentToken = fixture.Credential, AllowLoopbackHttp = true });
         var executor = new StreamingExecutor(); var state = new AgentState();
-        var chunks = new List<AgentOutputChunk>();
-        fixture.Broker.Output += (_, chunk) => { chunks.Add(chunk); return Task.CompletedTask; };
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var running = new AgentCommandChannel(options, state, executor, fixture.Store.Clock, environment: fixture.Environment).RunAsync(identity, timeout.Token);
         try
@@ -50,10 +49,12 @@ public sealed class AgentTransportTests
             var dispatch = fixture.Broker.DispatchAsync(agent, request, timeout.Token);
             await executor.Recorded.Task.WaitAsync(timeout.Token);
             Assert.False(dispatch.IsCompleted);
-            await AgentTestWait.UntilAsync(() => chunks.Count == 20);
-            Assert.Equal(20, chunks.Count);
-            Assert.Equal(81920, chunks.Sum(x => x.Text.Length));
-            Assert.Equal(Enumerable.Range(1, 20).Select(x => (long)x), chunks.Select(x => x.Sequence));
+            var live = await fixture.Broker.ReadOutputAsync(agent, request.Id, 0, 64, timeout.Token);
+            Assert.Equal(20, live.Count);
+            Assert.Equal(81920, live.Sum(x => x.Text.Length));
+            Assert.Equal(Enumerable.Range(1, 20).Select(x => (long)x), live.Select(x => x.Sequence));
+            Assert.Equal(Enumerable.Range(11, 10).Select(x => (long)x),
+                (await fixture.Broker.ReadOutputAsync(agent, request.Id, 10, 64, timeout.Token)).Select(x => x.Sequence));
             executor.Complete.TrySetResult();
             var result = await dispatch;
             Assert.False(result.Succeeded); Assert.Equal("runtime_failed", result.Code);
@@ -94,8 +95,6 @@ public sealed class AgentTransportTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         var running = channel.RunAsync(identity, timeout.Token);
         await AgentTestWait.UntilAsync(() => state.Snapshot.Ready);
-        var chunks = new System.Collections.Concurrent.ConcurrentDictionary<long, AgentOutputChunk>();
-        fixture.Broker.Output += (_, chunk) => { chunks[chunk.Sequence] = chunk; return Task.CompletedTask; };
         var request = AgentWorkExecutorTests.Request("deploy");
         var dispatch = fixture.Broker.DispatchAsync(agent, request, timeout.Token);
         await executor.Started.Task.WaitAsync(timeout.Token);
@@ -121,11 +120,12 @@ public sealed class AgentTransportTests
             executor.Complete.TrySetResult();
             var result = await dispatch.WaitAsync(timeout.Token);
             Assert.True(result.Succeeded); Assert.Equal(1, executor.Executions); Assert.False(executor.Cancelled);
-            Assert.Equal(new long[] { 1, 2 }, chunks.Keys.Order());
+            Assert.Equal(new long[] { 1, 2 }, (await fixture.Broker.ReadOutputAsync(agent, request.Id, 0, 64, timeout.Token)).Select(x => x.Sequence));
             var inspected = await fixture.Broker.InspectAsync(agent, request.Id, timeout.Token);
             Assert.False(inspected.Active); Assert.True(inspected.Stopped); Assert.Equal(phase, inspected.Phase);
             Assert.Equal(phase != "Building", inspected.ApplyStarted);
-            Assert.Equal(2, inspected.AcknowledgedSequence);
+            Assert.Equal(0, inspected.AcknowledgedSequence);
+            Assert.Equal(2, result.LastOutputSequence);
             var diagnostics = await File.ReadAllTextAsync(Path.Combine(root.Path, "jobs-v1", "disconnects.jsonl"));
             Assert.Contains("\"Reason\":", diagnostics); Assert.Contains("\"CloseStatus\":", diagnostics);
         }
@@ -161,13 +161,13 @@ public sealed class AgentTransportTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task OutputPersistenceOrAcknowledgementFailureDoesNotStopExecutionAndReconnectUsesDurableCursor(bool persistedBeforeDisconnect)
+    public async Task CompletionArchiveResumesAfterDisconnectAndAgentOutputIsDeletedOnlyAfterDatabaseCommit(bool persistedBeforeDisconnect)
     {
         await using var fixture = await ServerFixture.CreateAsync();
         using var root = new AgentTestDirectory(); using var identity = AgentIdentity.LoadOrCreate(root.Path);
         var agent = await fixture.RegisterAsync(identity, true); var request = AgentWorkExecutorTests.Request("deploy");
         await using (var db = fixture.Store.CreateContext())
-        { db.Add(new OperationEntity { Id = request.Id, AgentId = agent }); await db.SaveChangesAsync(); }
+        { db.Add(new OperationEntity { Id = request.Id, AgentId = agent, State = "Running" }); await db.SaveChangesAsync(); }
         var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = fixture.Origin,
             EnrollmentToken = fixture.Credential, AllowInsecureHttp = true });
         var executor = new ReconnectExecutor("Building"); var state = new AgentState();
@@ -176,17 +176,15 @@ public sealed class AgentTransportTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         var running = channel.RunAsync(identity, timeout.Token);
         await AgentTestWait.UntilAsync(() => state.Snapshot.Ready);
-        var failOnce = 1; var seen = new System.Collections.Concurrent.ConcurrentQueue<long>();
-        fixture.Broker.Output += async (id, chunk) =>
-        {
-            seen.Enqueue(chunk.Sequence);
-            var fail = Interlocked.Exchange(ref failOnce, 0) == 1;
-            await using var db = fixture.Store.CreateContext(); var store = new OperationOutputStore(db, fixture.Store.Protection);
-            if (!fail || persistedBeforeDisconnect) await store.AppendAsync(id, chunk);
-            if (fail) throw new IOException("simulated output persistence/acknowledgement interruption");
-        };
         var dispatch = fixture.Broker.DispatchAsync(agent, request, timeout.Token);
         await executor.Started.Task.WaitAsync(timeout.Token);
+        await using (var liveDb = fixture.Store.CreateContext())
+        {
+            var liveStore = new OperationOutputStore(liveDb, fixture.Store.Protection, fixture.Broker);
+            Assert.Single(await liveStore.ReadAsync(request.Id, 0));
+            Assert.Empty(await liveDb.Set<OperationOutputEntity>().ToListAsync());
+        }
+        fixture.Broker.Disconnect(agent);
         await IgnoreConnectionCloseAsync(running);
         // The job completes while the transport has failed and no output is acknowledged.
         executor.Complete.TrySetResult();
@@ -203,13 +201,26 @@ public sealed class AgentTransportTests
         running = ReconnectAsync();
         try
         {
-            Assert.True((await dispatch.WaitAsync(timeout.Token)).Succeeded);
-            await using var db = fixture.Store.CreateContext(); var store = new OperationOutputStore(db, fixture.Store.Protection);
+            var response = await dispatch.WaitAsync(timeout.Token);
+            Assert.True(response.Succeeded);
+            Assert.False((await jobs.InspectAsync(request.Id)).OutputArchived);
+            Assert.True(File.Exists(Path.Combine(root.Path, "jobs-v1", request.Id.ToString("N") + ".output")));
+            await using var db = fixture.Store.CreateContext(); var store = new OperationOutputStore(db, fixture.Store.Protection, fixture.Broker);
+            if (persistedBeforeDisconnect) await store.AppendAsync(request.Id, new(1, "stdout", "before disconnect\n"));
+            await store.ArchiveAsync(agent, request.Id, response.LastOutputSequence, timeout.Token);
             Assert.Equal(new long[] { 1, 2 }, (await store.ReadAsync(request.Id, 0)).Select(x => x.Sequence));
-            Assert.Equal(persistedBeforeDisconnect ? 1 : 2, seen.Count(x => x == 1));
+            var operation = await db.Set<OperationEntity>().SingleAsync(x => x.Id == request.Id);
+            operation.State = "Succeeded";
+            operation.ProtectedResponse = fixture.Store.Protection.CreateProtector("Stanza.Operation.v1", request.Id.ToString("N")).Protect(JsonSerializer.Serialize(response));
+            await db.SaveChangesAsync();
+            // Deliberately omit the immediate commit message: heartbeat/reconnect retries the acknowledgement.
+            while (!(await jobs.InspectAsync(request.Id)).OutputArchived) await Task.Delay(100, timeout.Token);
             Assert.Equal(2, (await jobs.InspectAsync(request.Id)).AcknowledgedSequence);
+            Assert.False(File.Exists(Path.Combine(root.Path, "jobs-v1", request.Id.ToString("N") + ".output")));
+            Assert.Empty(await jobs.ReadOutputAsync(request.Id, 0));
+            Assert.Equal(2, (await store.ReadAsync(request.Id, 0)).Count);
             await AgentTestWait.UntilAsync(async () => await db.Set<AgentDisconnectEntity>().AnyAsync(x => x.OperationId == request.Id));
-            Assert.StartsWith("output_persistence_", (await db.Set<AgentDisconnectEntity>().SingleAsync(x => x.OperationId == request.Id)).Reason);
+            Assert.NotEmpty((await db.Set<AgentDisconnectEntity>().FirstAsync(x => x.OperationId == request.Id)).Reason);
         }
         finally { timeout.Cancel(); await IgnoreConnectionCloseAsync(running); }
     }
@@ -538,6 +549,7 @@ public sealed class AgentTransportTests
             builder.Services.AddSingleton(store.Protection);
             builder.Services.AddScoped(_ => store.CreateContext());
             builder.Services.AddScoped<AgentAdministrationService>();
+            builder.Services.AddScoped<OperationOutputStore>();
             builder.Services.AddSingleton(new HttpTransportPolicy(allowInsecureHttp));
             AgentTransportExtensions.AddStanzaAgentTransport(builder.Services);
             builder.Services.AddControllers().AddApplicationPart(typeof(AgentEnrollmentController).Assembly);
