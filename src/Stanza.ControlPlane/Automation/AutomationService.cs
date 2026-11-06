@@ -21,6 +21,7 @@ public sealed record WebhookSaved(WebhookDefinition Definition, string? Secret)
 {
     public override string ToString() => "WebhookSaved { [REDACTED] }";
 }
+internal sealed record PreparedActionInputs(Guid ActionId, long Revision, IReadOnlyDictionary<string, string> Values, ActionExecutionBindings? Bindings);
 
 public sealed class AutomationService(StanzaDbContext db, AutomationAuthorization authorization, IDataProtectionProvider protection, TimeProvider clock,
     ActionInputService? inputs = null)
@@ -186,6 +187,7 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
         }
         var next = Preview(schedule.Expression, schedule.TimeZone, 1)[0].ToUnixTimeSeconds();
         await db.Set<AutomationSchedule>().Where(x => x.Id == id).ExecuteUpdateAsync(u => u.SetProperty(x => x.Enabled, enabled)
+            .SetProperty(x => x.PendingOccurrenceAt, (long?)null)
             .SetProperty(x => x.NextRunAt, next).SetProperty(x => x.Revision, x => x.Revision + 1), ct);
         await RecordAuditAsync(actor, "automation.schedule.enabled", id.ToString(), enabled ? "enabled" : "paused", ct);
         if (transaction is not null) await transaction.CommitAsync(ct);
@@ -429,8 +431,20 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
         }
     }
 
+    internal async Task<PreparedActionInputs> PrepareActionInputsAsync(Guid actor, Guid action, IReadOnlyDictionary<string, string>? supplied, CancellationToken ct)
+    {
+        var definition = await ActionAsync(action, ct);
+        await ValidateTriggerAsync(actor, action, null, "", ct);
+        var plan = Unprotect<ActionPlan>(definition.ProtectedSteps);
+        var values = AutomationRules.Parameters(plan, supplied);
+        var bindings = (plan.Parameters ?? []).Any(p => p.Input is "branch" or "version")
+            ? await (inputs ?? throw new AutomationException("Input discovery unavailable.")).ResolveAsync(definition.OwnerId, plan, values, ct) : null;
+        return new(action, definition.Revision, values, bindings);
+    }
+
     internal async Task<AutomationRun> QueueAsync(Guid owner, Guid? deployment, Guid? action, Guid definition, string source,
-        string key, string operation, IReadOnlyDictionary<string, string>? parameters = null, string state = "queued", string code = "", Guid? requestedBy = null, CancellationToken ct = default, long? expectedRevision = null)
+        string key, string operation, IReadOnlyDictionary<string, string>? parameters = null, string state = "queued", string code = "", Guid? requestedBy = null, CancellationToken ct = default, long? expectedRevision = null,
+        PreparedActionInputs? preparedInputs = null)
     {
         ActionPlan plan;
         ActionDefinition? definitionRow = null;
@@ -442,8 +456,11 @@ public sealed class AutomationService(StanzaDbContext db, AutomationAuthorizatio
             await ValidateTriggerAsync(owner, a, deployment, operation, ct);
             if (expectedRevision.HasValue && expectedRevision != definitionRow.Revision) throw new AutomationException("The action changed. Reload its inputs before running it.");
             plan = Unprotect<ActionPlan>(definitionRow.ProtectedSteps);
-            parameters = AutomationRules.Parameters(plan, parameters);
-            if ((plan.Parameters ?? []).Any(p => p.Input is "branch" or "version"))
+            if (preparedInputs is not null && (preparedInputs.ActionId != a || preparedInputs.Revision != definitionRow.Revision))
+                throw new AutomationException("The action changed while its inputs were resolved. Reload and retry.");
+            parameters = AutomationRules.Parameters(plan, preparedInputs?.Values ?? parameters);
+            if (preparedInputs is not null) executionBindings = preparedInputs.Bindings;
+            else if ((plan.Parameters ?? []).Any(p => p.Input is "branch" or "version"))
                 executionBindings = await (inputs ?? throw new AutomationException("Input discovery unavailable.")).ResolveAsync(definitionRow.OwnerId, plan, parameters, ct);
         }
         else plan = new([new(operation, deployment)]);

@@ -12,15 +12,26 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
 
     public async Task<bool> ExecuteNextAsync(CancellationToken ct = default)
     {
+        var run = await ClaimNextAsync(ct);
+        if (run is null) return false;
+        await ExecuteClaimedAsync(run, ct); return true;
+    }
+
+    public async Task<AutomationRun?> ClaimNextAsync(CancellationToken ct = default)
+    {
         var candidates = await db.Set<AutomationRun>().AsNoTracking().Where(x => x.State == "queued" &&
-            (x.DeploymentId == null || !db.Set<Deployments.DeploymentLock>().Any(l => l.DeploymentId == x.DeploymentId && l.ExpiresAt > automation.Now)))
-            .OrderBy(x => x.CreatedAt).ThenBy(x => x.Id).ToListAsync(ct);
-        foreach (var run in candidates)
+            (x.DeploymentId == null || !db.Set<Deployments.DeploymentLock>().Any(l => l.DeploymentId == x.DeploymentId && l.ExpiresAt > automation.Now)) &&
+            (x.DeploymentId == null || !db.Set<DeploymentExecutionReservation>().Any(r => r.DeploymentId == x.DeploymentId) ||
+                db.Set<ActionDefinition>().Any(a => a.Id == x.ActionId && a.Concurrency == "reject" && a.ActiveRunId != null)))
+            .OrderBy(x => x.CreatedAt).ThenBy(x => x.Id).Select(x => x.Id).ToListAsync(ct);
+        foreach (var id in candidates)
         {
+            var run = await db.Set<AutomationRun>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id && x.State == "queued", ct);
+            if (run is null) continue;
             if (!await ClaimAsync(run, ct)) continue;
-            await ExecuteAsync(run, ct); return true;
+            return run;
         }
-        return false;
+        return null;
     }
 
     public async Task<bool> ClaimAsync(AutomationRun run, CancellationToken ct = default)
@@ -55,10 +66,17 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
         {
             await FinishAsync(run, "skipped", "image-check-concurrency", ct); await transaction.CommitAsync(ct); return false;
         }
+        if (await db.Set<DeploymentExecutionReservation>().AnyAsync(x => targets.Contains(x.DeploymentId), ct)) return false;
+        var targetWork = await db.Set<OperationEntity>().Where(x => x.DeploymentId != null && targets.Contains(x.DeploymentId.Value) &&
+            (x.State == "Running" || x.State == "CancellationRequested" || x.State == "Unknown")).Select(x => x.Kind).ToArrayAsync(ct);
+        if (targetWork.Any(kind => !Stanza.Core.Contracts.ExecutionScheduling.IsDiscovery(kind))) return false;
+        foreach (var target in targets.Distinct().Order()) db.Add(new DeploymentExecutionReservation { DeploymentId = target, RunId = run.Id });
+        await db.SaveChangesAsync(ct);
+        foreach (var entry in db.ChangeTracker.Entries<DeploymentExecutionReservation>().ToArray()) entry.State = EntityState.Detached;
         await transaction.CommitAsync(ct); run.State = "running"; run.LeaseOwner = workerId; return true;
     }
 
-    private async Task ExecuteAsync(AutomationRun run, CancellationToken ct)
+    public async Task ExecuteClaimedAsync(AutomationRun run, CancellationToken ct = default)
     {
         try
         {
@@ -268,6 +286,7 @@ public sealed class AutomationExecutor(StanzaDbContext db, AutomationService aut
             .ExecuteUpdateAsync(u => u.SetProperty(x => x.State, state).SetProperty(x => x.Code, code), ct);
         if (state != "uncertain")
         {
+            await db.Set<DeploymentExecutionReservation>().Where(x => x.RunId == run.Id).ExecuteDeleteAsync(ct);
             await db.Set<ActionDefinition>().Where(x => x.ActiveRunId == run.Id).ExecuteUpdateAsync(u => u.SetProperty(x => x.ActiveRunId, (Guid?)null), ct);
             await db.Set<ImageUpdatePolicy>().Where(x => x.ActiveRunId == run.Id).ExecuteUpdateAsync(u => u.SetProperty(x => x.ActiveRunId, (Guid?)null), ct);
         }

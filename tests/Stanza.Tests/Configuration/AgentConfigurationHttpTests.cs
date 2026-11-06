@@ -14,6 +14,23 @@ namespace Stanza.Tests.Configuration;
 public sealed class AgentConfigurationHttpTests
 {
     [Fact]
+    public async Task AgentConcurrencyAndDiscoveryAreConfigurableThroughTheUiWithoutAGlobalExecutionCap()
+    {
+        await using var factory = new StanzaFactory(); var owner = await factory.BootstrapAsync();
+        var agent = await AddAgentAsync(factory, "capacity-agent", "");
+        using var client = ConfigurationHttpTests.Client(factory); await ConfigurationHttp.LoginAsync(client, "owner");
+        var route = $"/agents/{agent}/policy"; var page = await client.GetStringAsync(route);
+        foreach (var field in new[] { "maximumParallelOperations", "maximumParallelDiscovery", "discoveryTimeoutSeconds" }) Assert.Contains("name=\"" + field + "\"", page);
+        Assert.DoesNotContain("name=\"Policy.MaximumParallelOperations\"", await client.GetStringAsync("/settings"));
+        var csrf = await ConfigurationHttp.TokenAsync(client, route);
+        var saved = await client.PostAsync(route, ConfigurationHttp.Form(("__RequestVerificationToken", csrf), ("version", "0"),
+            ("executionEnabled", "true"), ("dockerEndpoint", "unix:///var/run/docker.sock"), ("maximumParallelOperations", "3"), ("maximumParallelDiscovery", "2"), ("discoveryTimeoutSeconds", "17")));
+        Assert.Equal(HttpStatusCode.Redirect, saved.StatusCode);
+        using var scope = factory.Services.CreateScope(); var policy = await scope.ServiceProvider.GetRequiredService<AgentPolicyService>().ReadAsync(owner, agent);
+        Assert.Equal(3, policy.Policy.MaximumParallelOperations); Assert.Equal(2, policy.Policy.MaximumParallelDiscovery); Assert.Equal(17, policy.Policy.DiscoveryTimeoutSeconds);
+    }
+
+    [Fact]
     public async Task ScopedAgentReadAndManageWorkThroughUiWithoutImplicitEnvironmentRevealOrOtherAgentAccess()
     {
         await using var factory = new StanzaFactory(); var owner = await factory.BootstrapAsync();

@@ -20,9 +20,9 @@ public sealed class ActionInputService(StanzaDbContext db, SourceService sources
     Configuration.AgentPolicyService? policies = null)
 {
     public async Task<IReadOnlyList<string>> ValuesAsync(Guid owner, ActionPlan plan, ActionParameter parameter, bool refresh, CancellationToken ct)
-        => (await ChoicesAsync(owner, plan, parameter, refresh, ct)).Select(x => x.Name).ToArray();
+        => (await ChoicesAsync(owner, plan, parameter, refresh, ct, includeMetadata: false)).Select(x => x.Name).ToArray();
 
-    public async Task<IReadOnlyList<GitReference>> ChoicesAsync(Guid owner, ActionPlan plan, ActionParameter parameter, bool refresh, CancellationToken ct)
+    public async Task<IReadOnlyList<GitReference>> ChoicesAsync(Guid owner, ActionPlan plan, ActionParameter parameter, bool refresh, CancellationToken ct, bool includeMetadata = true)
     {
         if (parameter.Input == "dropdown") return (parameter.Options ?? []).Select(x => new GitReference(x)).ToArray();
         if (parameter.Input is not ("branch" or "version") || plan.DeploymentId is not { } deployment)
@@ -36,12 +36,17 @@ public sealed class ActionInputService(StanzaDbContext db, SourceService sources
         var source = parameter.Input == "branch" ? snapshot.Git.SingleOrDefault(x => x.Destination == parameter.Source)
             ?? throw new AutomationException("The bound Git source is unavailable.") : null;
         // Recheck source/credential access before every cache read. Credential rotation changes the key.
-        var fingerprint = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new { owner, deployment, agent, parameter, snapshot })));
+        var fingerprint = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new { owner, deployment, agent, parameter, snapshot, includeMetadata })));
         if (!refresh && cache.TryGetValue<GitReference[]>(fingerprint, out var cached)) return cached!;
         var request = new AgentWorkRequest(Guid.NewGuid(), deployment, source is null ? "registry-tags" : "git-action-branches", [], [],
             Sources: source is null ? [] : [source], Registries: source is null ? snapshot.Registries : [],
-            Policy: new(), ImageRepository: parameter.Repository, IncludeGitMetadata: source is not null);
+            Policy: new(), ImageRepository: parameter.Repository, IncludeGitMetadata: source is not null && includeMetadata);
         var response = await DispatchAsync(agent, request, ct);
+        var current = await sources.PrepareAsync(owner, deployment, ct);
+        if (JsonSerializer.Serialize(current) != JsonSerializer.Serialize(snapshot) ||
+            !await db.Set<DeploymentDraftEntity>().AnyAsync(x => x.Id == deployment && x.TargetAgentId == agent, ct) ||
+            !(await sources.ListAgentsAsync(owner, ct)).Any(x => x.Id == agent))
+            throw new AutomationException("The action source or Agent changed. Refresh its choices.");
         if (!response.Succeeded || response.Output is null) throw new AutomationException("Remote listing failed or was denied. Check repository access and tag-listing permissions.");
         string[] values;
         try { values = JsonSerializer.Deserialize<string[]>(response.Output) ?? throw new JsonException(); }
@@ -99,6 +104,8 @@ public sealed class ActionInputService(StanzaDbContext db, SourceService sources
         {
             if (policies is not null) request = request with { Policy = await policies.RuntimeAsync(agent, ct) };
             var response = await dispatcher.DispatchAsync(agent, request, ct);
+            if (response.Code is "agent_busy" or "discovery_timeout" or "discovery_cancelled")
+                throw new AutomationDiscoveryException("Agent discovery is temporarily busy or timed out. Your selections are unchanged; retry when capacity is available.");
             if (response.Id != request.Id) throw new AutomationException("The Agent returned an invalid discovery response.");
             return response;
         }

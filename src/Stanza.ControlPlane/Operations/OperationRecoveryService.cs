@@ -160,6 +160,7 @@ public sealed class OperationRecoveryService(StanzaDbContext db, OperationServic
                 throw new OperationException("Run state changed. Inspect again.");
             await db.Set<ActionDefinition>().Where(x => x.ActiveRunId == run.Id).ExecuteUpdateAsync(u => u.SetProperty(x => x.ActiveRunId, (Guid?)null), ct);
             await db.Set<ImageUpdatePolicy>().Where(x => x.ActiveRunId == run.Id).ExecuteUpdateAsync(u => u.SetProperty(x => x.ActiveRunId, (Guid?)null), ct);
+            await db.Set<DeploymentExecutionReservation>().Where(x => x.RunId == run.Id).ExecuteDeleteAsync(ct);
         }
         await db.SaveChangesAsync(ct);
         await automation.RecordAuditAsync(actor, "execution.inspected-reconciled", (run?.Id ?? rows[0].Id).ToString(), "no-command-replay", ct);

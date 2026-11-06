@@ -52,10 +52,13 @@ internal sealed class OperationTestHarness : IAsyncDisposable
         registrations.AddScoped<OperationalPolicyService>(); registrations.AddScoped<AgentPolicyService>();
         registrations.AddScoped<AgentAdministrationService>(); registrations.AddScoped<AuditService>();
         registrations.AddScoped<AutomationAuthorization>(); registrations.AddScoped<AutomationService>(); registrations.AddScoped<AutomationOperationGuard>();
+        registrations.AddScoped<AutomationScheduler>();
         registrations.AddScoped<SourceService>();
         registrations.AddMemoryCache(); registrations.AddScoped<ActionInputService>(); registrations.AddScoped<DeploymentActionOverview>();
         registrations.AddScoped<ISourceSnapshotProvider>(services => services.GetRequiredService<SourceService>());
         registrations.AddScoped<OperationService>();
+        registrations.AddScoped<IOperationService>(s => s.GetRequiredService<OperationService>());
+        registrations.AddScoped<AutomationExecutor>(); registrations.AddScoped<IImageDigestProbe, UnavailableImageDigestProbe>();
         registrations.AddScoped<OperationRecoveryService>();
         registrations.AddScoped<OperationsOverviewService>(); registrations.AddScoped<DeploymentLockService>();
         registrations.AddScoped<OperationOutputStore>();

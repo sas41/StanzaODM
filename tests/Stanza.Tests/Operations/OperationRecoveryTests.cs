@@ -39,6 +39,7 @@ public sealed class OperationRecoveryTests
             var db = s.GetRequiredService<StanzaDbContext>(); var saved = await db.Set<AutomationRun>().AsNoTracking().SingleAsync(x => x.Id == run);
             Assert.Equal("reconciled", saved.State); Assert.Equal(h.Root, saved.ReconciledBy);
             Assert.Null((await db.Set<ActionDefinition>().AsNoTracking().SingleAsync(x => x.Id == action)).ActiveRunId);
+            Assert.False(await db.Set<DeploymentExecutionReservation>().AnyAsync(x => x.RunId == run));
             Assert.Null((await db.Set<ImageUpdatePolicy>().AsNoTracking().SingleAsync()).ActiveRunId);
             Assert.Equal("absent", (await db.Set<DeploymentRuntimeEntity>().SingleAsync()).ObservedState);
             Assert.NotEqual("uncertain", (await db.Set<AutomationStepRun>().SingleAsync()).State);
@@ -185,7 +186,8 @@ public sealed class OperationRecoveryTests
         {
             var db = s.GetRequiredService<StanzaDbContext>();
             Assert.Equal("uncertain", (await db.Set<AutomationRun>().SingleAsync(x => x.Id == run)).State);
-            Assert.Equal(run, (await db.Set<ActionDefinition>().SingleAsync(x => x.Id == action)).ActiveRunId); return true;
+            Assert.Equal(run, (await db.Set<ActionDefinition>().SingleAsync(x => x.Id == action)).ActiveRunId);
+            Assert.Equal(run, (await db.Set<DeploymentExecutionReservation>().SingleAsync(x => x.DeploymentId == h.Deployment)).RunId); return true;
         });
     }
 }

@@ -55,6 +55,7 @@ public sealed class AutomationSchedule
     public string Overlap { get; set; } = "skip";
     public string MissedRun { get; set; } = "skip";
     public long NextRunAt { get; set; }
+    public long? PendingOccurrenceAt { get; set; }
     public long Revision { get; set; }
 }
 

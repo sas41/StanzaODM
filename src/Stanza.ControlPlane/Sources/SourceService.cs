@@ -232,8 +232,7 @@ public sealed class SourceService(StanzaDbContext db, AccessService access, IDat
     {
         var query = (search ?? "").Trim();
         if (query.Length > 256 || page < 0 || page > 199) throw new SourceException("Invalid reference search or page.");
-        // Hold the security lock through dispatch so revocation cannot race a new secret-bearing command.
-        var result = await Serialized(async () =>
+        async Task<(Guid Agent, string Reference, AgentGitSource Source)> Prepare()
         {
             await Require(actorId, "deployment.read", "deployment", deploymentId, ct);
             var draft = await Draft(deploymentId, ct);
@@ -242,10 +241,16 @@ public sealed class SourceService(StanzaDbContext db, AccessService access, IDat
             var row = (await GitRows(deploymentId, ct)).SingleOrDefault(x => x.Id == sourceId) ?? throw new SourceException("That source is unavailable.");
             SourceValidation.Url(row.Url); SourceValidation.Reference(row.Reference);
             var secret = row.CredentialId.HasValue ? Secret(await GitCredential(actorId, row.CredentialId.Value, row.Url, ct)) : null;
-            var response = await Dispatch(draft.TargetAgentId.Value, new(Guid.NewGuid(), deploymentId, "git-branches", [], [],
-                Sources: [new(row.Url, row.Reference, row.Destination, secret?.Username, secret?.Password)], IncludeGitMetadata: true), ct);
-            return (row.Reference, Details: GitReferenceListing.Read(response));
-        }, ct);
+            return (draft.TargetAgentId.Value, row.Reference, new(row.Url, row.Reference, row.Destination, secret?.Username, secret?.Password));
+        }
+        var prepared = await Serialized(Prepare, ct);
+        var response = await Dispatch(prepared.Agent, new(Guid.NewGuid(), deploymentId, "git-branches", [], [],
+            Sources: [prepared.Source], IncludeGitMetadata: true), ct);
+        // Network work never holds the global database write lock. Reauthorize and discard
+        // results if source definitions, credentials, placement or access changed meanwhile.
+        var current = await Serialized(Prepare, ct);
+        if (prepared != current) throw new SourceException("The Git source changed. Refresh its branches.");
+        var result = (prepared.Reference, Details: GitReferenceListing.Read(response));
         var filtered = result.Details.Where(x => x.Name.Contains(query, StringComparison.OrdinalIgnoreCase)).Select(x => x.Name).ToArray();
         return new(filtered.Skip(page * 50).Take(50).ToArray(), result.Reference,
             !IsSelectedPresent(result.Details.Select(x => x.Name).ToArray(), result.Reference), page, filtered.Length > (page + 1) * 50, query)
@@ -253,7 +258,11 @@ public sealed class SourceService(StanzaDbContext db, AccessService access, IDat
     }
 
     public Task TestCredentialAsync(Guid actorId, Guid id, Guid targetAgentId, CancellationToken ct = default) =>
-        Serialized(async () =>
+        TestCredentialCoreAsync(actorId, id, targetAgentId, ct);
+
+    private async Task TestCredentialCoreAsync(Guid actorId, Guid id, Guid targetAgentId, CancellationToken ct)
+    {
+        async Task<AgentWorkRequest> Prepare() => await Serialized(async () =>
         {
             await Require(actorId, "credential.use", "credential", id, ct);
             await Agent(actorId, targetAgentId, ct);
@@ -262,9 +271,14 @@ public sealed class SourceService(StanzaDbContext db, AccessService access, IDat
             var request = row.Kind == "registry"
                 ? new AgentWorkRequest(Guid.NewGuid(), Guid.Empty, "registry-check", [], [], Registries: [new(row.Endpoint, secret.Username, secret.Password)])
                 : new AgentWorkRequest(Guid.NewGuid(), Guid.Empty, "git-branches", [], [], Sources: [new(row.Endpoint, "HEAD", "checkout", secret.Username, secret.Password)]);
-            await Dispatch(targetAgentId, request, ct);
-            return true;
+            return request;
         }, ct);
+        var request = await Prepare();
+        await Dispatch(targetAgentId, request, ct);
+        var current = await Prepare();
+        if (JsonSerializer.Serialize(request with { Id = Guid.Empty }) != JsonSerializer.Serialize(current with { Id = Guid.Empty }))
+            throw new SourceException("The credential changed. Test it again.");
+    }
 
     private async Task<AgentWorkResponse> Dispatch(Guid agentId, AgentWorkRequest request, CancellationToken ct)
     {
@@ -272,6 +286,8 @@ public sealed class SourceService(StanzaDbContext db, AccessService access, IDat
         {
             if (policies is not null) request = request with { Policy = await policies.RuntimeAsync(agentId, ct) };
             var response = await dispatcher.DispatchAsync(agentId, request, ct);
+            if (response.Code is "agent_busy" or "discovery_timeout" or "discovery_cancelled")
+                throw new SourceException("Agent discovery is temporarily busy or timed out. Existing workloads are unaffected; refresh and retry.");
             if (!response.Succeeded) throw new SourceException("The Agent could not complete the connection check. Check its connectivity, endpoint, and credentials.");
             return response;
         }

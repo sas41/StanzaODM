@@ -8,6 +8,28 @@ namespace Stanza.Tests.Configuration;
 
 public sealed class AgentPolicyTests
 {
+    [Theory]
+    [InlineData(0, 4, 60)][InlineData(65, 4, 60)][InlineData(1, 0, 60)][InlineData(1, 65, 60)][InlineData(1, 4, 0)]
+    public async Task InvalidExecutionCapacityIsRejectedWithoutSaving(int workloads, int discovery, int timeout)
+    {
+        await using var fixture = await ConfigurationTestStore.CreateAsync(); var id = await fixture.AgentAsync(); await using var db = fixture.Context();
+        await Assert.ThrowsAsync<SettingsOperationException>(() => fixture.AgentPolicies(db).SaveAsync(fixture.Owner,
+            new(id, new(MaximumParallelOperations: workloads, MaximumParallelDiscovery: discovery, DiscoveryTimeoutSeconds: timeout), 0)));
+        Assert.False(await db.Set<AgentPolicyEntity>().AnyAsync());
+    }
+
+    [Fact]
+    public async Task AgentConcurrencyAndDiscoverySettingsPersistIndependentlyOfGlobalTimeout()
+    {
+        await using var fixture = await ConfigurationTestStore.CreateAsync(); var id = await fixture.AgentAsync(); await using var db = fixture.Context();
+        var defaults = await fixture.AgentPolicies(db).RuntimeAsync(id);
+        Assert.Equal(1, defaults.MaximumParallelOperations); Assert.Equal(4, defaults.MaximumParallelDiscovery); Assert.Equal(60, defaults.DiscoveryTimeoutSeconds);
+        await fixture.AgentPolicies(db).SaveAsync(fixture.Owner, new(id, defaults with { MaximumParallelOperations = 3, MaximumParallelDiscovery = 2, DiscoveryTimeoutSeconds = 17 }, 0));
+        await using var restarted = fixture.Context();
+        var saved = await fixture.AgentPolicies(restarted).RuntimeAsync(id);
+        Assert.Equal(3, saved.MaximumParallelOperations); Assert.Equal(2, saved.MaximumParallelDiscovery); Assert.Equal(17, saved.DiscoveryTimeoutSeconds);
+    }
+
     [Fact]
     public async Task AgentWithoutOverrideInheritsCurrentOperationalLimitsAndExplicitOverridePersists()
     {

@@ -1,5 +1,6 @@
 using System.Net.WebSockets;
 using System.Text.Json;
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using Stanza.Agent.Enrollment;
 using Stanza.Agent.Runtime;
@@ -38,8 +39,8 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
         var uri = new UriBuilder(origin) { Scheme = origin.Scheme == "https" ? "wss" : "ws", Path = "/api/agent-channel" }.Uri;
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
         using var send = new SemaphoreSlim(1, 1);
-        Task? work = null;
-        var attachedOperations = new HashSet<Guid>();
+        var pumps = new Dictionary<Guid, Task>();
+        var attachedOperations = new ConcurrentDictionary<Guid, byte>();
         var logManager = logs ?? new AgentLogManager();
         // Per-connection state: an interrupted replication always starts again with a full snapshot.
         var configuration = new AgentConfigurationCache(options, storageHealth);
@@ -80,6 +81,7 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
                 {
                     await SendAsync(new("work.response", id, Response: snapshot.Response is { } result
                         ? result with { LastOutputSequence = snapshot.LastSequence } : new(id, false, "uncertain")));
+                    if (await jobStore.ForgetDiscoveryAsync(id)) attachedOperations.TryRemove(id, out _);
                     return;
                 }
                 await Task.Delay(TimeSpan.FromMilliseconds(50), lifetime.Token);
@@ -114,6 +116,7 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
             {
                 var message = await ReceiveAsync(socket, lifetime.Token);
                 if (message is null) break;
+                foreach (var id in pumps.Where(x => x.Value.IsCompleted).Select(x => x.Key).ToArray()) pumps.Remove(id);
                 if (message.Type == "ping")
                 {
                     await SendAsync(new("pong", message.Id));
@@ -137,27 +140,21 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
                     fingerprint.All(c => char.IsAsciiHexDigit(c)))
                 {
                     await configuration.CompleteAsync(lifetime.Token);
+                    await jobStore.ConfigureAsync(configuration.Policy);
                     await SendAsync(new("configuration.applied", Guid.Empty, Data: fingerprint));
                     state.Set(state.Snapshot with { Ready = true, CanExecuteWork = configuration.ExecutionEnabled });
                 }
                 else if (message.Type == "work.request" && message.Request is { } request && request.Id == message.Id)
                 {
-                    attachedOperations.Add(request.Id);
-                    // No unbounded buffering and no concurrent mutating commands on this Agent.
-                    if (work is { IsCompleted: false })
-                        await SendAsync(new("work.response", request.Id, Response: new(request.Id, false, "agent_busy")));
-                    else
-                    {
-                        var rejected = await jobStore.StartAsync(request);
-                        if (rejected is not null) await SendAsync(new("work.response", request.Id, Response: rejected));
-                        else work = PumpAsync(request.Id, 0);
-                    }
+                    attachedOperations.TryAdd(request.Id, 0);
+                    var rejected = await jobStore.StartAsync(request);
+                    if (rejected is not null) await SendAsync(new("work.response", request.Id, Response: rejected));
+                    else if (!pumps.ContainsKey(request.Id)) pumps[request.Id] = PumpAsync(request.Id, 0);
                 }
                 else if (message.Type == "work.attach" && long.TryParse(message.Data, out var after) && after >= 0)
                 {
-                    attachedOperations.Add(message.Id);
-                    if (work is { IsCompleted: false }) await SendAsync(new("work.response", message.Id, Response: new(message.Id, false, "agent_busy")));
-                    else work = PumpAsync(message.Id, after);
+                    attachedOperations.TryAdd(message.Id, 0);
+                    if (!pumps.ContainsKey(message.Id)) pumps[message.Id] = PumpAsync(message.Id, after);
                 }
                 else if (message.Type == "work.inspect")
                 {
@@ -187,9 +184,10 @@ public sealed class AgentCommandChannel(IOptions<AgentOptions> options, AgentSta
             lifetime.Cancel();
             socket.Abort();
             await logManager.CloseAllAsync();
-            if (work is not null) await work;
+            await jobStore.CancelDiscoveryAsync(attachedOperations.Keys);
+            await Task.WhenAll(pumps.Values);
             if (token.IsCancellationRequested) await jobStore.CancelAllAsync("shutdown");
-            await jobStore.RecordDisconnectAsync(token.IsCancellationRequested ? "shutdown" : disconnectReason, (int?)socket.CloseStatus, attachedOperations);
+            await jobStore.RecordDisconnectAsync(token.IsCancellationRequested ? "shutdown" : disconnectReason, (int?)socket.CloseStatus, attachedOperations.Keys.ToArray());
         }
     }
 

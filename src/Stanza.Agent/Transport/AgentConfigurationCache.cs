@@ -11,6 +11,7 @@ public sealed class AgentConfigurationCache(IOptions<AgentOptions> options, Agen
 {
     private AgentConfiguration? pending;
     public bool ExecutionEnabled { get; private set; }
+    public AgentRuntimePolicy Policy { get; private set; } = new();
     public string Root => Path.Combine(options.Value.PersistentDataRoot, "configuration-cache");
 
     public void Begin(AgentConfiguration configuration)
@@ -18,7 +19,7 @@ public sealed class AgentConfigurationCache(IOptions<AgentOptions> options, Agen
         if (pending is not null || configuration.AgentId == Guid.Empty || configuration.DeploymentIds is null ||
             configuration.DeploymentIds.Count > 10000 || configuration.DeploymentIds.Contains(Guid.Empty) ||
             configuration.DeploymentIds.Distinct().Count() != configuration.DeploymentIds.Count || configuration.Policy is null || configuration.MinimumFreeSpaceMiB < 0 ||
-            !DockerRuntimeOptions.IsValid(new() { Endpoint = configuration.Policy.DockerEndpoint,
+            !ExecutionScheduling.IsValid(configuration.Policy) || !DockerRuntimeOptions.IsValid(new() { Endpoint = configuration.Policy.DockerEndpoint,
                 OperationTimeoutSeconds = configuration.Policy.TimeoutSeconds }))
             throw new IOException("Invalid Agent configuration.");
         ValidateEnvironment(configuration.GlobalEnvironment);
@@ -104,6 +105,7 @@ public sealed class AgentConfigurationCache(IOptions<AgentOptions> options, Agen
         await ReplaceFileAsync("agent.env", Encoding.UTF8.GetBytes(configuration.AgentEnvironment), ct);
         await ReplaceFileAsync("agent.json", JsonSerializer.SerializeToUtf8Bytes(configuration, JsonSerializerOptions.Web), ct);
         ExecutionEnabled = configuration.Policy.ExecutionEnabled;
+        Policy = configuration.Policy;
         health?.Configure(configuration.MinimumFreeSpaceMiB);
         pending = null;
     }

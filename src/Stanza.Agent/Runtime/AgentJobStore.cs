@@ -8,14 +8,16 @@ namespace Stanza.Agent.Runtime;
 /// <summary>Agent-owned execution and durable replay. No socket or transport token owns a job.</summary>
 public sealed class AgentJobStore : IAsyncDisposable
 {
-    private sealed record Journal(int Version, string Hash, AgentJobInspection Job);
+    private sealed record Journal(int Version, string Hash, AgentJobInspection Job, ExecutionSlot? Slot = null);
     private sealed record ExecutorLedger(string Hash, AgentWorkResponse? Response);
     private readonly IAgentWorkExecutor executor;
     private readonly TimeProvider clock;
     private readonly string root;
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly CancellationTokenSource shutdown = new();
-    private readonly Dictionary<Guid, (CancellationTokenSource Cancel, Task Work)> running = [];
+    private readonly Dictionary<Guid, (CancellationTokenSource Cancel, Task Work, AgentWorkRequest Request)> running = [];
+    private AgentRuntimePolicy policy = new();
+    private readonly Dictionary<Guid, ExecutionSlot> unresolved = [];
     private readonly Dictionary<Guid, Journal> journals = [];
     private readonly Dictionary<Guid, AgentOutputSpool> spools = [];
     private readonly HashSet<Guid> outputFailures = [];
@@ -34,15 +36,18 @@ public sealed class AgentJobStore : IAsyncDisposable
         root = PrivateStorage.EnsureDirectory(Path.Combine(options.Value.PersistentDataRoot, "jobs-v1"));
         if (executor is IReportingAgentWorkExecutor reporting)
         { reporting.Progress += ProgressAsync; reporting.Output += OutputAsync; }
-        if (health is not null)
-            foreach (var path in Directory.EnumerateFiles(root, "*.json"))
-                if (Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out var id))
+        foreach (var path in Directory.EnumerateFiles(root, "*.json"))
+            if (Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out var id))
+            {
+                try
                 {
-                    try { if (Read(id)?.Job.Stopped != true) health.Unresolved(id); }
-                    catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
-                    { Failed(id, "journal-read", error); }
-                    finally { journals.Remove(id); }
+                    if (Read(id) is { } journal && !journal.Job.Stopped)
+                    { unresolved[id] = journal.Slot ?? new(Guid.Empty, "host-exec"); health?.Unresolved(id); }
                 }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+                { unresolved[id] = new(Guid.Empty, "host-exec"); Failed(id, "journal-read", error); }
+                finally { journals.Remove(id); }
+            }
     }
 
     private string PathFor(Guid id) => Path.Combine(root, id.ToString("N") + ".json");
@@ -58,6 +63,7 @@ public sealed class AgentJobStore : IAsyncDisposable
     }
     private void Write(Journal journal)
     {
+        if (journal.Version == 3) { journals[journal.Job.Id] = journal; return; }
         try
         {
             storage.Write(PathFor(journal.Job.Id), journal);
@@ -80,6 +86,13 @@ public sealed class AgentJobStore : IAsyncDisposable
         return spool;
     }
 
+    public async Task ConfigureAsync(AgentRuntimePolicy value)
+    {
+        if (!ExecutionScheduling.IsValid(value)) throw new IOException("Invalid Agent execution capacity.");
+        await gate.WaitAsync();
+        try { policy = value; } finally { gate.Release(); }
+    }
+
     public async Task<AgentWorkResponse?> StartAsync(AgentWorkRequest request)
     {
         await gate.WaitAsync();
@@ -93,18 +106,26 @@ public sealed class AgentJobStore : IAsyncDisposable
                 // Busy is a pre-admission rejection from the executor's exclusive process lease,
                 // not accepted execution. Every other accepted ID remains replay-only forever.
                 if (previous.Job.Response?.Code != "agent_busy") return null;
+                unresolved.Remove(request.Id);
             }
             // The original executor ledger remains authoritative for requests accepted before this upgrade.
             // ExecuteAsync consults it and never repeats an accepted command.
-            if (running.Count > 0) return new(request.Id, false, "agent_busy");
+            if (!ExecutionScheduling.CanAdmit(policy, new(request.DeploymentId, request.Operation),
+                running.Values.Select(x => new ExecutionSlot(x.Request.DeploymentId, x.Request.Operation)).Concat(unresolved.Values)))
+                return new(request.Id, false, "agent_busy");
             if (health?.Read() is { AvailableBytes: { } available, MinimumFreeBytes: var minimum } && available < minimum)
                 return new(request.Id, false, "agent_storage_low");
-            if (Directory.EnumerateFiles(root, "*.json").Take(100001).Count() >= 100000)
+            var transient = ExecutionScheduling.IsTransientDiscovery(request.Operation);
+            if (!transient && Directory.EnumerateFiles(root, "*.json").Take(100001).Count() >= 100000)
                 return new(request.Id, false, "ledger_capacity");
+            // Read-only network queries have no durable execution receipt or archive. Bound
+            // their in-memory replay window independently of the workload evidence ledger.
+            var completedQueries = journals.Where(x => x.Value.Version == 3 && !running.ContainsKey(x.Key) && x.Value.Job.Stopped).Select(x => x.Key).ToArray();
+            foreach (var old in completedQueries.Take(Math.Max(0, completedQueries.Length - 64))) journals.Remove(old);
             var job = new AgentJobInspection(request.Id, true, true, false, "Accepted", false, 0, 0, Now);
-            Write(new(2, hash, job));
+            Write(new(transient ? 3 : 2, hash, job, new(request.DeploymentId, request.Operation)));
             var cancel = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
-            running.Add(request.Id, (cancel, Task.Run(() => ExecuteAsync(request, cancel.Token))));
+            running.Add(request.Id, (cancel, Task.Run(() => ExecuteAsync(request, cancel.Token)), request));
             return null;
         }
         finally { gate.Release(); }
@@ -132,7 +153,7 @@ public sealed class AgentJobStore : IAsyncDisposable
                 var journal = Read(request.Id)!;
                 if (journal.Version == 2) Spool(request.Id).FlushDurable();
                 // Retain this actual executor outcome in the task until persistence succeeds.
-                var stopped = response.ExecutionStopped || response.Succeeded || response.Code == "interrupted_before_apply";
+                var stopped = response.ExecutionStopped || response.Succeeded || response.Code is "interrupted_before_apply" or "agent_busy";
                 var reason = journal.Job.CancellationReason ?? response.CancellationReason;
                 var terminal = response with { CancellationReason = reason, ApplyStarted = journal.Job.ApplyStarted || response.ApplyStarted,
                     OutputIncomplete = response.OutputIncomplete || outputFailures.Contains(request.Id) || journal.Version == 2 && Spool(request.Id).Incomplete,
@@ -140,6 +161,7 @@ public sealed class AgentJobStore : IAsyncDisposable
                 Write(journal with { Job = journal.Job with { Active = false, Stopped = stopped,
                     Response = terminal, ApplyStarted = terminal.ApplyStarted, CancellationReason = reason, LastHeartbeat = Now } });
                 if (running.Remove(request.Id, out var active)) active.Cancel.Dispose();
+                if (!stopped) unresolved[request.Id] = new(request.DeploymentId, request.Operation); else unresolved.Remove(request.Id);
                 health?.Durable(request.Id);
                 if (stopped) health?.Resolved(request.Id); else health?.Unresolved(request.Id);
                 return;
@@ -181,6 +203,7 @@ public sealed class AgentJobStore : IAsyncDisposable
         try
         {
             var journal = Read(id)!;
+            if (journal.Version == 3) return;
             if (journal.Version == 2) Spool(id).FlushDurable();
             Write(journal with { Job = journal.Job with { Phase = phase,
                 ApplyStarted = journal.Job.ApplyStarted || phase == "Applying", LastHeartbeat = Now } });
@@ -194,6 +217,7 @@ public sealed class AgentJobStore : IAsyncDisposable
         {
             if (outputFailures.Contains(id)) return;
             var journal = Read(id)!;
+            if (journal.Version == 3) return;
             try
             {
                 Spool(id).Append(chunk);
@@ -208,13 +232,34 @@ public sealed class AgentJobStore : IAsyncDisposable
         }
         finally { gate.Release(); }
     }
+    public async Task<bool> ForgetDiscoveryAsync(Guid id)
+    {
+        await gate.WaitAsync();
+        try
+        {
+            if (!running.ContainsKey(id) && journals.TryGetValue(id, out var journal) && journal.Version == 3 && journal.Job.Stopped)
+            { journals.Remove(id); outputFailures.Remove(id); return true; }
+            return false;
+        }
+        finally { gate.Release(); }
+    }
+
+    public async Task CancelDiscoveryAsync(IEnumerable<Guid> ids)
+    {
+        Guid[] queries;
+        await gate.WaitAsync();
+        try { queries = ids.Where(id => running.TryGetValue(id, out var job) && ExecutionScheduling.IsTransientDiscovery(job.Request.Operation)).ToArray(); }
+        finally { gate.Release(); }
+        foreach (var id in queries) await CancelAsync(id, "user");
+    }
+
     public async Task<AgentJobInspection> InspectAsync(Guid id)
     {
         await gate.WaitAsync();
         try
         {
             var journal = Read(id);
-            if (!running.ContainsKey(id) && journal?.Job.Stopped != true)
+            if (!running.ContainsKey(id) && journal?.Version != 3 && journal?.Job.Stopped != true)
             {
                 // Upgrade old terminal receipts, and recover the crash window between the
                 // executor's fsynced receipt and this store's final journal update. An unfinished
@@ -237,7 +282,7 @@ public sealed class AgentJobStore : IAsyncDisposable
             if (journal is null) return new(id, false, false, false, "Unavailable", false, 0, 0, null);
             if (!running.ContainsKey(id))
             {
-                if (journal.Job.Stopped) health?.Resolved(id); else health?.Unresolved(id);
+                if (journal.Job.Stopped) { unresolved.Remove(id); health?.Resolved(id); } else health?.Unresolved(id);
             }
             // After a process/container restart, an unfinished journal is evidence of uncertainty,
             // not evidence that an orphaned CLI or daemon-side operation stopped.

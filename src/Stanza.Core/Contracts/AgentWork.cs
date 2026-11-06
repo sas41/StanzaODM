@@ -26,7 +26,8 @@ public sealed record AgentExecution(string Executable, IReadOnlyList<string> Arg
     public override string ToString() => "AgentExecution { [REDACTED] }";
 }
 public sealed record AgentRuntimePolicy(bool ExecutionEnabled = true, int TimeoutSeconds = 3600,
-    string DockerEndpoint = "unix:///var/run/docker.sock");
+    string DockerEndpoint = "unix:///var/run/docker.sock", int MaximumParallelOperations = 1,
+    int MaximumParallelDiscovery = 4, int DiscoveryTimeoutSeconds = 60);
 public sealed record AgentOutputChunk(long Sequence, string Stream, string Text)
 {
     public override string ToString() => $"AgentOutputChunk {{ Sequence = {Sequence}, Stream = {Stream}, Text = [REDACTED] }}";
@@ -79,6 +80,6 @@ public sealed record AgentWireMessage(string Type, Guid Id, AgentWorkRequest? Re
     AgentJobInspection? Job = null,
     AgentOutputRead? OutputRead = null, IReadOnlyList<AgentOutputChunk>? OutputBatch = null)
 {
-    public const int Version = 8;
+    public const int Version = 9;
     public override string ToString() => $"AgentWireMessage {{ Type = {Type}, Id = {Id}, Contents = [REDACTED] }}";
 }

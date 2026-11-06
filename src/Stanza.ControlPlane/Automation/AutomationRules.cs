@@ -5,7 +5,8 @@ using Stanza.Core.Automation;
 
 namespace Stanza.ControlPlane.Automation;
 
-public sealed class AutomationException(string message) : Exception(message);
+public class AutomationException(string message) : Exception(message);
+public sealed class AutomationDiscoveryException(string message) : AutomationException(message);
 public sealed class AutomationAccessException() : Exception("Current access does not permit this automation or one of its targets.");
 
 public sealed record ActionParameter(string Name, string Type = "string", bool Required = true, string? Default = null,

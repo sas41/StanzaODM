@@ -75,12 +75,41 @@ public sealed class WebhookReceiver(StanzaDbContext db, AutomationService automa
         var limits = await automation.LimitsAsync(ct);
         if (Stanza.Core.Contracts.LimitPolicy.Exceeded(body.Length, limits.MaximumWebhookBytes)) return new(413, "payload-too-large");
         if (!WebhookSecurity.Token(deliveryId) || !WebhookSecurity.Token(eventName) || eventName.Length > 100) return new(400, "invalid-delivery-headers");
+        var initial = await db.Set<WebhookDefinition>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct);
+        if (initial is null || !initial.Enabled || initial.ProtectedSecret.Length == 0) return new(404, "unavailable");
+        if (!WebhookSecurity.Verify(automation.Unprotect<string>(initial.ProtectedSecret), body, signature)) return new(401, "invalid-signature");
+        var duplicate = await db.Set<WebhookDelivery>().AsNoTracking().SingleOrDefaultAsync(x => x.WebhookId == id && x.DeliveryId == deliveryId, ct);
+        if (duplicate is not null) return new(200, "duplicate", duplicate.RunId);
+        PreparedActionInputs? prepared = null;
+        Exception? inputFailure = null;
+        // Resolve remote inputs before taking any database write lock, then verify both
+        // webhook and action revisions again inside the atomic delivery/queue transaction.
+        if (initial.ActionId is { } action)
+        {
+            try
+            {
+                using var payload = JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 24 });
+                if (payload.RootElement.ValueKind != JsonValueKind.Object) throw new AutomationException("Payload must be a JSON object.");
+                var branch = payload.RootElement.TryGetProperty("ref", out var reference) && reference.ValueKind == JsonValueKind.String ? reference.GetString() : null;
+                if (WebhookSecurity.Filters(initial.Events).Contains(eventName, StringComparer.Ordinal) &&
+                    (WebhookSecurity.Filters(initial.Refs).Count == 0 || WebhookSecurity.Filters(initial.Refs).Contains(branch, StringComparer.Ordinal)))
+                {
+                    await authorization.RequireAsync(initial.OwnerId, "automation.manage", "deployment", initial.DeploymentId, ct);
+                    prepared = await automation.PrepareActionInputsAsync(initial.OwnerId, action, WebhookSecurity.Map(initial.ParameterMapping, payload.RootElement), ct);
+                }
+            }
+            catch (AutomationDiscoveryException) { return new(503, "discovery-busy-retry"); }
+            catch (Exception error) when (error is JsonException or AutomationException or AutomationAccessException) { inputFailure = error; }
+            catch (Sources.SourceAccessException) { inputFailure = new AutomationAccessException(); }
+            catch (Sources.SourceException) { inputFailure = new AutomationException("Action inputs are unavailable."); }
+        }
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         // Match the queue/configuration lock order so deletion cannot race a delivery or
         // deadlock with a delivery that already holds the webhook's revision row lock.
         await Security.SecurityWriteGuard.LockAsync(db, ct);
         var hook = await db.Set<WebhookDefinition>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct);
         if (hook is null || !hook.Enabled || hook.ProtectedSecret.Length == 0) return new(404, "unavailable");
+        if (hook.Revision != initial.Revision) return new(409, "retry-delivery");
         if (!WebhookSecurity.Verify(automation.Unprotect<string>(hook.ProtectedSecret), body, signature)) return new(401, "invalid-signature");
         var prior = await db.Set<WebhookDelivery>().AsNoTracking().SingleOrDefaultAsync(x => x.WebhookId == id && x.DeliveryId == deliveryId, ct);
         if (prior is not null) return new(200, "duplicate", prior.RunId);
@@ -107,9 +136,10 @@ public sealed class WebhookReceiver(StanzaDbContext db, AutomationService automa
                 await authorization.RequireAsync(hook.OwnerId, "automation.manage", "deployment", hook.DeploymentId, ct);
                 await automation.ValidateTriggerAsync(hook.OwnerId, hook.ActionId, hook.DeploymentId, hook.Operation, ct);
                 var parameters = WebhookSecurity.Map(hook.ParameterMapping, payload);
+                if (inputFailure is not null) throw inputFailure;
                 var deliveryKey = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(deliveryId)));
                 var run = await automation.QueueAsync(hook.OwnerId, hook.DeploymentId, hook.ActionId, id, "webhook", $"webhook:{id:N}:{deliveryKey}",
-                    hook.Operation, parameters, ct: ct);
+                    hook.Operation, parameters, ct: ct, preparedInputs: prepared);
                 delivery.RunId = run.Id;
             }
         }

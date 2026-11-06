@@ -23,6 +23,32 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     IAgentHostPathResolver? hostPaths = null, IAgentJournalStorage? journals = null,
     ILogger<AgentWorkExecutor>? logger = null) : IAgentWorkExecutor, IReportingAgentWorkExecutor
 {
+    public event Func<Guid, string, Task>? Progress;
+    public event Func<Guid, AgentOutputChunk, Task>? Output;
+    public async Task<AgentWorkResponse> ExecuteAsync(AgentWorkRequest request, CancellationToken token = default)
+    {
+        // Every operation owns its output sequence, apply evidence, credentials and cancellation.
+        var operation = new AgentOperationExecutor(runner, options, dockerOptions, hostOptions, hostPaths, journals, logger);
+        operation.Progress += async (id, phase) =>
+        {
+            if (Progress is { } handlers) foreach (Func<Guid, string, Task> handler in handlers.GetInvocationList()) await handler(id, phase);
+        };
+        if (Output is not null) operation.Output += async (id, chunk) =>
+        {
+            if (Output is { } handlers) foreach (Func<Guid, AgentOutputChunk, Task> handler in handlers.GetInvocationList()) await handler(id, chunk);
+        };
+        return await operation.ExecuteAsync(request, token);
+    }
+    public static string SnapshotPath(string root, string relative) => AgentOperationExecutor.SnapshotPath(root, relative);
+    public static IReadOnlyList<GitReference> ParseGitReferences(string listing) => AgentOperationExecutor.ParseGitReferences(listing);
+    public static IReadOnlyList<string> BuildHostArguments(AgentExecution command) => AgentOperationExecutor.BuildHostArguments(command);
+    internal static void FlushDirectory(string directory) => AgentOperationExecutor.FlushDirectory(directory);
+}
+
+internal sealed class AgentOperationExecutor(IProcessRunner runner, IOptions<AgentOptions> options,
+    IOptions<DockerRuntimeOptions> dockerOptions, IOptions<HostExecutionOptions> hostOptions,
+    IAgentHostPathResolver? hostPaths, IAgentJournalStorage? journals, ILogger<AgentWorkExecutor>? logger) : IAgentWorkExecutor, IReportingAgentWorkExecutor
+{
     private readonly IAgentJournalStorage journals = journals ?? new AgentJournalStorage();
     public event Func<Guid, string, Task>? Progress;
     public event Func<Guid, AgentOutputChunk, Task>? Output;
@@ -52,14 +78,12 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             foreach (Func<Guid, string, Task> handler in progress.GetInvocationList()) await handler(id, stage);
         if (stage == "Applying") applyStarted = true;
     }
-    private readonly SemaphoreSlim execution = new(1, 1);
     private sealed record Ledger(string Hash, AgentWorkResponse? Response);
     private sealed class WorkFailure(string code) : Exception { public string Code { get; } = code; }
     private static readonly HashSet<string> Operations = ["validate", "environment-preview", "build", "pull", "deploy", "start", "stop", "restart", "remove", "status", "logs", "container-exec", "host-exec", "docker-script", "container-script", "git-branches", "git-action-branches", "registry-tags", "resolve-action-inputs", "registry-check", "image-digests"];
 
     public async Task<AgentWorkResponse> ExecuteAsync(AgentWorkRequest request, CancellationToken token = default)
     {
-        await execution.WaitAsync(token);
         outputSequence = 0;
         applyStarted = false;
         string? secretDirectory = null;
@@ -72,6 +96,9 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         var resolvedSources = new Dictionary<string, string>(StringComparer.Ordinal);
         var resolvedImages = new Dictionary<string, string>(StringComparer.Ordinal);
         FileStream? processLease = null;
+        var transient = ExecutionScheduling.IsTransientDiscovery(request.Operation);
+        string? queryDirectory = null;
+        string? queryLease = null;
         try
         {
             if (request.Id == Guid.Empty || request.DeploymentId == Guid.Empty && request.Operation is not ("host-exec" or "docker-script" or "git-branches" or "registry-check") || !Operations.Contains(request.Operation) ||
@@ -83,38 +110,44 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
                     x.Username?.Contains('\0') == true || x.Password?.Contains('\0') == true) ?? false) ||
                 (request.Registries?.Any(x => x is null || x.Server is null || x.Username is null || x.Password is null ||
                     x.Username.Length > 4096 || x.Password.Length > 65536 || x.Username.Any(char.IsControl) || x.Password.Any(char.IsControl)) ?? false))
-                return new(request.Id, false, "invalid_request");
+                return new(request.Id, false, "invalid_request", ExecutionStopped: true);
             var policy = request.Policy ?? new AgentRuntimePolicy();
-            if (!policy.ExecutionEnabled) return new(request.Id, false, "execution_disabled");
+            if (ExecutionScheduling.IsDiscovery(request.Operation)) policy = policy with { TimeoutSeconds = policy.DiscoveryTimeoutSeconds };
+            if (!policy.ExecutionEnabled) return new(request.Id, false, "execution_disabled", ExecutionStopped: true);
             if (request.Operation is "docker-script" or "container-script") ValidateScriptExecution(request.Operation, request.Execution);
-            if (policy.TimeoutSeconds is < 0 or > 604800 ||
+            if (!ExecutionScheduling.IsValid(policy) || policy.TimeoutSeconds is < 0 or > 604800 ||
                 !DockerRuntimeOptions.IsValid(new DockerRuntimeOptions { Endpoint = policy.DockerEndpoint }))
-                return new(request.Id, false, "invalid_runtime_policy");
-            var root = PrivateStorage.EnsureDirectory(options.Value.PersistentDataRoot);
-            processLease = AcquireLease(root);
-            CleanupStaleCredentials(root);
-            var ledgerRoot = PrivateStorage.EnsureDirectory(Path.Combine(root, "request-ledger"));
-            ledgerPath = Path.Combine(ledgerRoot, request.Id.ToString("N") + ".json");
-            PrivateStorage.RejectLinks(ledgerPath);
-            hash = Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(request, JsonSerializerOptions.Web)));
-            if (File.Exists(ledgerPath))
+                return new(request.Id, false, "invalid_runtime_policy", ExecutionStopped: true);
+            var root = PrivateStorage.EnsureDirectory(transient ? Path.Combine(options.Value.PersistentDataRoot, "discovery") : options.Value.PersistentDataRoot);
+            processLease = AcquireLease(root, request.Id);
+            if (transient) queryLease = Path.Combine(root, "request-leases", request.Id.ToString("N") + ".lock");
+            CleanupStaleCredentials(root, request.Id);
+            if (!transient)
             {
-                if (new FileInfo(ledgerPath).Length > 8 * 1024 * 1024) return new(request.Id, false, "ledger_unavailable");
-                var previous = JsonSerializer.Deserialize<Ledger>(await File.ReadAllTextAsync(ledgerPath, token));
-                if (previous is null || previous.Hash != hash) return new(request.Id, false, "request_id_conflict");
-                return previous.Response ?? new(request.Id, false, "uncertain");
+                var ledgerRoot = PrivateStorage.EnsureDirectory(Path.Combine(root, "request-ledger"));
+                ledgerPath = Path.Combine(ledgerRoot, request.Id.ToString("N") + ".json");
+                PrivateStorage.RejectLinks(ledgerPath);
+                hash = Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(request, JsonSerializerOptions.Web)));
+                if (File.Exists(ledgerPath))
+                {
+                    if (new FileInfo(ledgerPath).Length > 8 * 1024 * 1024) return new(request.Id, false, "ledger_unavailable");
+                    var previous = JsonSerializer.Deserialize<Ledger>(await File.ReadAllTextAsync(ledgerPath, token));
+                    if (previous is null || previous.Hash != hash) return new(request.Id, false, "request_id_conflict");
+                    return previous.Response ?? new(request.Id, false, "uncertain");
+                }
+                // Workload idempotency evidence is never evicted to make room for queries.
+                if (Directory.EnumerateFiles(ledgerRoot).Take(100001).Count() >= 100000)
+                    return new(request.Id, false, "ledger_capacity", ExecutionStopped: true);
+                await WriteLedgerAsync(ledgerPath, new(hash, null), false, token);
+                FlushDirectory(root);
+                started = true;
             }
-            // Fail closed rather than evict idempotency evidence and permit an old command to execute again.
-            if (Directory.EnumerateFiles(ledgerRoot).Take(100001).Count() >= 100000)
-                return new(request.Id, false, "ledger_capacity");
-            await WriteLedgerAsync(ledgerPath, new(hash, null), false, token);
-            FlushDirectory(root);
-            started = true;
             await ReportAsync(request.Id, "Validating");
             if (policy.TimeoutSeconds > 0) operationTimeout.CancelAfter(LimitPolicy.Duration(policy.TimeoutSeconds));
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, operationTimeout.Token);
             var workspaces = PrivateStorage.EnsureDirectory(Path.Combine(root, "operation-workspaces"));
             var directory = Path.Combine(workspaces, request.Id.ToString("N"));
+            if (transient) queryDirectory = directory;
             if (Directory.Exists(directory)) throw new WorkFailure("workspace_conflict");
             PrivateStorage.EnsureDirectory(directory);
             secretDirectory = PrivateStorage.EnsureDirectory(Path.Combine(root, "credentials", request.Id.ToString("N")));
@@ -143,7 +176,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
                 resolvedImages.Count == 0 ? null : resolvedImages, context.GitReferences.Count == 0 ? null : context.GitReferences,
                 ExecutionStopped: true, ApplyStarted: applyStarted);
             completedResult = result;
-            await WriteLedgerAsync(ledgerPath, new(hash, result), true, CancellationToken.None);
+            if (!transient) await WriteLedgerAsync(ledgerPath!, new(hash!, result), true, CancellationToken.None);
             return result;
         }
         catch (Exception ex) when (ex is WorkFailure or ArgumentException or IOException or UnauthorizedAccessException or
@@ -192,35 +225,50 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* Retried under the exclusive lease before another command. */ }
             }
             processLease?.Dispose();
-            execution.Release();
+            if (transient)
+            {
+                try
+                {
+                    if (queryDirectory is not null && Directory.Exists(queryDirectory)) { PrivateStorage.RejectLinks(queryDirectory); Directory.Delete(queryDirectory, true); }
+                    if (queryLease is not null) File.Delete(queryLease);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { logger?.LogWarning("Discovery scratch cleanup failed for {OperationId}.", request.Id); }
+            }
         }
     }
 
-    private static FileStream AcquireLease(string root)
+    private static FileStream AcquireLease(string root, Guid id)
     {
         if (OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
-        var path = Path.Combine(root, "execution.lock");
+        var path = Path.Combine(PrivateStorage.EnsureDirectory(Path.Combine(root, "request-leases")), id.ToString("N") + ".lock");
         PrivateStorage.RejectLinks(path);
         try
         {
-            // OS-backed exclusive lock survives neither process exit nor a crash. It prevents a second
-            // local Agent process from deleting live credentials or racing the durable request ledger.
+            // Protect this request's receipt and credentials, never another operation's workspace.
             return new FileStream(path, new FileStreamOptions { Mode = FileMode.OpenOrCreate, Access = FileAccess.ReadWrite,
                 Share = FileShare.None, UnixCreateMode = PrivateStorage.FileMode });
         }
         catch (IOException) { throw new WorkFailure("agent_busy"); }
     }
 
-    private static void CleanupStaleCredentials(string root)
+    private static void CleanupStaleCredentials(string root, Guid id)
     {
         var directory = PrivateStorage.EnsureDirectory(Path.Combine(root, "credentials"));
         foreach (var path in Directory.EnumerateFileSystemEntries(directory))
         {
-            // Only request-owned GUID directories are ours to delete; fail closed on unexpected storage.
-            if (!Guid.TryParseExact(Path.GetFileName(path), "N", out _) || !Directory.Exists(path))
+            if (!Guid.TryParseExact(Path.GetFileName(path), "N", out var owner))
                 throw new WorkFailure("credential_cleanup_failed");
-            PrivateStorage.RejectLinks(path);
-            Directory.Delete(path, true);
+            try
+            {
+                // An active operation holds its own OS-backed request lease. Never delete its
+                // credentials; orphaned private directories can still be cleaned after a crash.
+                using var lease = owner == id ? null : AcquireLease(root, owner);
+                if (!Directory.Exists(path) && !File.Exists(path)) continue;
+                if (!Directory.Exists(path)) throw new WorkFailure("credential_cleanup_failed");
+                PrivateStorage.RejectLinks(path);
+                Directory.Delete(path, true);
+            }
+            catch (WorkFailure error) when (error.Code == "agent_busy") { }
         }
     }
 

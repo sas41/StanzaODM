@@ -44,7 +44,7 @@ docker compose logs --tail=100 initialize-agent agent
 
 Keep the database/Control Plane named volumes (including encryption keys and database credentials) and `./agent_data`. Do not use `down -v` as a troubleshooting step. Docker socket access grants substantial host control.
 
-Workflow actions, temporary-output archiving and read-only log streaming use Agent channel protocol 8; the database schema remains version 4. Upgrade the Control Plane and Agents to matching releases, retaining all existing volumes, encryption keys, identity files and request ledgers. Existing action definitions are not automatically converted. Drain active work before recreating an Agent: jobs survive network disconnects and Control Plane restarts, not destruction of the Agent process. An incompatible Agent fails closed until upgraded; no data reset is required.
+Workflow actions, temporary-output archiving and read-only log streaming use Agent channel protocol 9; the database schema is version 5. Upgrade the Control Plane and Agents together while the test environment is idle, retaining existing volumes, encryption keys, identity files and request ledgers. Existing action definitions are not automatically converted. Jobs survive network disconnects, not destruction of the Agent process. An incompatible Agent fails closed until upgraded; no data reset is required.
 
 Accepted jobs keep phase checkpoints, final results and disconnect diagnostics under `./agent_data/jobs-v1`. New jobs use journal format 2 and one temporary `<operation-id>.output` spool, not a file per output chunk. During execution, the CP reads that spool for live output and mid-run catch-up. After completion it archives the output and result in PostgreSQL, then acknowledges the save; only that acknowledgement permits Agent spool deletion. Failed transfers/database writes retain the spool, and reconnects/heartbeats retry archive acknowledgements. Future history reads use the CP database. Older format-1 chunk histories remain readable and are not silently discarded.
 
@@ -195,6 +195,14 @@ Compose is maintained in Stanza; Git supplies isolated application build inputs,
 5. On success verify the destination application, then explicitly request source-container cleanup if desired. On failure inspect both Agents and the recovery record before repeating commands; do not assume rollback or delete source volumes. Use **Clone** instead to create a separate inactive deployment identity.
 
 ## Workflow action buttons
+
+There is no Control Plane-wide execution cap. Configure **Concurrent workloads** on each Agent's runtime-policy page (default 1, range 1–64). Different deployments on that Agent can run concurrently when this is raised; each deployment is reserved for one whole workflow, including all its steps. Standalone mutating operations respect the same reservation. Cross-deployment workflows reserve their targets atomically. Uncertain runs retain reservations until reconciled. Host-wide Docker/host scripts run exclusively against that Agent's other workloads.
+
+Git/registry discovery and read-only inspections use a separate per-Agent capacity (default 4, range 1–64) and timeout (default 60 seconds), also configurable in the Agent policy UI. They do not consume workload slots or hold global database write locks while waiting for the network. Git checkout performed as part of a build stays inside that build's existing workload slot. Lowering concurrency does not cancel accepted work; new admissions wait for capacity.
+
+Network-only discovery uses short-lived query state and isolated, cleaned-up scratch storage, not the durable workload receipt/output archive. Losing a discovery connection can safely retry the read-only query; executable workload requests retain their durable no-blind-replay guarantees.
+
+Temporary discovery contention preserves branch selections. Scheduled occurrences retain their original identity and retry discovery rather than becoming failed or missed runs; the schedule shows when it is waiting. Webhooks return a retryable 503 without consuming the delivery ID when discovery capacity is temporarily unavailable.
 
 Open a deployment and select **Add action**, or edit its actions alongside the deployment configuration. Choose a name, variables, and ordered steps. Supported script targets are:
 

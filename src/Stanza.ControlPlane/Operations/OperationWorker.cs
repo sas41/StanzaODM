@@ -31,13 +31,31 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
                 queue = queue.Where(x => x.DeploymentId == null || !db.Set<Deployments.DeploymentLock>().Any(l => l.DeploymentId == x.DeploymentId && l.ExpiresAt > now));
                 if (dispatcher is IAgentConnectionCatalog catalog) { var connected = catalog.ConnectedAgentIds; queue = queue.Where(x => connected.Contains(x.AgentId)); }
                 var candidates = await queue
-                    .OrderBy(x => x.CreatedAt).Take(100).ToListAsync(stoppingToken);
+                    .OrderBy(x => x.CreatedAt).ThenBy(x => x.Id)
+                    .Select(x => new OperationEntity { Id = x.Id, AgentId = x.AgentId, DeploymentId = x.DeploymentId,
+                        Kind = x.Kind, Trigger = x.Trigger, CreatedAt = x.CreatedAt }).ToListAsync(stoppingToken);
+                var live = await db.Set<OperationEntity>().Where(x => x.State == "Running" || x.State == "CancellationRequested")
+                    .Select(x => new { x.AgentId, x.DeploymentId, x.Kind }).ToListAsync(stoppingToken);
+                var slots = live.GroupBy(x => x.AgentId).ToDictionary(g => g.Key, g => g.Select(x => new ExecutionSlot(x.DeploymentId ?? Guid.Empty, x.Kind)).ToList());
+                var reservations = await db.Set<DeploymentExecutionReservation>().AsNoTracking().ToDictionaryAsync(x => x.DeploymentId, x => x.RunId, stoppingToken);
+                var capacities = new Dictionary<Guid, AgentRuntimePolicy>();
                 foreach (var candidate in candidates)
                 {
-                    if (policy.MaximumParallelOperations > 0 && active.Count >= policy.MaximumParallelOperations) break;
                     if (active.ContainsKey(candidate.Id) || !dispatcher.IsConnected(candidate.AgentId)) continue;
+                    // Inspect only queue metadata, not encrypted workspaces, and skip saturated
+                    // Agents/reserved deployments without thousands of unnecessary claim transactions.
+                    if (!ExecutionScheduling.IsDiscovery(candidate.Kind) && candidate.DeploymentId is { } target &&
+                        reservations.TryGetValue(target, out var owner) && candidate.Trigger != "automation:" + owner.ToString("N")) continue;
+                    if (!capacities.TryGetValue(candidate.AgentId, out var capacity))
+                        capacities[candidate.AgentId] = capacity = await scope.ServiceProvider.GetRequiredService<AgentPolicyService>().RuntimeAsync(candidate.AgentId, stoppingToken);
+                    if (!slots.TryGetValue(candidate.AgentId, out var occupied)) slots[candidate.AgentId] = occupied = [];
+                    var requested = new ExecutionSlot(candidate.DeploymentId ?? Guid.Empty, candidate.Kind);
+                    if (!ExecutionScheduling.CanAdmit(capacity, requested, occupied)) continue;
                     if (await ClaimAsync(candidate.Id, policy.OperationTimeoutSeconds, stoppingToken))
+                    {
+                        occupied.Add(requested);
                         active.Add(candidate.Id, RunAsync(candidate.Id, stoppingToken));
+                    }
                 }
                 // Retain metadata while clearing aged sensitive command output.
                 var cutoff = clock.GetUtcNow().AddDays(-policy.LogRetentionDays).ToUnixTimeSeconds();
@@ -71,9 +89,22 @@ public sealed class OperationWorker(IServiceScopeFactory scopes, IAgentCommandDi
         var row = await db.Set<OperationEntity>().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id && x.State == "Queued", ct);
         if (row is null) return false;
         if (row.DeploymentId is { } lockedDeployment && await Deployments.DeploymentLockService.IsLockedAsync(db, lockedDeployment, clock.GetUtcNow().ToUnixTimeSeconds(), ct)) return false;
-        if (await db.Set<OperationEntity>().AnyAsync(x => x.AgentId == row.AgentId && (x.State == "Running" || x.State == "CancellationRequested"), ct)) return false;
-        if (row.DeploymentId is { } deployment && await db.Set<OperationEntity>().AnyAsync(x => x.DeploymentId == deployment && (x.State == "Running" || x.State == "CancellationRequested"), ct)) return false;
-        if (row.DeploymentId is { } uncertainDeployment && row.Kind is not ("status" or "logs") && await db.Set<OperationEntity>().AnyAsync(x => x.DeploymentId == uncertainDeployment && x.State == "Unknown", ct)) return false;
+        var agentPolicy = await scope.ServiceProvider.GetRequiredService<AgentPolicyService>().RuntimeAsync(row.AgentId, ct);
+        if (!ExecutionScheduling.IsDiscovery(row.Kind) && !ExecutionScheduling.IsExclusive(row.Kind) &&
+            await db.Set<OperationEntity>().AnyAsync(x => x.AgentId == row.AgentId && x.Id != row.Id && x.State == "Queued" &&
+                (x.Kind == "docker-script" || x.Kind == "host-exec") && x.CreatedAt <= row.CreatedAt, ct)) return false;
+        var active = await db.Set<OperationEntity>().Where(x => x.AgentId == row.AgentId && (x.State == "Running" || x.State == "CancellationRequested"))
+            .Select(x => new ExecutionSlot(x.DeploymentId ?? Guid.Empty, x.Kind)).ToArrayAsync(ct);
+        if (!ExecutionScheduling.CanAdmit(agentPolicy, new(row.DeploymentId ?? Guid.Empty, row.Kind), active)) return false;
+        if (!ExecutionScheduling.IsDiscovery(row.Kind) && row.DeploymentId is { } deployment)
+        {
+            var reservation = await db.Set<DeploymentExecutionReservation>().AsNoTracking().SingleOrDefaultAsync(x => x.DeploymentId == deployment, ct);
+            if (reservation is not null && row.Trigger != "automation:" + reservation.RunId.ToString("N")) return false;
+            var deployedWork = await db.Set<OperationEntity>().Where(x => x.DeploymentId == deployment && (x.State == "Running" || x.State == "CancellationRequested"))
+                .Select(x => x.Kind).ToArrayAsync(ct);
+            if (deployedWork.Any(kind => !ExecutionScheduling.IsDiscovery(kind))) return false;
+        }
+        if (row.DeploymentId is { } uncertainDeployment && !ExecutionScheduling.IsDiscovery(row.Kind) && await db.Set<OperationEntity>().AnyAsync(x => x.DeploymentId == uncertainDeployment && x.State == "Unknown", ct)) return false;
         var changed = await db.Set<OperationEntity>().Where(x => x.Id == id && x.State == "Queued").ExecuteUpdateAsync(update => update
             .SetProperty(x => x.State, "Running").SetProperty(x => x.WorkerId, workerId)
                 .SetProperty(x => x.StartedAt, clock.GetUtcNow().ToUnixTimeSeconds())

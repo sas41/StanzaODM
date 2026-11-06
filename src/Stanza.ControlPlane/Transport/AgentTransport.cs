@@ -102,6 +102,7 @@ public static class AgentTransportExtensions
 
 public sealed class AgentCommandBroker(IServiceScopeFactory? scopes = null) : IAgentCommandDispatcher, IAgentJobDispatcher, IAgentWorkProgressSource, IAgentConnectionCatalog, IAgentOutputArchive
 {
+    private readonly ConcurrentDictionary<Guid, AgentDiscoveryAdmission> discoveryAdmission = new();
     private readonly ConcurrentDictionary<Guid, TaskCompletionSource> outputWaiters = new();
     private void OutputAvailable(Guid id)
     {
@@ -176,8 +177,32 @@ public sealed class AgentCommandBroker(IServiceScopeFactory? scopes = null) : IA
             ? session.CancelAsync(operationId, reason, token) : Task.CompletedTask;
     public Task<AgentWorkResponse> AttachAsync(Guid agentId, Guid operationId, CancellationToken token = default) =>
         ExchangeAsync(agentId, operationId, null, token);
-    public Task<AgentWorkResponse> DispatchAsync(Guid agentId, AgentWorkRequest request, CancellationToken token = default) =>
-        ExchangeAsync(agentId, request.Id, request, token);
+    public async Task<AgentWorkResponse> DispatchAsync(Guid agentId, AgentWorkRequest request, CancellationToken token = default)
+    {
+        if (!ExecutionScheduling.IsDiscovery(request.Operation)) return await ExchangeAsync(agentId, request.Id, request, token);
+        var policy = request.Policy ?? new();
+        if (!ExecutionScheduling.IsValid(policy)) return new(request.Id, false, "invalid_runtime_policy", ExecutionStopped: true);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(policy.DiscoveryTimeoutSeconds));
+        var query = request;
+        try
+        {
+            using var admission = await discoveryAdmission.GetOrAdd(agentId, _ => new()).EnterAsync(policy.MaximumParallelDiscovery, deadline.Token);
+            while (true)
+            {
+                deadline.Token.ThrowIfCancellationRequested();
+                var response = await ExchangeAsync(agentId, query.Id, query, deadline.Token);
+                if (deadline.IsCancellationRequested) return new(request.Id, false, token.IsCancellationRequested ? "discovery_cancelled" : "discovery_timeout");
+                if (response.CancellationReason == "authorization_revoked") return response with { Id = request.Id };
+                if (ExecutionScheduling.IsTransientDiscovery(request.Operation) && response.Code is "job_not_found" or "uncertain" or "discovery_cancelled" or "cancelled")
+                    query = request with { Id = Guid.NewGuid() }; // Safe to retry a lost read-only query, never executable work.
+                else if (response.Code != "agent_busy") return response with { Id = request.Id };
+                // Busy is a pre-admission rejection, not a missing branch or an accepted job.
+                await Task.Delay(TimeSpan.FromMilliseconds(250), deadline.Token);
+            }
+        }
+        catch (OperationCanceledException) { return new(request.Id, false, token.IsCancellationRequested ? "discovery_cancelled" : "discovery_timeout"); }
+    }
     private async Task<AgentWorkResponse> ExchangeAsync(Guid agentId, Guid id, AgentWorkRequest? request, CancellationToken token)
     {
         if (!IsConnected(agentId)) throw new AgentUnavailableException();
@@ -189,7 +214,7 @@ public sealed class AgentCommandBroker(IServiceScopeFactory? scopes = null) : IA
                 token.ThrowIfCancellationRequested();
                 if (!sessions.TryGetValue(agentId, out var session) || !session.Connected)
                 { await Task.Delay(250, token); continue; }
-                var response = await session.ExchangeAsync(id, first ? request : null, token);
+                var response = await session.ExchangeAsync(id, first ? request : null, token, request is not null && ExecutionScheduling.IsDiscovery(request.Operation));
                 first = false;
                 if (response.Code != "uncertain" || session.Connected || session.FailureReason is "authorization_revoked" or "protocol_error") return response;
                 // Only attach by ID after a possibly delivered request. Never resend executable work.
@@ -222,7 +247,6 @@ public sealed class AgentCommandSession : IDisposable
     private static readonly JsonSerializerOptions LogJson = new(JsonSerializerDefaults.Web)
     { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private readonly SemaphoreSlim send = new(1, 1);
-    private readonly SemaphoreSlim execution = new(1, 1);
     private readonly ConcurrentDictionary<Guid, TaskCompletionSource<AgentWorkResponse>> pending = new();
     private readonly CancellationTokenSource lifetime = new();
     private readonly ConcurrentDictionary<Guid, Stanza.ControlPlane.Logs.BrokerLogSession> logs = new();
@@ -294,16 +318,16 @@ public sealed class AgentCommandSession : IDisposable
         }
         finally { inspections.TryRemove(id, out _); }
     }
-    public async Task<AgentWorkResponse> ExchangeAsync(Guid id, AgentWorkRequest? request, CancellationToken token)
+    public async Task<AgentWorkResponse> ExchangeAsync(Guid id, AgentWorkRequest? request, CancellationToken token, bool discovery = false)
     {
         if (id == Guid.Empty) return new(id, false, "invalid_request");
-        if (!await execution.WaitAsync(0, token)) return new(id, false, "agent_busy");
+        discovery |= request is not null && ExecutionScheduling.IsDiscovery(request.Operation);
         var completion = new TaskCompletionSource<AgentWorkResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!pending.TryAdd(id, completion)) return new(id, false, "duplicate_pending_request");
         var attempted = false;
         try
         {
             if (!Connected) throw new AgentUnavailableException();
-            if (!pending.TryAdd(id, completion)) return new(id, false, "duplicate_pending_request");
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
             var after = cursor is null ? 0 : await cursor(id);
             evidenceSequences[id] = after;
@@ -315,12 +339,18 @@ public sealed class AgentCommandSession : IDisposable
         }
         catch (Exception ex) when (attempted && ex is OperationCanceledException or WebSocketException or IOException)
         {
+            if (discovery && ex is OperationCanceledException && token.IsCancellationRequested && Connected)
+            {
+                try { await SendAsync(new("work.cancel", id, Data: "user"), CancellationToken.None); } catch (Exception) { }
+                evidenceSequences.TryRemove(id, out _);
+                return new(id, false, "discovery_cancelled");
+            }
             // Once a send is attempted, a missing acknowledgement is not evidence that execution did not occur.
             // Only the transport is disposed; the Agent owns the job lifetime.
             Dispose();
             return new(id, false, "uncertain");
         }
-        finally { pending.TryRemove(id, out _); progressCount.TryRemove(id, out _); execution.Release(); }
+        finally { pending.TryRemove(id, out _); progressCount.TryRemove(id, out _); }
     }
 
     public async Task RunAsync(WebSocket connectedSocket, Func<CancellationToken, Task<bool>> validate, CancellationToken token,

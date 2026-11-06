@@ -403,14 +403,16 @@ public sealed class AgentWorkExecutorTests
     }
 
     [Fact]
-    public async Task ExclusiveProcessLeaseDoesNotAllowDeletingAnotherProcessesActiveCredentials()
+    public async Task RequestLeaseDoesNotAllowReexecutingAnActiveRequestOrDeletingItsCredentials()
     {
         using var directory = new AgentTestDirectory();
-        var credentialDirectory = Path.Combine(directory.Path, "credentials", Guid.NewGuid().ToString("N"));
+        var request = Request();
+        var credentialDirectory = Path.Combine(directory.Path, "credentials", request.Id.ToString("N"));
         Directory.CreateDirectory(credentialDirectory);
         File.WriteAllText(Path.Combine(credentialDirectory, "config.json"), "live-private-credential");
-        using var lease = new FileStream(Path.Combine(directory.Path, "execution.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-        var runner = new FakeRunner(); var result = await Executor(directory.Path, runner).ExecuteAsync(Request());
+        Directory.CreateDirectory(Path.Combine(directory.Path, "request-leases"));
+        using var lease = new FileStream(Path.Combine(directory.Path, "request-leases", request.Id.ToString("N") + ".lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var runner = new FakeRunner(); var result = await Executor(directory.Path, runner).ExecuteAsync(request);
         Assert.Equal("agent_busy", result.Code); Assert.Empty(runner.Requests);
         Assert.True(File.Exists(Path.Combine(credentialDirectory, "config.json")));
     }

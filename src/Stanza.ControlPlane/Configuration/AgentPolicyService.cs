@@ -37,6 +37,7 @@ public sealed class AgentPolicyService(StanzaDbContext db, AccessService access,
     public async Task SaveAsync(Guid actor, AgentPolicyEditor edit, CancellationToken ct = default)
     {
         var p = edit.Policy with { TimeoutSeconds = (await operational.RuntimeAsync(ct)).TimeoutSeconds };
+        if (!ExecutionScheduling.IsValid(p)) throw new SettingsOperationException("Agent workload and discovery concurrency must be 1–64; discovery timeout must be 1–604800 seconds.");
         if (!Uri.TryCreate(p.DockerEndpoint, UriKind.Absolute, out var endpoint) || endpoint.Scheme != "unix"
             || endpoint.AbsolutePath == "/" || endpoint.UserInfo.Length != 0 || endpoint.Query.Length != 0 || endpoint.Fragment.Length != 0 || p.DockerEndpoint.Any(char.IsControl))
             throw new SettingsOperationException("Use a local unix Docker socket and bounded timeout/output limits.");

@@ -30,6 +30,7 @@
 {
     <section class="panel automation-card"><div class="panel-heading"><h3>@x.Name</h3><span class="badge @(x.Enabled ? "" : "neutral")">@(x.Enabled ? "Enabled" : "Paused")</span></div>
     <p><code>@x.Expression</code> · @x.TimeZone</p><p class="field-help">@Stanza.ControlPlane.Automation.AutomationRules.DescribeCron(x.Expression)</p>
+    @if (x.PendingOccurrenceAt is { } occurrence) { <p class="notice warning">Waiting for remote input discovery for the @DateTimeOffset.FromUnixTimeSeconds(occurrence).ToString("u") occurrence. It will be retried, not skipped because the Agent was busy.</p> }
     <p class="record-meta">Next: @DateTimeOffset.FromUnixTimeSeconds(x.NextRunAt).ToString("u") · overlap @x.Overlap · missed @x.MissedRun</p>
     <div class="toolbar"><a class="button" href="/automation/schedules/edit?id=@x.Id">Edit / preview next runs</a>
     <form method="post" action="/automation/schedules/@x.Id/enabled">@Html.AntiForgeryToken()<input type="hidden" name="enabled" value="@((!x.Enabled).ToString().ToLowerInvariant())" /><button>@(x.Enabled ? "Pause" : "Resume")</button></form>

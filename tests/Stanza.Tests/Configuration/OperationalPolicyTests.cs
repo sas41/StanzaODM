@@ -68,7 +68,7 @@ public sealed class OperationalPolicyTests
         var desired = new OperationalPolicy
         {
             SessionHours = 12, LoginAttempts = 7, LoginWindowMinutes = 2, EnrollmentRequestsPerMinute = 11,
-            OperationTimeoutSeconds = 42, MaximumParallelOperations = 2,
+            OperationTimeoutSeconds = 42,
             MaximumTextBytes = 128, MaximumUploadBytes = 256, MaximumWorkspaceBytes = 512, MaximumSupportingFiles = 3,
             StatusIntervalSeconds = 2, MaximumConnectionsPerUser = 2, MaximumConnections = 8,
             LogRetentionDays = 2, AuditRetentionDays = 3, AllowHostActions = true,

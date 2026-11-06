@@ -7,13 +7,19 @@ using Stanza.ControlPlane.Transport;
 
 namespace Stanza.ControlPlane.Automation;
 
-public sealed class AutomationScheduler(StanzaDbContext db, AutomationService automation, AutomationAuthorization authorization, TimeProvider clock)
+public sealed class AutomationScheduler(StanzaDbContext db, AutomationService automation, AutomationAuthorization authorization, TimeProvider clock,
+    IServiceScopeFactory? scopes = null)
 {
     public async Task TickAsync(CancellationToken ct = default)
     {
         var due = await db.Set<AutomationSchedule>().AsNoTracking().Where(x => x.Enabled && x.NextRunAt <= automation.Now)
-            .OrderBy(x => x.NextRunAt).Take(100).ToListAsync(ct);
-        foreach (var schedule in due) await ClaimScheduleAsync(schedule, ct);
+            .OrderBy(x => x.NextRunAt).ToListAsync(ct);
+        if (scopes is null) foreach (var schedule in due) await ClaimScheduleAsync(schedule, ct);
+        else await Task.WhenAll(due.Select(async schedule =>
+        {
+            await using var scope = scopes.CreateAsyncScope();
+            await scope.ServiceProvider.GetRequiredService<AutomationScheduler>().ClaimScheduleAsync(schedule, ct);
+        }));
         var policies = await db.Set<ImageUpdatePolicy>().AsNoTracking().Where(x => x.Enabled && x.NextRunAt <= automation.Now)
             .OrderBy(x => x.NextRunAt).Take(100).ToListAsync(ct);
         foreach (var policy in policies) await ClaimImageCheckAsync(policy, ct);
@@ -23,8 +29,34 @@ public sealed class AutomationScheduler(StanzaDbContext db, AutomationService au
 
     public async Task<bool> ClaimScheduleAsync(AutomationSchedule schedule, CancellationToken ct = default)
     {
-        await using var transaction = await db.Database.BeginTransactionAsync(ct);
         if (!schedule.Enabled || schedule.NextRunAt > automation.Now) return false;
+        PreparedActionInputs? prepared = null;
+        string? preparationFailure = null;
+        var missed = schedule.PendingOccurrenceAt is null && schedule.MissedRun == "skip" && schedule.NextRunAt < automation.Now - 60;
+        var overlapping = schedule.Overlap == "skip" && await db.Set<AutomationRun>().AnyAsync(x => x.DefinitionId == schedule.Id && (x.State == "queued" || x.State == "running"), ct);
+        if (schedule.ActionId is { } action && !missed && !overlapping)
+        {
+            try
+            {
+                var values = await automation.ScheduledParametersAsync(action, ct);
+                preparationFailure = "queue-or-inputs-unavailable";
+                prepared = await automation.PrepareActionInputsAsync(schedule.OwnerId, action, values, ct);
+                preparationFailure = null;
+            }
+            catch (AutomationDiscoveryException)
+            {
+                await using var retry = await db.Database.BeginTransactionAsync(ct);
+                await SecurityWriteGuard.LockAsync(db, ct);
+                await db.Set<AutomationSchedule>().Where(x => x.Id == schedule.Id && x.Revision == schedule.Revision && x.Enabled && x.NextRunAt == schedule.NextRunAt)
+                    .ExecuteUpdateAsync(u => u.SetProperty(x => x.PendingOccurrenceAt, x => x.PendingOccurrenceAt ?? schedule.NextRunAt)
+                        .SetProperty(x => x.NextRunAt, automation.Now + 10).SetProperty(x => x.Revision, x => x.Revision + 1), ct);
+                await retry.CommitAsync(ct); return false;
+            }
+            catch (AutomationAccessException) { preparationFailure = "access-revoked"; }
+            catch (Exception e) when (e is AutomationException or SourceException or SourceAccessException or AgentUnavailableException)
+            { preparationFailure ??= "target-or-inputs-unavailable"; }
+        }
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await SecurityWriteGuard.LockAsync(db, ct);
         long next;
         try { next = new CronSchedule(schedule.Expression).Next(clock.GetUtcNow(), TimeZoneInfo.FindSystemTimeZoneById(schedule.TimeZone)).ToUnixTimeSeconds(); }
@@ -37,27 +69,29 @@ public sealed class AutomationScheduler(StanzaDbContext db, AutomationService au
         // Advancing next occurrence and inserting the unique occurrence ledger share a transaction.
         // A crash before commit claims neither; a crash after commit leaves exactly one durable run.
         var updated = await db.Set<AutomationSchedule>().Where(x => x.Id == schedule.Id && x.Revision == schedule.Revision && x.Enabled && x.NextRunAt == schedule.NextRunAt)
-            .ExecuteUpdateAsync(u => u.SetProperty(x => x.NextRunAt, next).SetProperty(x => x.Revision, x => x.Revision + 1), ct);
+            .ExecuteUpdateAsync(u => u.SetProperty(x => x.NextRunAt, next).SetProperty(x => x.PendingOccurrenceAt, (long?)null).SetProperty(x => x.Revision, x => x.Revision + 1), ct);
         if (updated != 1) return false;
         await db.Set<AutomationQueueGuard>().Where(x => x.Id == 1).ExecuteUpdateAsync(u => u.SetProperty(x => x.Revision, x => x.Revision + 1), ct);
         var state = "queued"; var code = "";
         IReadOnlyDictionary<string, string>? parameters = null;
-        if (schedule.MissedRun == "skip" && schedule.NextRunAt < automation.Now - 60) { state = "skipped"; code = "missed-occurrence"; }
+        if (missed) { state = "skipped"; code = "missed-occurrence"; }
         else if (schedule.Overlap == "skip" && await db.Set<AutomationRun>().AnyAsync(x => x.DefinitionId == schedule.Id && (x.State == "queued" || x.State == "running"), ct))
         { state = "skipped"; code = "overlap"; }
+        else if (preparationFailure is not null) { state = "denied"; code = preparationFailure; }
+        if (state == "queued" && schedule.ActionId is not null && prepared is null) return false;
         try
         {
             await authorization.ScheduleAsync(schedule.OwnerId, schedule.ActionId, schedule.DeploymentId, ct);
             await automation.ValidateTriggerAsync(schedule.OwnerId, schedule.ActionId, schedule.DeploymentId, schedule.Operation, ct);
-            if (state == "queued" && schedule.ActionId is { } actionId) parameters = await automation.ScheduledParametersAsync(actionId, ct);
+            if (state == "queued" && schedule.ActionId is not null) parameters = prepared!.Values;
         }
         catch (AutomationAccessException) { state = "denied"; code = "access-revoked"; }
         catch (AutomationException) { state = "denied"; code = "target-or-inputs-unavailable"; }
-        var key = $"schedule:{schedule.Id:N}:{schedule.NextRunAt}";
+        var key = $"schedule:{schedule.Id:N}:{schedule.PendingOccurrenceAt ?? schedule.NextRunAt}";
         try
         {
             await automation.QueueAsync(schedule.OwnerId, schedule.DeploymentId, schedule.ActionId, schedule.Id, "schedule",
-                key, schedule.Operation, parameters, state: state, code: code, ct: ct);
+                key, schedule.Operation, parameters, state: state, code: code, ct: ct, preparedInputs: prepared);
         }
         catch (Exception e) when (state == "queued" && e is AutomationException or AutomationAccessException or SourceException or SourceAccessException or AgentUnavailableException)
         {

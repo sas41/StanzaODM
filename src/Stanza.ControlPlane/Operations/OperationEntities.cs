@@ -43,6 +43,7 @@ public sealed class OperationConfiguration : IEntityTypeConfiguration<OperationE
         builder.ToTable("Operations").HasKey(x => x.Id);
         builder.HasIndex(x => new { x.State, x.CreatedAt });
         builder.HasIndex(x => x.DeploymentId);
+        builder.HasIndex(x => new { x.AgentId, x.State });
         builder.Property(x => x.State).HasMaxLength(40);
         builder.Property(x => x.Kind).HasMaxLength(40);
         builder.Property(x => x.Code).HasMaxLength(100);

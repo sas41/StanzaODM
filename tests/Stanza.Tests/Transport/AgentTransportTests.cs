@@ -2,6 +2,7 @@ using System.Net.WebSockets;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Collections.Concurrent;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
@@ -31,6 +32,113 @@ namespace Stanza.Tests.Transport;
 
 public sealed class AgentTransportTests
 {
+    [Fact]
+    public async Task LostReadOnlyDiscoveryCanRetryAfterReconnectWithoutChangingTheCallersRequestIdentity()
+    {
+        await using var fixture = await ServerFixture.CreateAsync();
+        using var root = new AgentTestDirectory(); using var identity = AgentIdentity.LoadOrCreate(root.Path);
+        var agent = await fixture.RegisterAsync(identity, true);
+        var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = fixture.Origin, EnrollmentToken = fixture.Credential, AllowInsecureHttp = true });
+        var executor = new RetryDiscoveryExecutor(); var state = new AgentState();
+        await using var jobs = new AgentJobStore(options, executor, TimeProvider.System);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var channel = new AgentCommandChannel(options, state, executor, fixture.Store.Clock, environment: fixture.Environment, jobs: jobs);
+        var running = channel.RunAsync(identity, timeout.Token);
+        try
+        {
+            await AgentTestWait.UntilAsync(() => state.Snapshot.Ready);
+            var request = AgentWorkExecutorTests.Request("git-action-branches") with { Policy = new(DiscoveryTimeoutSeconds: 10) };
+            var query = fixture.Broker.DispatchAsync(agent, request, timeout.Token);
+            await executor.Started.Task.WaitAsync(timeout.Token);
+            fixture.Broker.Disconnect(agent); await IgnoreConnectionCloseAsync(running);
+            async Task Reconnect()
+            {
+                while (!timeout.IsCancellationRequested)
+                {
+                    try { await channel.RunAsync(identity, timeout.Token); return; }
+                    catch (WebSocketException) when (!timeout.IsCancellationRequested) { await Task.Delay(100, timeout.Token); }
+                }
+            }
+            running = Reconnect();
+            var result = await query.WaitAsync(timeout.Token);
+            Assert.True(result.Succeeded, result.Code); Assert.Equal(request.Id, result.Id); Assert.Contains("main", result.Output);
+            Assert.Equal(2, executor.Executions);
+        }
+        finally { await timeout.CancelAsync(); await IgnoreConnectionCloseAsync(running); }
+    }
+
+    private sealed class RetryDiscoveryExecutor : IAgentWorkExecutor
+    {
+        public readonly TaskCompletionSource Started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int Executions;
+        public async Task<AgentWorkResponse> ExecuteAsync(AgentWorkRequest request, CancellationToken token = default)
+        {
+            if (Interlocked.Increment(ref Executions) == 1)
+            {
+                Started.TrySetResult();
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+                catch (OperationCanceledException) { return new(request.Id, false, "cancelled", ExecutionStopped: true); }
+            }
+            return new(request.Id, true, "succeeded", "[\"main\"]", ExecutionStopped: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)][InlineData(true)]
+    public async Task ChannelMultiplexesWorkloadsAndDiscoveryAndCancellingDiscoveryDoesNotDisconnectRunningDeployments(bool discoveryTimeout)
+    {
+        await using var fixture = await ServerFixture.CreateAsync();
+        using var root = new AgentTestDirectory(); using var identity = AgentIdentity.LoadOrCreate(root.Path);
+        var agent = await fixture.RegisterAsync(identity, true);
+        var options = Options.Create(new AgentOptions { PersistentDataRoot = root.Path, ControlPlaneUrl = fixture.Origin, EnrollmentToken = fixture.Credential, AllowInsecureHttp = true });
+        var executor = new MultiplexExecutor(); var state = new AgentState();
+        await using var jobs = new AgentJobStore(options, executor, TimeProvider.System);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var channel = new AgentCommandChannel(options, state, executor, fixture.Store.Clock, environment: fixture.Environment, jobs: jobs).RunAsync(identity, timeout.Token);
+        try
+        {
+            await AgentTestWait.UntilAsync(() => state.Snapshot.Ready);
+            await jobs.ConfigureAsync(new(MaximumParallelOperations: 2, MaximumParallelDiscovery: 1));
+            var a = AgentWorkExecutorTests.Request("deploy"); var b = AgentWorkExecutorTests.Request("deploy");
+            var first = fixture.Broker.DispatchAsync(agent, a, timeout.Token); var second = fixture.Broker.DispatchAsync(agent, b, timeout.Token);
+            await AgentTestWait.UntilAsync(() => executor.Started.ContainsKey(a.Id) && executor.Started.ContainsKey(b.Id));
+            var listing = AgentWorkExecutorTests.Request("git-action-branches");
+            var browse = fixture.Broker.DispatchAsync(agent, listing, timeout.Token);
+            await AgentTestWait.UntilAsync(() => executor.Started.ContainsKey(listing.Id));
+            var next = listing with { Id = Guid.NewGuid(), Policy = new(DiscoveryTimeoutSeconds: discoveryTimeout ? 2 : 60) };
+            using var browseLifetime = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+            var waiting = fixture.Broker.DispatchAsync(agent, next, browseLifetime.Token);
+            Assert.False(waiting.IsCompleted);
+            executor.Started[listing.Id].TrySetResult();
+            Assert.True((await browse.WaitAsync(timeout.Token)).Succeeded);
+            await AgentTestWait.UntilAsync(() => executor.Started.ContainsKey(next.Id));
+            if (!discoveryTimeout) await browseLifetime.CancelAsync();
+            Assert.Equal(discoveryTimeout ? "discovery_timeout" : "discovery_cancelled", (await waiting.WaitAsync(timeout.Token)).Code);
+            Assert.True(fixture.Broker.IsConnected(agent)); Assert.False(first.IsCompleted); Assert.False(second.IsCompleted);
+            Assert.True((await jobs.InspectAsync(a.Id)).Active); Assert.True((await jobs.InspectAsync(b.Id)).Active);
+            executor.Started[a.Id].TrySetResult(); executor.Started[b.Id].TrySetResult();
+            Assert.True((await first.WaitAsync(timeout.Token)).Succeeded); Assert.True((await second.WaitAsync(timeout.Token)).Succeeded);
+            Assert.DoesNotContain(a.Id, executor.Cancelled); Assert.DoesNotContain(b.Id, executor.Cancelled);
+        }
+        finally
+        {
+            foreach (var completion in executor.Started.Values) completion.TrySetResult();
+            await timeout.CancelAsync(); await IgnoreConnectionCloseAsync(channel);
+        }
+    }
+
+    private sealed class MultiplexExecutor : IAgentWorkExecutor
+    {
+        public readonly ConcurrentDictionary<Guid, TaskCompletionSource> Started = new();
+        public readonly ConcurrentBag<Guid> Cancelled = [];
+        public async Task<AgentWorkResponse> ExecuteAsync(AgentWorkRequest request, CancellationToken token = default)
+        {
+            var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); Started[request.Id] = finish;
+            try { await finish.Task.WaitAsync(token); return new(request.Id, true, "succeeded", "[\"main\"]", ExecutionStopped: true); }
+            catch (OperationCanceledException) { Cancelled.Add(request.Id); return new(request.Id, false, "cancelled", ExecutionStopped: true); }
+        }
+    }
+
     [Fact]
     public async Task LargeSnapshotsAndLiveFailureOutputCrossTheAuthenticatedChannelBeforeCompletion()
     {

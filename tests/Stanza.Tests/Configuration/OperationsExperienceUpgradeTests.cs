@@ -17,8 +17,8 @@ public sealed class OperationsExperienceUpgradeTests
         await using var db = new StanzaDbContext(new DbContextOptionsBuilder<StanzaDbContext>().UseSqlite("Data Source=:memory:").Options);
         await db.Database.OpenConnectionAsync(); await db.Database.EnsureCreatedAsync();
         var id = Guid.NewGuid(); var run = Guid.NewGuid();
-        var policy = JsonSerializer.Serialize(new PolicyEditor(new() { OperationTimeoutSeconds = 19, MaximumParallelOperations = 7 }, 11));
-        var node = System.Text.Json.Nodes.JsonNode.Parse(policy)!; node["Policy"]!.AsObject().Remove("MaximumDeploymentLockHours"); policy = node.ToJsonString();
+        var policy = JsonSerializer.Serialize(new PolicyEditor(new() { OperationTimeoutSeconds = 19 }, 11));
+        var node = System.Text.Json.Nodes.JsonNode.Parse(policy)!; node["Policy"]!["MaximumParallelOperations"] = 7; node["Policy"]!.AsObject().Remove("MaximumDeploymentLockHours"); policy = node.ToJsonString();
         db.Settings.AddRange(new SettingEntity { Key = "schema-version", Value = "2" }, new SettingEntity { Key = "operational-policy", Value = policy });
         db.Add(new OperationEntity { Id = id, State = "Succeeded", ProtectedRequest = "encrypted-snapshot", CompletedAt = 123 });
         db.Add(new AutomationRun { Id = run, State = "queued", OccurrenceKey = "test", ProtectedPlan = "encrypted-plan" });
@@ -35,7 +35,8 @@ public sealed class OperationsExperienceUpgradeTests
         Assert.Equal("encrypted-plan", (await db.Set<AutomationRun>().SingleAsync()).ProtectedPlan);
         Assert.Empty(await db.Set<DeploymentLock>().ToListAsync()); Assert.Empty(await db.Set<OutgoingDelivery>().ToListAsync());
         Assert.Equal(policy, (await db.Settings.SingleAsync(x => x.Key == "operational-policy")).Value);
-        var restored = JsonSerializer.Deserialize<PolicyEditor>(policy)!; Assert.Equal(168, restored.Policy.MaximumDeploymentLockHours); Assert.Equal(7, restored.Policy.MaximumParallelOperations);
+        var restored = JsonSerializer.Deserialize<PolicyEditor>(policy)!; Assert.Equal(168, restored.Policy.MaximumDeploymentLockHours);
+        Assert.Equal(7, System.Text.Json.Nodes.JsonNode.Parse(policy)!["Policy"]!["MaximumParallelOperations"]!.GetValue<int>());
         Assert.Equal(DatabaseUpgrader.CurrentVersion.ToString(), (await db.Settings.SingleAsync(x => x.Key == "schema-version")).Value);
     }
 }

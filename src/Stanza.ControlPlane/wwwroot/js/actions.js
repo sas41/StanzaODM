@@ -49,7 +49,10 @@
                     if (!search.value && choice.dataset.selected && !Array.from(select.options).some(o => o.value === choice.dataset.selected))
                         message.textContent = "Previous selection is unavailable or has not been verified. Choose an available value.";
                 } catch (error) {
-                    if (error.name !== "AbortError") { message.textContent = error.message; more.hidden = true; select.replaceChildren(new Option("Choices unavailable", "")); }
+                    if (error.name !== "AbortError") {
+                        message.textContent = error.message; more.hidden = true;
+                        if (!Array.from(select.options).some(option => option.value)) select.replaceChildren(new Option("Choices unavailable", ""));
+                    }
                 } finally { if (request === current) select.disabled = false; }
             }
             search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => { page = 0; load(); }, 250); });

@@ -251,7 +251,7 @@ public sealed class RuntimeFinalizationTests
         var result = await executor.ExecuteAsync(request);
         Assert.Equal("git_failed", result.Code); Assert.Null(result.Output);
         Assert.True(Volatile.Read(ref authenticatedRequests) > 0); Assert.Equal(0, Volatile.Read(ref redirectedRequests));
-        Assert.Empty(Directory.GetFileSystemEntries(Path.Combine(root.Path, "credentials")));
+        Assert.Empty(Directory.GetFileSystemEntries(Path.Combine(root.Path, "discovery", "credentials")));
     }
 
     private static string ContainerInspection(string id, Guid deployment, string status, string health) => JsonSerializer.Serialize(new[]
