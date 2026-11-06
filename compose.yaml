@@ -2,6 +2,8 @@
 # First start only Control Plane: docker compose up -d control-plane
 # After creating an enrollment token: docker compose up -d
 # Agent state is ./agent_data; database/Control Plane state uses the named volumes below.
+# Stable gateway for host reverse proxies; align Settings → Operational policy proxy trust.
+# Before upgrading, set STANZA_NETWORK_SUBNET/GATEWAY to the existing network's IPAM values.
 services:
   initialize:
     image: postgres:18-alpine
@@ -138,3 +140,12 @@ volumes:
   database-data:
   database-secrets:
   control-plane-data:
+
+# Do not let Docker choose a new gateway when this network is recreated.
+# Choose non-overlapping values per installation; see example.env for upgrade guidance.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${STANZA_NETWORK_SUBNET:-172.30.241.0/24}
+          gateway: ${STANZA_NETWORK_GATEWAY:-172.30.241.1}

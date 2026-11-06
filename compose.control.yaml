@@ -9,6 +9,8 @@
 # Agents must opt in separately. WARNING: HTTP exposes passwords, enrollment credentials,
 # sessions, deployment secrets and privileged commands to interception. Default false.
 # Retain ALL named volumes, including database-secrets and control-plane-data, for recovery.
+# Stable gateway for host reverse proxies; align Settings → Operational policy proxy trust.
+# Before upgrading, set STANZA_NETWORK_SUBNET/GATEWAY to the existing network's IPAM values.
 name: stanza
 services:
   initialize:
@@ -75,3 +77,12 @@ volumes:
   database-data:
   database-secrets:
   control-plane-data:
+
+# Do not let Docker choose a new gateway when this network is recreated.
+# Choose non-overlapping values per installation; see example.env for upgrade guidance.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${STANZA_NETWORK_SUBNET:-172.30.241.0/24}
+          gateway: ${STANZA_NETWORK_GATEWAY:-172.30.241.1}

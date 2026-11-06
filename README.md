@@ -11,7 +11,7 @@ For an existing installation, retain its Compose project name and data mounts wh
    ```bash
    cp example.env .env
    ```
-2. Edit `.env`: replace every `CHANGE_ME`, set a friendly `STANZA_AGENT_NAME`, and obtain `STANZA_DOCKER_GID` on the Agent host:
+2. Edit `.env`: replace every `CHANGE_ME`, check the network subnet/gateway for conflicts (see **Stable networking behind a reverse proxy** below), set a friendly `STANZA_AGENT_NAME`, and obtain `STANZA_DOCKER_GID` on the Agent host:
    ```bash
    stat -c '%g' /var/run/docker.sock
    ```
@@ -51,6 +51,22 @@ Accepted jobs keep phase checkpoints, final results and disconnect diagnostics u
 Small execution receipts and the original `request-ledger` remain on the Agent to prevent re-execution; they are never cleared to permit a retry. Journal writes use flush-and-rename replacement. A terminal result that cannot be saved is retained in memory and retried while the Agent remains alive. Agent readiness reports low free space, journal failures and unresolved jobs. The free-space minimum is configurable under **Settings → Operational policy**; output lost to a storage failure is explicitly marked incomplete, independently of the execution result.
 
 The Control Plane also retains disconnect diagnostics in PostgreSQL, visible on operation details. Use **Inspect and reconcile** on an uncertain operation or automation run: it checks execution evidence, refreshes container status and resolves both locks together. Active work, missing evidence and unfinished journals after an Agent crash keep locks held. A failed/interrupted apply requires explicit acknowledgement of inspected side effects; a confirmed interruption before apply can be retried as a new run. Timeouts never unlock unresolved work.
+
+### Stable networking behind a reverse proxy
+
+Both Control Plane Compose entrypoints pin the default network to `172.30.241.0/24`, gateway `172.30.241.1`, so Docker cannot silently select a different gateway when recreating it. Set `STANZA_NETWORK_SUBNET` and `STANZA_NETWORK_GATEWAY` in `.env` to a non-overlapping pair if these defaults conflict with host, VPN or Docker networks. Multiple installations on one Docker host need different subnets. Standalone Agent networks remain automatically allocated; they do not carry the Control Plane's inbound proxy traffic.
+
+**Before upgrading an existing installation**, inspect its current network (substitute its actual name):
+
+```bash
+docker network inspect <project>_default --format '{{json .IPAM.Config}}'
+```
+
+Put that **existing subnet and gateway** in `.env` before applying the updated Compose file. Do not copy the new defaults over an existing installation's network settings. Keep the same Compose project name, volumes and mounts. No database migration or proxy-policy rewrite is involved; customized trust settings remain unchanged.
+
+For host Nginx forwarding to the published loopback port, the Control Plane commonly sees the Docker gateway as the immediate peer. Confirm the actual source and trust only that address (for example `172.30.241.1/32`) in **Settings → Operational policy → Trusted proxy addresses and networks**. Nginx must supply `X-Forwarded-Proto: https` for HTTPS requests. A containerized proxy may appear as its own container IP instead: pin that proxy's IP on a dedicated network and trust that exact IP rather than assuming it is the gateway. Do not disable HTTPS enforcement or expand proxy trust to all addresses to work around a mismatch.
+
+If intentionally changing the subnet/gateway, schedule downtime and update proxy trust in the UI for the new source before the switch (temporarily retain the old source if necessary). Recreating the network may require `docker compose down` followed by `docker compose up -d`; use `-f compose.control.yaml` for the separate Control Plane entrypoint. **Never add `-v`**: preserve all named volumes and `./agent_data`. Other containers attached to that network must also be coordinated. Verify HTTPS Agent enrollment/reconnection afterward and remove any obsolete trusted address. A container restart alone does not apply network IPAM changes.
 
 ### Additional Agents
 

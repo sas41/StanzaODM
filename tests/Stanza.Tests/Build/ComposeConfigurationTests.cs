@@ -46,6 +46,56 @@ public sealed class ComposeConfigurationTests
     }
 
     [DockerComposeFact]
+    public async Task Control_plane_network_defaults_are_stable_for_unset_and_blank_configuration()
+    {
+        foreach (var manifest in new[] { "compose.yaml", "compose.control.yaml" })
+            foreach (var value in new string?[] { null, "" })
+            {
+                using var rendered = await RenderEnvironmentAtAsync(ArchitectureTests.RepositoryRoot(), null, null,
+                    new Dictionary<string, string?> { ["STANZA_NETWORK_SUBNET"] = value, ["STANZA_NETWORK_GATEWAY"] = value }, manifest);
+                var network = rendered.RootElement.GetProperty("networks").GetProperty("default");
+                var config = Assert.Single(network.GetProperty("ipam").GetProperty("config").EnumerateArray());
+                Assert.Equal("172.30.241.0/24", config.GetProperty("subnet").GetString());
+                Assert.Equal("172.30.241.1", config.GetProperty("gateway").GetString());
+                foreach (var service in rendered.RootElement.GetProperty("services").EnumerateObject())
+                    Assert.True(service.Value.GetProperty("networks").TryGetProperty("default", out _));
+            }
+        using var agent = await RenderAsync("compose.agent.yaml");
+        var agentNetwork = agent.RootElement.GetProperty("networks").GetProperty("default");
+        Assert.False(agentNetwork.TryGetProperty("ipam", out var ipam) && ipam.TryGetProperty("config", out _));
+    }
+
+    [DockerComposeFact]
+    public async Task Pinning_an_existing_network_preserves_service_configuration_and_persisted_data_locations()
+    {
+        using var directory = new AgentTestDirectory();
+        foreach (var manifest in new[] { "compose.yaml", "compose.control.yaml" })
+        {
+            // Model the previous auto-allocated network without changing any service or storage definitions.
+            var current = File.ReadAllText(Path.Combine(ArchitectureTests.RepositoryRoot(), manifest));
+            var previous = Path.Combine(directory.Path, manifest);
+            await File.WriteAllTextAsync(previous, current[..current.IndexOf("\nnetworks:\n", StringComparison.Ordinal)]);
+            var settings = new Dictionary<string, string?>
+            {
+                ["STANZA_NETWORK_SUBNET"] = "192.168.241.0/24",
+                ["STANZA_NETWORK_GATEWAY"] = "192.168.241.1"
+            };
+            using var baseline = await RenderEnvironmentAtAsync(ArchitectureTests.RepositoryRoot(), null, null, settings, previous);
+            using var upgraded = await RenderEnvironmentAtAsync(ArchitectureTests.RepositoryRoot(), null, null, settings, manifest);
+            // Use an explicit project directory for the baseline so relative Agent mounts and project names match.
+            foreach (var property in new[] { "services", "volumes", "name" })
+                Assert.True(System.Text.Json.Nodes.JsonNode.DeepEquals(
+                    System.Text.Json.Nodes.JsonNode.Parse(baseline.RootElement.GetProperty(property).GetRawText()),
+                    System.Text.Json.Nodes.JsonNode.Parse(upgraded.RootElement.GetProperty(property).GetRawText())), property);
+            var config = Assert.Single(upgraded.RootElement.GetProperty("networks").GetProperty("default").GetProperty("ipam").GetProperty("config").EnumerateArray());
+            Assert.Equal("192.168.241.0/24", config.GetProperty("subnet").GetString());
+            Assert.Equal("192.168.241.1", config.GetProperty("gateway").GetString());
+            var environment = upgraded.RootElement.GetProperty("services").GetProperty("control-plane").GetProperty("environment");
+            Assert.DoesNotContain(environment.EnumerateObject(), x => x.Name.Contains("TrustedProxy", StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    [DockerComposeFact]
     public async Task Friendly_name_uses_the_environment_override_and_otherwise_the_project_name()
     {
         using var named = await RenderEnvironmentAtAsync(ArchitectureTests.RepositoryRoot(), null, null,
@@ -206,6 +256,7 @@ public sealed class ComposeConfigurationTests
         var start = new ProcessStartInfo("docker") { WorkingDirectory = directory,
             UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
         start.ArgumentList.Add("compose");
+        start.ArgumentList.Add("--project-directory"); start.ArgumentList.Add(directory);
         foreach (var manifest in manifests) { start.ArgumentList.Add("-f"); start.ArgumentList.Add(manifest); }
         start.ArgumentList.Add("config"); start.ArgumentList.Add("--format"); start.ArgumentList.Add("json");
         start.Environment["STANZA_CONTROL_PLANE_URL"] = "https://stanza.example.invalid";
@@ -215,6 +266,8 @@ public sealed class ComposeConfigurationTests
         start.Environment["STANZA_AGENT_DATA_ROOT"] = "/tmp/opencode/must-not-be-used";
         start.Environment.Remove("COMPOSE_PROJECT_NAME");
         start.Environment.Remove("STANZA_AGENT_NAME");
+        start.Environment.Remove("STANZA_NETWORK_SUBNET");
+        start.Environment.Remove("STANZA_NETWORK_GATEWAY");
         start.Environment["STANZA_BIND_ADDRESS"] = "127.0.0.1";
         start.Environment["STANZA_HTTP_PORT"] = "8080";
         if (version is null) start.Environment.Remove("STANZA_VERSION");
