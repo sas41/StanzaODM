@@ -70,12 +70,11 @@ public sealed class ScriptActionTests
     }
 
     [Fact]
-    public void ScriptCannotBecomeAMultistepPlanOrAcceptCommandFields()
+    public void ScriptSupportsWorkflowVariablesButRejectsUnsafeCommandFields()
     {
         var plan = new ActionEditorModel { DeploymentId = Guid.NewGuid(), Script = "docker ps" }.ToPlan();
-        Assert.Throws<AutomationException>(() => AutomationRules.Validate(plan with { Steps = [.. plan.Steps, plan.Steps[0]] }));
-        Assert.Throws<AutomationException>(() => AutomationRules.Validate(plan with { Parameters = [new("command")] }));
-        Assert.Throws<AutomationException>(() => AutomationRules.Validate(plan with { DeploymentId = null }));
+        AutomationRules.Validate(plan with { Steps = [.. plan.Steps, plan.Steps[0]], Parameters = [new("message")] });
+        Assert.Throws<AutomationException>(() => AutomationRules.Validate(plan with { Parameters = [new("BASH_ENV")] }));
         var command = plan.Steps[0].Execution!;
         foreach (var invalid in new[] { command with { Executable = "/bin/sh" }, command with { Mode = "exec" },
             command with { Arguments = ["-c", "injected"] }, command with { Container = "arbitrary" },

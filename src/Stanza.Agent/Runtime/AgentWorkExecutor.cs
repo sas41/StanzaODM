@@ -564,6 +564,7 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
             await ReportAsync(request.Id, "Applying");
             if (request.Operation == "container-script") return await ContainerExecAsync(context);
             var environment = new Dictionary<string, string>(context.Environment);
+            foreach (var item in request.Execution!.Environment ?? new Dictionary<string, string>()) environment[item.Key] = item.Value;
             if (request.DeploymentId != Guid.Empty)
             {
                 environment["STANZA_DEPLOYMENT_ID"] = request.DeploymentId.ToString("N");
@@ -982,6 +983,8 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
     {
         var command = context.Request.Execution ?? throw new WorkFailure("execution_required");
         ValidateExecution(command);
+        if (context.Request.Operation == "container-script" && (command.Replicas is not null || command.Services is not null))
+            return await ContainerScriptsAsync(context, command);
         var container = command.Container;
         if (container is null)
         {
@@ -1019,15 +1022,56 @@ public sealed class AgentWorkExecutor(IProcessRunner runner, IOptions<AgentOptio
         return await DockerAsync(context, arguments, script ? "script_failed" : "runtime_failed", script ? command.Script : null);
     }
 
+    private async Task<string> ContainerScriptsAsync(WorkContext context, AgentExecution command)
+    {
+        var targets = new List<(string Service, string Id)>();
+        foreach (var service in command.Services ?? [command.Service!])
+        {
+            var listing = await DockerAsync(context, ["ps", "--all", "--quiet", "--filter",
+                "label=com.docker.compose.project=stanza-" + context.Request.DeploymentId.ToString("N"), "--filter",
+                "label=com.docker.compose.service=" + service, "--filter", "label=com.docker.compose.oneoff=False"]);
+            var candidates = listing.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+            if (candidates.Length > 1000) throw new WorkFailure("container_target_limit");
+            if (candidates.Length == 0) throw new WorkFailure("container_not_running");
+            var running = new List<string>();
+            foreach (var candidate in candidates)
+            {
+                if (candidate.Length != 64 || !candidate.All(Uri.IsHexDigit)) throw new WorkFailure("invalid_container");
+                using var inspect = JsonDocument.Parse(await DockerAsync(context, ["inspect", "--type", "container", "--format", "{{json .}}", "--", candidate]));
+                var root = inspect.RootElement;
+                var labels = root.GetProperty("Config").GetProperty("Labels");
+                if (labels.GetProperty("com.docker.compose.project").GetString() != "stanza-" + context.Request.DeploymentId.ToString("N") ||
+                    labels.GetProperty("com.docker.compose.service").GetString() != service ||
+                    labels.TryGetProperty("com.docker.compose.oneoff", out var oneoff) && !string.Equals(oneoff.GetString(), "False", StringComparison.OrdinalIgnoreCase) ||
+                    root.GetProperty("Id").GetString() != candidate) throw new WorkFailure("container_scope_denied");
+                if (root.GetProperty("State").GetProperty("Running").GetBoolean()) running.Add(candidate);
+            }
+            if (running.Count == 0) throw new WorkFailure("container_not_running");
+            targets.AddRange((command.Replicas == "all" ? running : running.Take(1)).Select(id => (service, id)));
+        }
+        // Resolve and validate every target before the first script side effect. Never re-resolve by name mid-step.
+        var output = new StringBuilder();
+        foreach (var target in targets)
+        {
+            await EmitAsync(context.Request.Id, "system", $"\nService '{target.Service}', container {target.Id}: starting script.\n");
+            List<string> arguments = ["exec", "--interactive", "--env", "BASH_ENV=/dev/null", "--env", "ENV=/dev/null"];
+            foreach (var item in command.Environment ?? new Dictionary<string, string>()) arguments.AddRange(["--env", item.Key + "=" + item.Value]);
+            arguments.AddRange(["--", target.Id, "/bin/bash", .. BashArguments]);
+            output.Append(await DockerAsync(context, arguments, "script_failed", command.Script));
+            await EmitAsync(context.Request.Id, "system", $"\nService '{target.Service}', container {target.Id}: script succeeded.\n");
+        }
+        return output.ToString();
+    }
+
     private static readonly string[] BashArguments = ["--noprofile", "--norc", "-e", "-o", "pipefail", "-s", "--"];
 
     private static void ValidateScriptExecution(string kind, AgentExecution? command)
     {
         if (command is null || command.Mode != "script" || command.Executable != "/bin/bash" ||
-            command.Arguments is not { Count: 0 } || command.Environment is { Count: > 0 } || command.User is not null ||
+            command.Arguments is not { Count: 0 } || !Stanza.Core.Automation.BashScriptRules.IsEnvironment(command.Environment) || command.User is not null ||
             command.WorkingDirectory is not null || command.Container is not null ||
             !Stanza.Core.Automation.BashScriptRules.IsValid(command.Script)) throw new WorkFailure("invalid_script");
-        if (kind == "container-script" ? !Stanza.Core.Automation.BashScriptRules.IsServiceName(command.Service) : command.Service is not null)
+        if (!Stanza.Core.Automation.BashScriptRules.IsTarget(kind, command))
             throw new WorkFailure("invalid_script_target");
         ValidateExecution(command);
     }

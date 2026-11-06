@@ -23,6 +23,8 @@ public sealed record AutomationLimits(int MaximumWebhookBytes = 65536, int Deliv
 
 public static partial class AutomationRules
 {
+    // A previously valid 64-KiB script can expand sixfold when encoded as JSON.
+    public const int MaximumPlanLength = 524288;
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true, MaxDepth = 24 };
     public static readonly string[] Operations = ["git-refresh", "validate", "build", "pull", "deploy", "start", "stop", "restart", "remove", "status", "logs"];
     // Git refresh uses the existing safe source-preparation/Compose-validation operation, not
@@ -45,7 +47,7 @@ public static partial class AutomationRules
 
     public static ActionPlan ParsePlan(string json)
     {
-        if (json.Length > 131072) throw new AutomationException("Action JSON must be at most 128 KiB.");
+        if (json.Length > MaximumPlanLength) throw new AutomationException("Action JSON must be at most 512 KiB.");
         try
         {
             var plan = JsonSerializer.Deserialize<ActionPlan>(json, Json) ?? throw new AutomationException("Supply an action plan.");
@@ -59,10 +61,6 @@ public static partial class AutomationRules
         if (plan.Steps is null || plan.Steps.Count is < 1 or > 50 || (plan.Parameters?.Count ?? 0) > 50)
             throw new AutomationException("Use 1–50 steps and at most 50 parameters.");
         if (!MatchesScope(plan)) throw new AutomationException("Deployment-scoped actions may target only their own deployment. Use Global scope for cross-deployment or host actions.");
-        if (plan.Steps.Any(s => s?.Kind is "docker-script" or "container-script") &&
-            (plan.Steps.Count != 1 || plan.Parameters?.Count > 0 || plan.DeploymentId != plan.Steps[0].DeploymentId ||
-                plan.DeploymentId is null && plan.Steps[0].Kind != "docker-script"))
-            throw new AutomationException("A script action contains one script and targets one deployment or Agent.");
         var parameters = plan.Parameters ?? [];
         if (parameters.Any(p => p is null || p.Name is null || !NamePattern().IsMatch(p.Name) || p.Type is not ("string" or "integer" or "boolean")))
             throw new AutomationException("Parameters require unique identifier names and string, integer, or boolean types.");
@@ -113,6 +111,10 @@ public static partial class AutomationRules
             if (step.Kind is "docker-script" or "container-script")
             {
                 ValidateScript(step.Kind, step.Execution);
+                if (parameters.Any(p => !BashScriptRules.IsVariableName(p.Name)))
+                    throw new AutomationException("Script variables must not override reserved shell or Stanza environment names.");
+                if (parameters.Select(p => p.Name).Concat(step.Execution!.Environment?.Keys ?? []).Distinct(StringComparer.Ordinal).Count() > 50)
+                    throw new AutomationException("Use at most 50 combined script variables and fixed environment entries.");
                 continue;
             }
             if (step.Execution?.Script is not null) throw new AutomationException("Scripts require a script action target.");
@@ -149,10 +151,10 @@ public static partial class AutomationRules
     {
         if (kind is not ("docker-script" or "container-script") || execution is null || execution.Mode != "script" ||
             execution.Executable != "/bin/bash" || execution.Arguments is not { Count: 0 } ||
-            !BashScriptRules.IsValid(execution.Script) || execution.Environment is { Count: > 0 } ||
+            !BashScriptRules.IsValid(execution.Script) || !BashScriptRules.IsEnvironment(execution.Environment) ||
             execution.Container is not null || execution.User is not null || execution.WorkingDirectory is not null)
             throw new AutomationException("Supply a Bash script of 1–65,536 characters without NUL characters.");
-        if (kind == "container-script" ? !BashScriptRules.IsServiceName(execution.Service) : execution.Service is not null)
+        if (!BashScriptRules.IsTarget(kind, execution))
             throw new AutomationException("Container scripts require a Compose service; Docker scripts do not select a container.");
     }
 
@@ -175,7 +177,10 @@ public static partial class AutomationRules
 
     public static ActionStep Resolve(ActionStep step, IReadOnlyDictionary<string, string> values) => step.Execution is null ? step : step with
     {
-        Execution = step.Execution with { Arguments = step.Execution.Arguments.Select(a =>
+        Execution = step.Execution with { Environment = step.Kind is "container-script" or "docker-script" && values.Count > 0
+            ? new Dictionary<string, string>((step.Execution.Environment ?? new Dictionary<string, string>()).Concat(values)
+                .GroupBy(p => p.Key, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.Last().Value), StringComparer.Ordinal)
+            : step.Execution.Environment, Arguments = step.Execution.Arguments.Select(a =>
             a.StartsWith("${", StringComparison.Ordinal) && a.EndsWith('}') ? values[a[2..^1]] : a).ToArray() }
     };
 

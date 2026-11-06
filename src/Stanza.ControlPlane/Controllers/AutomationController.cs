@@ -9,7 +9,7 @@ using Stanza.ControlPlane.Models;
 namespace Stanza.ControlPlane.Controllers;
 
 [Authorize, Route("automation"), ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
-[RequestSizeLimit(256 * 1024)]
+[RequestSizeLimit(2 * 1024 * 1024)]
 public sealed class AutomationController(AutomationService automation, AutomationAuthorization authorization, Sources.SourceService sources,
     Persistence.StanzaDbContext db, Security.AccessService access) : Controller
 {
@@ -52,7 +52,7 @@ public sealed class AutomationController(AutomationService automation, Automatio
             if (model.IsLegacy) ViewData["LegacyPlan"] = JsonSerializer.Serialize(existing.Plan, AutomationRules.Json);
             if (!ModelState.IsValid) return View(model);
             var saved = await automation.SaveActionAsync(Actor, model.Id, model.Revision, model.Name, model.Enabled,
-                existing.Definition?.Concurrency ?? model.Concurrency, model.ToPlan(existing.Plan), ct);
+                Request.Form.ContainsKey("Concurrency") ? model.Concurrency : existing.Definition?.Concurrency ?? model.Concurrency, model.ToPlan(existing.Plan), ct);
             if (configureSchedule) return RedirectToAction(nameof(ActionEditor), new { id = saved.Id });
             return RedirectToAction(nameof(Index));
         }

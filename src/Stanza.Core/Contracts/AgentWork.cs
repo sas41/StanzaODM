@@ -19,7 +19,9 @@ public sealed record AgentRegistryCredential(string Server, string Username, str
 public sealed record AgentExecution(string Executable, IReadOnlyList<string> Arguments, string? Service = null,
     string? Container = null, string? User = null, string? WorkingDirectory = null,
     IReadOnlyDictionary<string, string>? Environment = null, string Mode = "exec",
-    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? Script = null)
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? Script = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? Services = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? Replicas = null)
 {
     public override string ToString() => "AgentExecution { [REDACTED] }";
 }
@@ -77,6 +79,6 @@ public sealed record AgentWireMessage(string Type, Guid Id, AgentWorkRequest? Re
     AgentJobInspection? Job = null,
     AgentOutputRead? OutputRead = null, IReadOnlyList<AgentOutputChunk>? OutputBatch = null)
 {
-    public const int Version = 7;
+    public const int Version = 8;
     public override string ToString() => $"AgentWireMessage {{ Type = {Type}, Id = {Id}, Contents = [REDACTED] }}";
 }

@@ -22,6 +22,30 @@ namespace Stanza.Tests.Portability;
 public sealed class ParticipantIntegrationTests
 {
     [Fact]
+    public async Task MultistepContainerWorkflowRoundtripsVariablesTargetsAndReplicaPolicy()
+    {
+        await using var source = await Instance.Create("source-admin"); await using var destination = await Instance.Create("destination-admin");
+        var deployment = (await source.Drafts.CreateAsync(source.Root, "Workflow", source.Agent, "services: {app: {image: ubuntu}, worker: {image: ubuntu}}", "")).Id;
+        var plan = new ActionPlan([new("deploy", deployment), new("container-script", deployment,
+            Execution: new AgentExecution("/bin/bash", [], Mode: "script", Script: "./task \"$MODE\"\r\n", Services: ["app", "worker"], Replicas: "all"))],
+            [new("MODE", Default: "safe", Input: "dropdown", Options: ["safe", "full"])], deployment, "Run workflow", 19, "Proceed?", false);
+        await source.Automation.SaveActionAsync(source.Root, null, 0, "Workflow", true, "reject", plan);
+        var export = await source.Portability.ExportAsync(source.Root, new([deployment], ["automation"], true));
+        var bundle = PortableBundleValidator.Parse(export);
+        var mapping = new PortableImportMapping(bundle.Agents.ToDictionary(a => a.Id, _ => destination.Agent), new Dictionary<string, string>(),
+            new Dictionary<string, string> { ["account:source-admin"] = "destination-admin" });
+        var preview = await destination.Portability.PreviewAsync(destination.Root, export, mapping);
+        Assert.True(preview.CanApply, string.Join("; ", preview.Conflicts));
+        var result = await destination.Portability.ApplyAsync(destination.Root, preview.Id, preview.Fingerprint, true);
+        var imported = Assert.Single((await destination.Automation.ListAsync(destination.Root)).Actions);
+        Assert.False(imported.Enabled); Assert.Equal("reject", imported.Concurrency);
+        var saved = (await destination.Automation.ReadActionAsync(destination.Root, imported.Id)).Plan;
+        var expected = plan with { DeploymentId = Assert.Single(result.CreatedDeployments),
+            Steps = plan.Steps.Select(step => step with { DeploymentId = result.CreatedDeployments[0] }).ToArray() };
+        Assert.Equal(JsonSerializer.Serialize(expected, AutomationRules.Json), JsonSerializer.Serialize(saved, AutomationRules.Json));
+    }
+
+    [Fact]
     public async Task AgentDockerMaintenanceScriptRoundtripsWithoutADeploymentOrHostShellPrivilegeProfile()
     {
         await using var source = await Instance.Create("source-admin"); await using var destination = await Instance.Create("destination-admin");

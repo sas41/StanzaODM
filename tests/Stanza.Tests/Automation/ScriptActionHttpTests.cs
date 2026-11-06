@@ -39,7 +39,7 @@ public sealed class ScriptActionHttpTests
     [Theory]
     [InlineData("docker-script", "")]
     [InlineData("container-script", "app")]
-    public async Task NewEditorSavesScriptWithoutStepBuilderAndShowsButtonOnDeployment(string target, string service)
+    public async Task WorkflowEditorKeepsScriptSubmissionsCompatibleAndShowsButtonOnDeployment(string target, string service)
     {
         await using var original = new StanzaFactory(); await using var factory = AutomationHttpTests.Configure(original);
         using var client = factory.CreateClient(new() { AllowAutoRedirect = false }); Guid root, deployment;
@@ -50,9 +50,9 @@ public sealed class ScriptActionHttpTests
         }
         await AutomationHttpTests.Login(client, "owner");
         var editor = await client.GetStringAsync("/automation/actions/edit?deploymentId=" + deployment);
-        Assert.Contains("name=\"Script\"", editor); Assert.Contains("command=\"show-modal\"", editor);
-        Assert.DoesNotContain("data-add-step", editor); Assert.DoesNotContain("action-editor.js", editor);
-        Assert.DoesNotContain("name=\"PlanJson\"", editor);
+        Assert.Contains("data-workflow-editor", editor); Assert.Contains("data-workflow-add=\"step\"", editor);
+        Assert.Contains("action-editor.js", editor); Assert.Contains("name=\"PlanJson\"", editor);
+        Assert.DoesNotContain("Replace its steps", editor);
         var csrf = await AutomationHttpTests.Token(client, "/automation/actions/edit");
         const string script = "printf '%s' \"${HOME}\"\n";
         var saved = await client.PostAsync("/automation/actions/edit", AutomationHttpTests.Form(("__RequestVerificationToken", csrf),

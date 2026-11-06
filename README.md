@@ -44,7 +44,7 @@ docker compose logs --tail=100 initialize-agent agent
 
 Keep the database/Control Plane named volumes (including encryption keys and database credentials) and `./agent_data`. Do not use `down -v` as a troubleshooting step. Docker socket access grants substantial host control.
 
-Script actions, temporary-output archiving and read-only log streaming use Agent channel protocol 7; the database schema remains version 4. Upgrade the Control Plane and Agents to matching releases, retaining all existing volumes, encryption keys, identity files and request ledgers. Existing action definitions are not automatically converted. Drain active work before recreating an Agent: jobs survive network disconnects and Control Plane restarts, not destruction of the Agent process. An incompatible Agent fails closed until upgraded; no data reset is required.
+Workflow actions, temporary-output archiving and read-only log streaming use Agent channel protocol 8; the database schema remains version 4. Upgrade the Control Plane and Agents to matching releases, retaining all existing volumes, encryption keys, identity files and request ledgers. Existing action definitions are not automatically converted. Drain active work before recreating an Agent: jobs survive network disconnects and Control Plane restarts, not destruction of the Agent process. An incompatible Agent fails closed until upgraded; no data reset is required.
 
 Accepted jobs keep phase checkpoints, final results and disconnect diagnostics under `./agent_data/jobs-v1`. New jobs use journal format 2 and one temporary `<operation-id>.output` spool, not a file per output chunk. During execution, the CP reads that spool for live output and mid-run catch-up. After completion it archives the output and result in PostgreSQL, then acknowledges the save; only that acknowledgement permits Agent spool deletion. Failed transfers/database writes retain the spool, and reconnects/heartbeats retry archive acknowledgements. Future history reads use the CP database. Older format-1 chunk histories remain readable and are not silently discarded.
 
@@ -194,12 +194,16 @@ Compose is maintained in Stanza; Git supplies isolated application build inputs,
 4. Queue the guided move and monitor its operations: destination validation, source stop, destination deploy/health check, then placement update. Previews are warnings, not proof of host-wide conflict freedom.
 5. On success verify the destination application, then explicitly request source-container cleanup if desired. On failure inspect both Agents and the recovery record before repeating commands; do not assume rollback or delete source volumes. Use **Clone** instead to create a separate inactive deployment identity.
 
-## Script action buttons
+## Workflow action buttons
 
-Open a deployment and select **Add action**, or edit its actions alongside the deployment configuration. Choose a name and one execution target:
+Open a deployment and select **Add action**, or edit its actions alongside the deployment configuration. Choose a name, variables, and ordered steps. Supported script targets are:
 
 - **Host Docker:** Bash runs inside the ordinary non-root Agent, with Docker CLI access to its host daemon. No host shell, SSH or privileged profile is required. Select a deployment for its managed files, depth-one Git checkouts, `STANZA_PROJECT_NAME` and `STANZA_DEPLOYMENT_ID`; or select an Agent with no deployment for host-wide administration.
-- **Container:** select a Compose service and supply a Bash script. Exactly one matching container must already be running and contain `/bin/bash`; Stanza does not install it or start the container automatically.
+- **Container:** select one or more Compose services and supply a Bash script. Choose once per service (the default, appropriate for migrations) or every running replica. Targets must already be running and contain `/bin/bash`; Stanza does not install it or start containers automatically.
+
+Variables support text, dropdowns, Git branches, and image versions. Each action remembers its last submitted values independently. Branch variables bind to a configured Git source; build/deploy steps use a commit pinned for that run without modifying the deployment's default branch. Different deployments can select different branches. Build/deploy steps currently affect the whole deployment. Follow a deploy step with container scripts to run migrations or other commands against the newly deployed containers.
+
+Script variables are environment data: use quoted expansions such as `./task --mode "$MODE"`. Stanza never rewrites the script with submitted values. Shell/runtime-sensitive variable names are reserved. Do not use `eval` on untrusted values in authored scripts.
 
 For example, a Host Docker action can inspect only its deployment's containers:
 
@@ -215,6 +219,6 @@ The Agent image retains OpenSSH for SSH-capable Git commands in authored scripts
 
 Live container logs are read-only and use a bounded streaming subscription. Interactive PTYs, keystroke forwarding, resizing and xterm.js are no longer shipped. Log streaming does not create an execution workspace or durable job.
 
-Enabled actions appear as buttons on the deployment and overview for authorized users/groups. The script body is not exposed by the button. Detailed target/execution help is available from the `?` beside the script field.
+Enabled actions appear as buttons on the deployment and overview for authorized users/groups. The script body is not exposed by the button. Button label, ordering, overview visibility, confirmation, concurrency, step failure behavior, schedules and access assignments are configurable in the UI.
 
-Existing step-based actions, schedules and access assignments are retained unchanged. Their definitions can be inspected, and replacing their steps/inputs with a script requires explicit confirmation. Script edits preserve existing button labels, ordering, visibility and concurrency settings. Script actions also survive configuration JSON export/import; imports remain inactive until explicitly enabled.
+Existing step-based actions and single-script actions remain editable without replacement or data conversion. Schedules, access assignments, remembered inputs and customized metadata are retained. Workflow actions also survive configuration JSON export/import; imports remain inactive until explicitly enabled.

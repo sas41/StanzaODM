@@ -8,6 +8,19 @@ namespace Stanza.Tests.Agent;
 
 public sealed class ScriptExecutionTests
 {
+    [Fact]
+    public async Task ActualBashReceivesVariablesAsDataWithoutEvaluatingTheirContents()
+    {
+        using var root = new AgentTestDirectory();
+        const string value = "$(printf injected); 'quotes'\nsecond line";
+        var executor = new AgentWorkExecutor(new ProcessRunner(TimeProvider.System), Options.Create(new AgentOptions { PersistentDataRoot = root.Path }),
+            Options.Create(new DockerRuntimeOptions()), Options.Create(new HostExecutionOptions()));
+        var request = Request(script: "printf '%s' \"$MESSAGE\"");
+        var result = await executor.ExecuteAsync(request with { Execution = request.Execution! with {
+            Environment = new Dictionary<string, string> { ["MESSAGE"] = value } } });
+        Assert.True(result.Succeeded, result.Code); Assert.Equal(value, result.Output);
+    }
+
     [Theory]
     [InlineData("docker system prune --force")]
     [InlineData("docker image prune --all --force")]

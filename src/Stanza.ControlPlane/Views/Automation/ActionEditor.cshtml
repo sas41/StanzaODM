@@ -7,7 +7,7 @@
     <input asp-for="Id" type="hidden" /><input asp-for="Revision" type="hidden" />
     <div class="form-grid">
         <label class="field">Name<input asp-for="Name" /></label>
-        <label class="field">Deployment<select asp-for="DeploymentId"><option value="">Select deployment</option>
+        <label class="field">Deployment scope<select asp-for="DeploymentId"><option value="">Global / Agent maintenance</option>
         @foreach (var d in ViewData["ActionDeployments"] as IReadOnlyList<Stanza.ControlPlane.Sources.DeploymentSourceSummary> ?? [])
         { <option value="@d.DeploymentId">@d.Name</option> }
         </select></label>
@@ -16,11 +16,12 @@
     @foreach (var agent in ViewData["ActionAgents"] as IReadOnlyList<Stanza.ControlPlane.Sources.SourceAgentSummary> ?? [])
     { <option value="@agent.Id">@agent.Name</option> }
     </select></label>
-    @await Html.PartialAsync("_ScriptFields", Model)
+    @await Html.PartialAsync("_WorkflowFields", Model)
     <label class="check-field"><input asp-for="Enabled" /> Enabled</label>
     <div class="form-actions"><button class="primary" type="submit">Save action</button><a class="button subtle" href="/automation">Cancel</a></div>
 </form>
 </section>
+<script src="~/js/action-editor.js" defer asp-append-version="true"></script>
 @if (Model.Id is { } actionId)
 {
     <details class="panel"><summary>Periodic execution</summary>
@@ -28,4 +29,5 @@
         { @await Html.PartialAsync("_ActionSchedule", schedule) }
         @await Html.PartialAsync("_ActionSchedule", new Stanza.ControlPlane.Automation.AutomationSchedule { ActionId = actionId, Name = (Model.Name.Length > 91 ? Model.Name[..91] : Model.Name) + " schedule" })
     </details>
+    <a class="button" href="/automation/actions/@actionId/access">Manage action access</a>
 }

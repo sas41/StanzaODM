@@ -124,7 +124,7 @@ public sealed class DeploymentGuideTests
     public void Script_recipe_uses_ordinary_Agent_Docker_and_scopes_commands_to_the_deployment()
     {
         var readme = File.ReadAllText(Path.Combine(ArchitectureTests.RepositoryRoot(), "README.md"));
-        const string heading = "## Script action buttons";
+        const string heading = "## Workflow action buttons";
         Assert.Contains(heading, readme);
         var recipe = readme[readme.IndexOf(heading, StringComparison.Ordinal)..].Replace("\n   ", "\n", StringComparison.Ordinal);
         var script = Block(recipe, "bash", "docker ps --all --filter");
@@ -136,6 +136,9 @@ public sealed class DeploymentGuideTests
         Assert.Contains("standard input", recipe);
         Assert.Contains("/bin/bash", recipe);
         Assert.Contains("not automatically converted", readme);
+        Assert.Contains("Each action remembers its last submitted values independently", recipe);
+        Assert.Contains("once per service", recipe);
+        Assert.Contains("every running replica", recipe);
     }
 
     private static string Block(string readme, string language, string content) =>

@@ -67,13 +67,26 @@ public sealed class AgentDockerIntegrationTests
             Assert.Equal(0, containers.ExitCode);
             var ids = containers.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             Assert.Equal(2, ids.Length);
+            const string variable = "literal;$(printf should-not-execute) 'quotes'";
+            var workflow = new AgentWorkRequest(Guid.NewGuid(), deployment, "container-script", [], [],
+                new("/bin/bash", [], Mode: "script", Script: "printf '%s' \"$MESSAGE\" > /workflow-variable.txt\n", Services: ["app"], Replicas: "all",
+                    Environment: new Dictionary<string, string> { ["MESSAGE"] = variable }), Policy: new(TimeoutSeconds: 30));
+            var scripted = await executor.ExecuteAsync(workflow);
+            Assert.True(scripted.Succeeded, scripted.Code);
+            var once = await executor.ExecuteAsync(workflow with { Id = Guid.NewGuid(), Execution = workflow.Execution! with { Replicas = "once", Script = "touch /once-per-service\n" } });
+            Assert.True(once.Succeeded, once.Code);
+            var onceCount = 0;
             foreach (var id in ids)
             {
                 var actual = await Docker("inspect", "--format", "{{.Image}}", "--", id);
                 Assert.Equal(0, actual.ExitCode); Assert.Equal(second.ResolvedImages["app:image-id"], actual.StandardOutput.Trim());
                 var release = await Docker("exec", id, "/usr/bin/cat", "/release.txt");
                 Assert.Equal(0, release.ExitCode); Assert.EndsWith(":second", release.StandardOutput);
+                var environmentValue = await Docker("exec", id, "/usr/bin/cat", "/workflow-variable.txt");
+                Assert.Equal(0, environmentValue.ExitCode); Assert.Equal(variable, environmentValue.StandardOutput);
+                if ((await Docker("exec", id, "/usr/bin/test", "-f", "/once-per-service")).ExitCode == 0) onceCount++;
             }
+            Assert.Equal(1, onceCount);
             var absent = await Docker("ps", "--all", "--quiet", "--filter", "label=com.docker.compose.project=" + project, "--filter", "label=com.docker.compose.service=zero");
             Assert.Equal(0, absent.ExitCode); Assert.Empty(absent.StandardOutput.Trim());
             Assert.NotEqual(0, (await Docker("image", "inspect", "--", project + "-inactive")).ExitCode);

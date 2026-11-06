@@ -1,0 +1,28 @@
+@model ActionEditorModel
+@{
+    var scope = ViewData["DeploymentId"] as Guid? ?? Model.DeploymentId;
+    var plan = Model.PlanJson ?? System.Text.Json.JsonSerializer.Serialize(new Stanza.ControlPlane.Automation.ActionPlan(
+        [new(Model.AgentId.HasValue ? "docker-script" : "container-script", scope, Model.AgentId,
+            Execution: new Stanza.Core.Contracts.AgentExecution("/bin/bash", [], Mode: "script", Script: "",
+                Services: Model.AgentId.HasValue ? null : ["app"], Replicas: Model.AgentId.HasValue ? null : "once"))], DeploymentId: scope), Stanza.ControlPlane.Automation.AutomationRules.Json);
+}
+<div data-workflow-editor data-deployment="@scope" data-agent="@Model.AgentId">
+    <template data-workflow-deployments><option value="">Select deployment</option>
+    @foreach (var d in ViewData["ActionDeployments"] as IReadOnlyList<Stanza.ControlPlane.Sources.DeploymentSourceSummary> ?? [])
+    { <option value="@d.DeploymentId">@d.Name</option> }
+    </template>
+    <template data-workflow-sources><option value="">Select Git source</option>
+    @foreach (var d in ViewData["ActionDeployments"] as IReadOnlyList<Stanza.ControlPlane.Sources.DeploymentSourceSummary> ?? [])
+    { foreach (var source in d.Git) { <option value="@source.Destination" data-deployment="@d.DeploymentId">@d.Name / @source.Destination</option> } }
+    </template>
+    <p class="field-help">Variables are remembered separately for this action. Branch selections apply to this run, not the deployment's default Git settings. Build and deploy steps affect the whole deployment. Selecting a deployment scope retargets all steps to that deployment; review steps before saving.</p>
+    <label class="field">Overlapping runs<select name="Concurrency"><option value="queue" selected="@(Model.Concurrency == "queue")">Queue</option><option value="reject" selected="@(Model.Concurrency == "reject")">Reject</option></select></label>
+    <div data-workflow-ui hidden>
+        <div data-workflow-metadata></div>
+        <div class="panel-heading"><h3>Variables</h3><button type="button" data-workflow-add="variable">Add variable</button></div><div data-workflow-variables></div>
+        <div class="panel-heading"><h3>Steps</h3><button type="button" data-workflow-add="step">Add step</button></div><div data-workflow-steps></div>
+        <p data-workflow-error class="validation" role="alert"></p>
+    </div>
+    <details data-workflow-json><summary>Action plan JSON / no-JavaScript editor</summary><textarea name="PlanJson" rows="16" maxlength="@Stanza.ControlPlane.Automation.AutomationRules.MaximumPlanLength" spellcheck="false">@plan</textarea></details>
+    <p class="field-help">Container scripts require /bin/bash in the target image. Choose once per service for migrations, or every running replica for per-container work. Missing running targets fail; scripts never start containers automatically. Steps run sequentially; cancellation cannot undo changes.</p>
+</div>

@@ -17,7 +17,8 @@ namespace Stanza.ControlPlane.Controllers;
 [DisableRequestSizeLimit]
 [RequestFormLimits(ValueLengthLimit = int.MaxValue, MultipartBodyLengthLimit = long.MaxValue)]
 public sealed class DeploymentsController(DeploymentDraftService drafts, IOperationService? operations = null,
-    DeploymentRuntimeStatusService? runtimeStatus = null, Automation.AutomationService? automation = null, DeploymentLockService? locks = null) : Controller
+    DeploymentRuntimeStatusService? runtimeStatus = null, Automation.AutomationService? automation = null, DeploymentLockService? locks = null,
+    SourceService? sources = null) : Controller
 {
     private Guid ActorId => Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : Guid.Empty;
 
@@ -141,6 +142,7 @@ public sealed class DeploymentsController(DeploymentDraftService drafts, IOperat
     private async Task LoadActionsAsync(EditDeploymentModel model, CancellationToken ct)
     {
         if (automation is null) return;
+        if (sources is not null) ViewData["ActionDeployments"] = await sources.ListDeploymentsAsync(ActorId, ct);
         model.CanCreateAction = await automation.CanManageActionAsync(ActorId, null, ct);
         model.Actions = (await automation.ScopedActionsAsync(ActorId, model.Id, ct)).Select(x => ActionEditorModel.From(x.Definition, x.Plan)).ToArray();
     }
@@ -152,6 +154,7 @@ public sealed class DeploymentsController(DeploymentDraftService drafts, IOperat
         try
         {
             await drafts.ReadAsync(ActorId, id, ct: ct);
+            if (sources is not null) ViewData["ActionDeployments"] = await sources.ListDeploymentsAsync(ActorId, ct);
             if (!await automation.CanManageActionAsync(ActorId, model.Id, ct)) return Forbid();
             var existing = model.Id is { } actionId ? await automation.ReadActionAsync(ActorId, actionId, ct) : default;
             if (existing.Plan is not null && existing.Plan.DeploymentId != id) return BadRequest("This action belongs to another scope.");
@@ -164,7 +167,8 @@ public sealed class DeploymentsController(DeploymentDraftService drafts, IOperat
             if (plan.DeploymentId != id) return BadRequest("Actions edited here must remain in this deployment scope. Use the full action editor to change scope.");
             if (ModelState.IsValid)
             {
-                var saved = await automation.SaveActionAsync(ActorId, model.Id, model.Revision, model.Name, model.Enabled, existing.Definition?.Concurrency ?? model.Concurrency, plan, ct);
+                var saved = await automation.SaveActionAsync(ActorId, model.Id, model.Revision, model.Name, model.Enabled,
+                    Request.Form.ContainsKey("Concurrency") ? model.Concurrency : existing.Definition?.Concurrency ?? model.Concurrency, plan, ct);
                 ModelState.Clear(); model.Id = saved.Id; model.Revision = saved.Revision;
                 model.IsLegacy = !ActionEditorModel.IsScript(plan);
                 ViewData["ActionSaved"] = true;

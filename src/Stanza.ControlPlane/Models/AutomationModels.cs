@@ -10,7 +10,7 @@ public sealed class ActionEditorModel
     [Required, StringLength(100)] public string Name { get; set; } = "";
     public bool Enabled { get; set; }
     [Required] public string Concurrency { get; set; } = "queue";
-    [StringLength(131072)] public string? PlanJson { get; set; }
+    [StringLength(AutomationRules.MaximumPlanLength)] public string? PlanJson { get; set; }
     public Guid? DeploymentId { get; set; }
     public Guid? AgentId { get; set; }
     public string Target { get; set; } = "docker-script";
@@ -32,13 +32,15 @@ public sealed class ActionEditorModel
         Target = IsScript(plan) ? plan.Steps[0].Kind : "docker-script",
         Script = IsScript(plan) ? plan.Steps[0].Execution?.Script : null,
         Service = IsScript(plan) ? plan.Steps[0].Execution?.Service : null,
-        PlanJson = IsScript(plan) ? null : System.Text.Json.JsonSerializer.Serialize(plan, AutomationRules.Json)
+        PlanJson = System.Text.Json.JsonSerializer.Serialize(plan, AutomationRules.Json)
     };
 
     public ActionPlan ToPlan(ActionPlan? existing = null)
     {
         // Keep explicit legacy API submissions compatible; the script editor never posts plan JSON.
-        if (!string.IsNullOrEmpty(PlanJson) && string.IsNullOrEmpty(Script)) return AutomationRules.ParsePlan(PlanJson);
+        if (!string.IsNullOrEmpty(PlanJson) && (string.IsNullOrEmpty(Script) ||
+            existing is not null && IsScript(existing) && Script == existing.Steps[0].Execution?.Script))
+            return AutomationRules.ParsePlan(PlanJson);
         if (existing is not null && !IsScript(existing) && !ReplaceLegacy)
             throw new AutomationException("Confirm replacing the existing action with a script. Its steps and inputs will be replaced.");
         if (DeploymentId == Guid.Empty || AgentId == Guid.Empty || (DeploymentId.HasValue == AgentId.HasValue) || Target == "container-script" && AgentId.HasValue)
@@ -51,7 +53,7 @@ public sealed class ActionEditorModel
         AutomationRules.ValidateScript(Target, execution);
         var step = new ActionStep(Target, DeploymentId, AgentId, execution);
         var plan = existing is not null
-            ? existing with { Steps = [step], Parameters = null, DeploymentId = DeploymentId, Confirmation = Confirmation }
+            ? existing with { Steps = [step], Parameters = IsScript(existing) ? existing.Parameters : null, DeploymentId = DeploymentId, Confirmation = Confirmation }
             : new ActionPlan([step], DeploymentId: DeploymentId, Confirmation: Confirmation);
         AutomationRules.Validate(plan);
         return plan;

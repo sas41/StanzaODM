@@ -63,13 +63,9 @@ public sealed class AutomationBrowserTests
             Guid deployment;
             using (var seed = factory.Services.CreateScope())
                 deployment = (await seed.ServiceProvider.GetRequiredService<DeploymentDraftService>().CreateAsync(owner, "Automation demo", null, "services: {}", "")).Id;
-            await chrome.Go(address, "/automation/actions/edit", "!!document.querySelector('#script-new')");
-            Assert.True((await chrome.Eval("!document.querySelector('[data-add-step]') && !document.querySelector('#PlanJson') && !document.querySelector('dialog').open")).GetBoolean());
-            await chrome.Eval("document.querySelector('.help-button').click(); true");
-            await chrome.Wait("document.querySelector('dialog').open");
-            await chrome.Eval("document.querySelector('dialog button').click(); true");
-            await chrome.Wait("!document.querySelector('dialog').open");
-            await chrome.Eval($"document.querySelector('#Name').value='Browser script action'; document.querySelector('#DeploymentId').value='{deployment}'; document.querySelector('#script-new').value='docker ps'; document.querySelector('#Enabled').checked=true; setTimeout(()=>document.querySelector('form[action=\"/automation/actions/edit\"]').requestSubmit(),0); true");
+            await chrome.Go(address, "/automation/actions/edit", "!!document.querySelector('[data-workflow-script]')");
+            Assert.True((await chrome.Eval("!!document.querySelector('[data-workflow-add=step]') && !!document.querySelector('[name=PlanJson]')")).GetBoolean());
+            await chrome.Eval($"document.querySelector('#Name').value='Browser script action'; document.querySelector('#DeploymentId').value='{deployment}'; document.querySelector('[data-workflow-script]').value='echo ready'; document.querySelector('#Enabled').checked=true; setTimeout(()=>document.querySelector('form[action=\"/automation/actions/edit\"]').requestSubmit(),0); true");
             await chrome.Wait("location.pathname==='/automation' && document.body.textContent.includes('Browser script action')");
             await chrome.Go(address, "/automation/schedules/edit", "!!document.querySelector('#Expression')");
             await chrome.Eval($"document.querySelector('#Name').value='Browser durable schedule'; document.querySelector('#DeploymentId').value='{deployment}'; document.querySelector('#Expression').value='*/5 * * * *'; document.querySelector('#TimeZone').value='UTC'; document.querySelector('button[hx-post]').click(); true");
@@ -109,8 +105,8 @@ public sealed class AutomationBrowserTests
                     [new("branch", Default: "main", Input: "branch", Source: "src")], dev, "Deploy Latest"));
                 qa = (await seed.ServiceProvider.GetRequiredService<AccountService>().CreateAsync(owner, "qa", "a-secure-password-123", AccountRole.User)).Id;
             }
-            await chrome.Go(address, "/automation/actions/edit", "!!document.querySelector('#script-new')");
-            await chrome.Eval($"document.querySelector('#Name').value='Dev script'; document.querySelector('#Enabled').checked=true; document.querySelector('#DeploymentId').value='{dev}'; document.querySelector('#target-new').value='container-script'; document.querySelector('#service-new').value='app'; document.querySelector('#script-new').value='echo ready'; document.querySelector('form[action=\"/automation/actions/edit\"]').requestSubmit(); true");
+            await chrome.Go(address, "/automation/actions/edit", "!!document.querySelector('[data-workflow-script]')");
+            await chrome.Eval($"document.querySelector('#Name').value='Dev script'; document.querySelector('#Enabled').checked=true; document.querySelector('#DeploymentId').value='{dev}'; document.querySelector('[data-workflow-services]').value='app'; document.querySelector('[data-workflow-script]').value='echo ready'; document.querySelector('form[action=\"/automation/actions/edit\"]').requestSubmit(); true");
             await chrome.Wait("location.pathname==='/automation' && document.body.textContent.includes('Dev script')");
             await chrome.Go(address, "/", "document.body.textContent.includes('local-agent-1 Deployments')");
             await chrome.Wait("!!window.htmx && document.readyState==='complete'");

@@ -133,11 +133,11 @@ public sealed class UiBrowserTests
             }
         }
         await browser.GoAsync($"/deployments/{deployment}/edit");
-        await browser.WaitAsync("document.querySelectorAll('[data-deployment-action] textarea[name=Script]').length>0");
+        await browser.WaitAsync("document.querySelectorAll('[data-deployment-action] [data-workflow-script]').length>0");
         await browser.EvaluateAsync("document.querySelector('[name=ComposeText]').value='unsaved compose edit'; true");
         for (var revision = 2; revision <= 3; revision++)
         {
-            await browser.EvaluateAsync($"(()=>{{const form=document.querySelector('[data-deployment-action] input[name=Id][value=\"{action}\"]').closest('form');form.querySelector('[name=Name]').value='Dev deployment edited {revision}';const replace=form.querySelector('[name=ReplaceLegacy]');if(replace) replace.checked=true;form.querySelector('[name=Target]').value='container-script';form.querySelector('[name=Service]').value='app';form.querySelector('[name=Script]').value='echo revision-{revision}';form.requestSubmit();return true;}})()");
+            await browser.EvaluateAsync($"(()=>{{const form=document.querySelector('[data-deployment-action] input[name=Id][value=\"{action}\"]').closest('form');form.querySelector('[name=Name]').value='Dev deployment edited {revision}';if(form.querySelectorAll('[data-workflow-steps] > section').length===1) form.querySelector('[data-workflow-add=step]').click();const step=form.querySelector('[data-workflow-steps] > section:last-child');step.querySelector('[data-workflow-services]').value='app';step.querySelector('[data-workflow-script]').value='echo revision-{revision}';form.requestSubmit();return true;}})()");
             await browser.WaitAsync($"document.querySelector('[data-deployment-action] input[name=Id][value=\"{action}\"]')?.closest('form').querySelector('[name=Revision]').value==='{revision}'");
             Assert.Equal("unsaved compose edit", (await browser.EvaluateAsync("document.querySelector('[name=ComposeText]').value")).GetString());
         }
@@ -145,7 +145,10 @@ public sealed class UiBrowserTests
         var changed = await check.ServiceProvider.GetRequiredService<StanzaDbContext>().Set<ActionDefinition>().AsNoTracking().SingleAsync(x => x.Id == action);
         Assert.Equal("Dev deployment edited 3", changed.Name);
         var changedPlan = check.ServiceProvider.GetRequiredService<AutomationService>().Unprotect<ActionPlan>(changed.ProtectedSteps);
-        Assert.Equal("echo revision-3", Assert.Single(changedPlan.Steps).Execution!.Script);
+        Assert.Equal(2, changedPlan.Steps.Count);
+        Assert.Equal("deploy", changedPlan.Steps[0].Kind);
+        Assert.Equal("echo revision-3", changedPlan.Steps[1].Execution!.Script);
+        Assert.Equal("branch", Assert.Single(changedPlan.Parameters!).Name);
         Assert.Equal("Deploy Latest", changedPlan.ButtonLabel);
         Assert.Equal(1, (await check.ServiceProvider.GetRequiredService<StanzaDbContext>().Set<DeploymentDraftEntity>().AsNoTracking().SingleAsync(x => x.Id == deployment)).Revision);
     }
